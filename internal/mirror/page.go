@@ -40,8 +40,9 @@ const pageHTML = `<!doctype html>
      rules scoped to ".monaco-workbench <descendant>" (input box box-sizing,
      border-radius, background, the --vscode-* palette vars, pill text colors,
      etc.) match the extracted subtree. It is the direct parent of the extracted
-     .interactive-session root, so pane.firstElementChild stays .interactive-session
-     and the DOM-path click mapping is unaffected. -->
+     pane root (the full chat pane container: title bar + session list +
+     conversation + input), so pane.firstElementChild is the pane root and the
+     DOM-path click mapping is unaffected. -->
 <div id="pane" class="monaco-workbench" tabindex="0"></div>
 <script>
 (function () {
@@ -132,14 +133,21 @@ const pageHTML = `<!doctype html>
   }
 
   // Best-effort restore of the pane's inner scroll position after a re-render.
-  // The chat history's real scroll container is the monaco-list's
+  // The active view's real scroll container is a monaco-list's
   // .monaco-scrollable-element (a DESCENDANT of the pane root with
   // overflow:hidden, scrolled programmatically via scrollTop — the same
-  // element the server measures), so target it directly; fall back to the
-  // first overflow:auto/scroll descendant for other pane shapes.
+  // element the server measures). The pane holds two such lists (chat history
+  // and agent-sessions list); the one with the most scrollable room is the
+  // active one, matching the server's choice. Fall back to the first
+  // overflow:auto/scroll descendant for other pane shapes.
   function restoreScroll(m) {
     if (!m.scroll) return;
-    var sc = pane.querySelector('.interactive-list .monaco-scrollable-element');
+    var sc = null, best = 0;
+    var cands = pane.querySelectorAll('.monaco-scrollable-element');
+    for (var i = 0; i < cands.length; i++) {
+      var room = (cands[i].scrollHeight || 0) - (cands[i].clientHeight || 0);
+      if (room > best) { best = room; sc = cands[i]; }
+    }
     if (sc) {
       sc.scrollLeft = m.scroll.left;
       sc.scrollTop = m.scroll.top;

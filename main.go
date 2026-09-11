@@ -153,11 +153,14 @@ func defaultLogPath() string {
 }
 
 // defaultPaneSelectors are the candidate Copilot pane root selectors, tried
-// in priority order: the full chat session (conversation + input) first, then
-// other full-pane containers, then the chat input surface (the always-present
-// chat widget). Override with -pane if your VS Code version uses different
-// markup.
-const defaultPaneSelectors = ".interactive-session,.chat-view-part,.chat-view,.chat-editor,.interactive-input-part,.chat-input-container"
+// in priority order. The full chat pane container comes first: it spans both
+// the chat-view title bar (back button / session title / sidebar toggle, so
+// the mirror can navigate back to the session picker) and the agent-sessions
+// list (the session-selection view shown when the user goes back), neither of
+// which is inside .interactive-session. The narrower chat-session and input
+// selectors remain as fallbacks. Override with -pane if your VS Code version
+// uses different markup.
+const defaultPaneSelectors = ".voice-agent-controls-wrapper,.pane.chat-viewpane-container,.pane-body.chat-viewpane,.interactive-session,.chat-view-part,.chat-view,.chat-editor,.interactive-input-part,.chat-input-container"
 
 // splitSelectors splits a comma-separated selector list, trimming blanks.
 func splitSelectors(s string) []string {

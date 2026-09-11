@@ -112,15 +112,24 @@ const htmlExpr = `(selectors) => {
 
 // scrollContainerJS is spliced into both htmlExpr and fpExpr (they are
 // evaluated as separate programs, so the helper must be inlined). It locates
-// the element that actually scrolls the chat history: the message list is a
-// monaco-list whose scroll container (.monaco-scrollable-element) is a
-// DESCENDANT of the pane root with overflow:hidden (Monaco scrolls it
+// the element that actually scrolls the active view: monaco-lists scroll
+// their .monaco-scrollable-element DESCENDANT (overflow:hidden, scrolled
 // programmatically via scrollTop), so a "walk up for overflow:auto/scroll"
-// heuristic never finds it. The ancestor walk remains as a fallback for
-// other pane shapes.
+// heuristic never finds it. The pane root contains TWO such lists — the chat
+// message list and the agent-sessions list (session-selection view) — and
+// exactly one of them is expanded at a time, so the one with the most
+// scrollable room (scrollHeight - clientHeight) is the active one. The
+// ancestor walk remains as a fallback for other pane shapes.
 const scrollContainerJS = `
   let sc = null;
-  try { sc = el.querySelector('.interactive-list .monaco-scrollable-element'); } catch (e) {}
+  try {
+    const cands = el.querySelectorAll('.monaco-scrollable-element');
+    let best = 0;
+    for (const c of cands) {
+      const room = (c.scrollHeight || 0) - (c.clientHeight || 0);
+      if (room > best) { best = room; sc = c; }
+    }
+  } catch (e) {}
   if (!sc) {
     sc = el;
     while (sc && sc !== document.documentElement) {
