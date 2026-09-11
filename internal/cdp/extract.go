@@ -64,12 +64,7 @@ const htmlExpr = `(selectors) => {
   }
   if (!el) return { err: 'pane not found' };
   const r = el.getBoundingClientRect();
-  let sc = el;
-  while (sc && sc !== document.documentElement) {
-    const ov = getComputedStyle(sc).overflowY;
-    if ((ov === 'auto' || ov === 'scroll') && sc.scrollHeight > sc.clientHeight) break;
-    sc = sc.parentElement;
-  }
+` + scrollContainerJS + `
   let cssFP = '';
   try {
     cssFP = document.styleSheets.length + ':' +
@@ -115,6 +110,27 @@ const htmlExpr = `(selectors) => {
   };
 }`
 
+// scrollContainerJS is spliced into both htmlExpr and fpExpr (they are
+// evaluated as separate programs, so the helper must be inlined). It locates
+// the element that actually scrolls the chat history: the message list is a
+// monaco-list whose scroll container (.monaco-scrollable-element) is a
+// DESCENDANT of the pane root with overflow:hidden (Monaco scrolls it
+// programmatically via scrollTop), so a "walk up for overflow:auto/scroll"
+// heuristic never finds it. The ancestor walk remains as a fallback for
+// other pane shapes.
+const scrollContainerJS = `
+  let sc = null;
+  try { sc = el.querySelector('.interactive-list .monaco-scrollable-element'); } catch (e) {}
+  if (!sc) {
+    sc = el;
+    while (sc && sc !== document.documentElement) {
+      const ov = getComputedStyle(sc).overflowY;
+      if ((ov === 'auto' || ov === 'scroll') && sc.scrollHeight > sc.clientHeight) break;
+      sc = sc.parentElement;
+    }
+  }
+`
+
 // fpExpr is the cheap per-poll probe: it returns a content fingerprint, a
 // CSS fingerprint, and the layout metadata (bounding box + scroll) without
 // dumping the pane's outerHTML.
@@ -126,12 +142,7 @@ const fpExpr = `(selectors) => {
   }
   if (!el) return { err: 'pane not found' };
   const r = el.getBoundingClientRect();
-  let sc = el;
-  while (sc && sc !== document.documentElement) {
-    const ov = getComputedStyle(sc).overflowY;
-    if ((ov === 'auto' || ov === 'scroll') && sc.scrollHeight > sc.clientHeight) break;
-    sc = sc.parentElement;
-  }
+` + scrollContainerJS + `
   let cssFP = '';
   try {
     cssFP = document.styleSheets.length + ':' +

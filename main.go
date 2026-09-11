@@ -26,7 +26,7 @@ func main() {
 	cooldown := flag.Duration("cooldown", 30*time.Second, "per-model load cooldown")
 	logPath := flag.String("log", defaultLogPath(), "log file path")
 	verbose := flag.Bool("verbose", false, "enable debug logging")
-	web := flag.String("web", "127.0.0.1:9527", "mirror web address (empty to disable)")
+	web := flag.String("web", "0.0.0.0:9527", "mirror web address (empty to disable)")
 	pane := flag.String("pane", defaultPaneSelectors, "comma-separated candidate selectors for the Copilot pane root")
 	window := flag.String("window", "", "mirror this window (title substring; empty = first window)")
 	flag.Parse()

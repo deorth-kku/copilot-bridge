@@ -15,7 +15,9 @@ import (
 	"encoding/hex"
 	"encoding/json/v2"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -116,6 +118,21 @@ type client struct {
 	done chan struct{}
 }
 
+// lanIP returns the machine's primary LAN IPv4 address (via the route to a
+// public endpoint; no packets are sent). Empty string on failure.
+func lanIP() string {
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return ""
+	}
+	return addr.IP.String()
+}
+
 // New creates a Mirror. addr is the web bind address; selectors are the
 // candidate pane root selectors (tried in order); window is a title
 // substring used to pick the VS Code window (empty = first window).
@@ -146,6 +163,12 @@ func (m *Mirror) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
 		m.log.Info("mirror web server listening", "addr", m.addr)
+		if h, _, err := net.SplitHostPort(m.addr); err == nil && (h == "0.0.0.0" || h == "::" || h == "") {
+			if ip := lanIP(); ip != "" {
+				port := m.addr[strings.LastIndexByte(m.addr, ':')+1:]
+				m.log.Info("mirror reachable from LAN at", "url", "http://"+ip+":"+port)
+			}
+		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
