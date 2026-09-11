@@ -17,6 +17,7 @@ import (
 	"vscode-load-llama/internal/cdp"
 	"vscode-load-llama/internal/config"
 	"vscode-load-llama/internal/loader"
+	"vscode-load-llama/internal/mirror"
 )
 
 func main() {
@@ -25,16 +26,19 @@ func main() {
 	cooldown := flag.Duration("cooldown", 30*time.Second, "per-model load cooldown")
 	logPath := flag.String("log", defaultLogPath(), "log file path")
 	verbose := flag.Bool("verbose", false, "enable debug logging")
+	web := flag.String("web", "127.0.0.1:9527", "mirror web address (empty to disable)")
+	pane := flag.String("pane", defaultPaneSelectors, "comma-separated candidate selectors for the Copilot pane root")
+	window := flag.String("window", "", "mirror this window (title substring; empty = first window)")
 	flag.Parse()
 
-	if err := run(*cdpAddr, *settingsPath, *cooldown, *logPath, *verbose); err != nil {
+	if err := run(*cdpAddr, *settingsPath, *cooldown, *logPath, *verbose, *web, *pane, *window); err != nil {
 		// GUI builds have no console; the error is also in the log file
 		// (if it could be opened).
 		fmt.Fprintln(os.Stderr, err)
 	}
 }
 
-func run(cdpAddr, settingsPath string, cooldown time.Duration, logPath string, verbose bool) error {
+func run(cdpAddr, settingsPath string, cooldown time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter string) error {
 	if dir := filepath.Dir(logPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create log dir: %w", err)
@@ -75,6 +79,16 @@ func run(cdpAddr, settingsPath string, cooldown time.Duration, logPath string, v
 	events := make(chan cdp.Event, 256)
 	disc := cdp.NewDiscovery(cdpAddr, events, log)
 	go disc.Run(ctx)
+
+	// Optional: forward the Copilot pane to a browser page.
+	if webAddr != "" {
+		mir := mirror.New(disc, log, webAddr, splitSelectors(paneSel), windowFilter)
+		go func() {
+			if err := mir.Run(ctx); err != nil {
+				log.Error("mirror server", "err", err)
+			}
+		}()
+	}
 
 	log.Info("monitoring", "cdp", cdpAddr, "cooldown", cooldown.String())
 
@@ -136,4 +150,22 @@ func defaultSettingsPath() string {
 // $TMPDIR/... on macOS.
 func defaultLogPath() string {
 	return filepath.Join(os.TempDir(), "vscode-load-llama", "app.log")
+}
+
+// defaultPaneSelectors are the candidate Copilot pane root selectors, tried
+// in priority order: the full chat session (conversation + input) first, then
+// other full-pane containers, then the chat input surface (the always-present
+// chat widget). Override with -pane if your VS Code version uses different
+// markup.
+const defaultPaneSelectors = ".interactive-session,.chat-view-part,.chat-view,.chat-editor,.interactive-input-part,.chat-input-container"
+
+// splitSelectors splits a comma-separated selector list, trimming blanks.
+func splitSelectors(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

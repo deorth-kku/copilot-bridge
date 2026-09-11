@@ -114,6 +114,30 @@ func (d *Discovery) scan(ctx context.Context) {
 	d.mu.Unlock()
 }
 
+// SessionFor returns the first live session whose title contains match,
+// or the first live session when match is empty. It returns nil when no
+// window is currently attached.
+func (d *Discovery) SessionFor(match string) *Session {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var first *Session
+	for _, s := range d.sessions {
+		if s.IsDone() {
+			continue
+		}
+		if match == "" {
+			if first == nil {
+				first = s
+			}
+			continue
+		}
+		if strings.Contains(s.Title(), match) {
+			return s
+		}
+	}
+	return first
+}
+
 func (d *Discovery) stopAll() {
 	d.mu.Lock()
 	defer d.mu.Unlock()

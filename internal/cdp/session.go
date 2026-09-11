@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -22,9 +24,27 @@ type Event struct {
 }
 
 type cdpMessage struct {
+	ID     *int           `json:"id"`
 	Method string         `json:"method"`
 	Params jsontext.Value `json:"params"`
+	Result jsontext.Value `json:"result"`
+	Error  *cdpError      `json:"error"`
 }
+
+// cdpError is the "error" object of a CDP command response.
+type cdpError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// callResult carries the outcome of one pending Call to its waiter.
+type callResult struct {
+	result jsontext.Value
+	err    error
+}
+
+// callTimeout bounds how long a Call waits for its response.
+const callTimeout = 15 * time.Second
 
 type pageState struct {
 	Input  *string `json:"input"`
@@ -54,20 +74,23 @@ type Session struct {
 	events chan Event
 	log    *slog.Logger
 
-	mu   sync.Mutex
-	conn *websocket.Conn
+	mu     sync.Mutex
+	conn   *websocket.Conn
+	nextID int
+	// pending maps a command id to the channel its Call is waiting on.
+	pending map[int]chan callResult
 
 	done atomic.Bool
 	last string // dedupe: last payload JSON already emitted
-	n    int
 }
 
 func NewSession(id, title, wsURL string, events chan Event, log *slog.Logger) *Session {
 	s := &Session{
-		ID:     id,
-		WSURL:  wsURL,
-		events: events,
-		log:    log,
+		ID:      id,
+		WSURL:   wsURL,
+		events:  events,
+		log:     log,
+		pending: make(map[int]chan callResult),
 	}
 	s.title.Store(&title)
 	return s
@@ -113,6 +136,8 @@ func (s *Session) Run(ctx context.Context) {
 	s.conn = conn
 	s.mu.Unlock()
 	defer conn.Close()
+	// In-flight Calls must not block forever once the socket is gone.
+	defer s.failPending(errors.New("connection closed"))
 
 	s.log.Info("attached window", "title", s.Title())
 	s.send("Runtime.enable", nil)
@@ -125,7 +150,9 @@ func (s *Session) Run(ctx context.Context) {
 		s.Stop()
 	}()
 
-	conn.SetReadLimit(1 << 20)
+	// The CSS extraction (with inlined @font-face data URIs) can be several
+	// megabytes, so the read limit must be well above the default 1MB.
+	conn.SetReadLimit(32 << 20)
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
@@ -150,6 +177,10 @@ func (s *Session) handle(raw []byte) {
 		msgs = []cdpMessage{m}
 	}
 	for _, m := range msgs {
+		if m.ID != nil {
+			s.routeResponse(*m.ID, m.Result, m.Error)
+			continue
+		}
 		switch m.Method {
 		case "Runtime.bindingCalled":
 			var p struct {
@@ -189,15 +220,92 @@ func (s *Session) handle(raw []byte) {
 }
 
 func (s *Session) send(method string, params any) {
-	s.n++
-	m := map[string]any{"id": s.n, "method": method}
+	s.mu.Lock()
+	s.nextID++
+	id := s.nextID
+	m := map[string]any{"id": id, "method": method}
 	if params != nil {
 		m["params"] = params
 	}
 	b, _ := json.Marshal(m)
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.conn != nil {
 		s.conn.WriteMessage(websocket.TextMessage, b)
+	}
+	s.mu.Unlock()
+}
+
+// Send fires a CDP command without waiting for its response.
+func (s *Session) Send(method string, params any) { s.send(method, params) }
+
+// Call sends a CDP command and waits for its matching response (or a
+// timeout / connection drop). It returns the raw "result" value.
+func (s *Session) Call(method string, params any) (jsontext.Value, error) {
+	s.mu.Lock()
+	if s.conn == nil {
+		s.mu.Unlock()
+		return nil, errors.New("not connected")
+	}
+	s.nextID++
+	id := s.nextID
+	ch := make(chan callResult, 1)
+	s.pending[id] = ch
+	m := map[string]any{"id": id, "method": method}
+	if params != nil {
+		m["params"] = params
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		delete(s.pending, id)
+		s.mu.Unlock()
+		return nil, err
+	}
+	werr := s.conn.WriteMessage(websocket.TextMessage, b)
+	s.mu.Unlock()
+	if werr != nil {
+		return nil, werr
+	}
+	select {
+	case r := <-ch:
+		return r.result, r.err
+	case <-time.After(callTimeout):
+		s.mu.Lock()
+		delete(s.pending, id)
+		s.mu.Unlock()
+		return nil, fmt.Errorf("CDP call timeout: %s", method)
+	}
+}
+
+// routeResponse delivers a command response to the pending Call, if any.
+func (s *Session) routeResponse(id int, result jsontext.Value, cdpErr *cdpError) {
+	s.mu.Lock()
+	ch, ok := s.pending[id]
+	if ok {
+		delete(s.pending, id)
+	}
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	r := callResult{result: result}
+	if cdpErr != nil {
+		r.err = fmt.Errorf("CDP error %d: %s", cdpErr.Code, cdpErr.Message)
+	}
+	select {
+	case ch <- r:
+	default:
+	}
+}
+
+// failPending unblocks every in-flight Call with the given error.
+func (s *Session) failPending(err error) {
+	s.mu.Lock()
+	pending := s.pending
+	s.pending = make(map[int]chan callResult)
+	s.mu.Unlock()
+	for _, ch := range pending {
+		select {
+		case ch <- callResult{err: err}:
+		default:
+		}
 	}
 }
