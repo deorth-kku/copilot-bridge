@@ -165,7 +165,7 @@ const defaultPaneSelectors = ".voice-agent-controls-wrapper,.pane.chat-viewpane-
 // splitSelectors splits a comma-separated selector list, trimming blanks.
 func splitSelectors(s string) []string {
 	var out []string
-	for _, p := range strings.Split(s, ",") {
+	for p := range strings.SplitSeq(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}

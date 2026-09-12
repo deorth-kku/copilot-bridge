@@ -29,7 +29,14 @@ type Loader struct {
 // New creates a Loader. proxyFunc (from config.Settings.ProxyFunc)
 // controls proxying of the load requests; nil means connect directly.
 func New(cooldown time.Duration, log *slog.Logger, proxyFunc func(*http.Request) (*url.URL, error)) *Loader {
-	client := &http.Client{Timeout: 10 * time.Second}
+	// Don't follow redirects: a redirect (e.g. 308) already proves the
+	// server is not llama.cpp, and following it can land on HTML pages.
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	if proxyFunc != nil {
 		client.Transport = &http.Transport{Proxy: proxyFunc}
 	}
@@ -128,6 +135,16 @@ func (l *Loader) classify(m config.Model, root, loadURL string, status int, b []
 		}
 	}
 	switch status {
+	case
+		http.StatusMultipleChoices,
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusNotModified,
+		http.StatusUseProxy,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect: // openrouter use redirect
+		fallthrough
 	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusUnauthorized, http.StatusForbidden:
 		// no /models/load route (or auth-walled): not llama.cpp,
 		// remember the endpoint and stop trying
