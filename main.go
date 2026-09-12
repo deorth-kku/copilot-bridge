@@ -157,10 +157,13 @@ func defaultLogPath() string {
 // the chat-view title bar (back button / session title / sidebar toggle, so
 // the mirror can navigate back to the session picker) and the agent-sessions
 // list (the session-selection view shown when the user goes back), neither of
-// which is inside .interactive-session. The narrower chat-session and input
-// selectors remain as fallbacks. Override with -pane if your VS Code version
-// uses different markup.
-const defaultPaneSelectors = ".voice-agent-controls-wrapper,.pane.chat-viewpane-container,.pane-body.chat-viewpane,.interactive-session,.chat-view-part,.chat-view,.chat-editor,.interactive-input-part,.chat-input-container"
+// which is inside .interactive-session. It must be high enough in the tree to
+// include the .pane-body.chat-viewpane element itself: many workbench CSS
+// rules (e.g. the title bar's display:flex) are scoped to the .chat-viewpane
+// ancestor, which the mirror's #pane cannot supply on its own. The narrower
+// chat-session and input selectors remain as fallbacks. Override with -pane
+// if your VS Code version uses different markup.
+const defaultPaneSelectors = ".pane.chat-viewpane-container,.pane-body.chat-viewpane,.voice-agent-controls-wrapper,.interactive-session,.chat-view-part,.chat-view,.chat-editor,.interactive-input-part,.chat-input-container"
 
 // splitSelectors splits a comma-separated selector list, trimming blanks.
 func splitSelectors(s string) []string {

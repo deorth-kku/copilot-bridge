@@ -36,14 +36,20 @@ const pageHTML = `<!doctype html>
 </head>
 <body>
 <div id="status">connecting…</div>
-<!-- #pane carries the monaco-workbench class so that the ~1900 workbench CSS
-     rules scoped to ".monaco-workbench <descendant>" (input box box-sizing,
-     border-radius, background, the --vscode-* palette vars, pill text colors,
-     etc.) match the extracted subtree. It is the direct parent of the extracted
-     pane root (the full chat pane container: title bar + session list +
-     conversation + input), so pane.firstElementChild is the pane root and the
-     DOM-path click mapping is unaffected. -->
-<div id="pane" class="monaco-workbench" tabindex="0"></div>
+<!-- #pane carries ancestor classes the extracted subtree is missing, so that
+     workbench CSS rules scoped to those ancestors still match:
+     - monaco-workbench: the ~1900 rules scoped to ".monaco-workbench
+       <descendant>" (input box box-sizing, border-radius, background, the
+       --vscode-* palette vars, pill text colors, etc.).
+     - monaco-pane-view: pane-section rules, e.g.
+       ".monaco-pane-view .pane > .pane-header.hidden { display: none }"
+       (hides the "Chat" section header in merged-header mode) and the
+       ".monaco-pane-view .pane > .pane-header" flex layout.
+     It is the direct parent of the extracted pane root (the full chat pane
+     container: title bar + session list + conversation + input), so
+     pane.firstElementChild is the pane root and the DOM-path click mapping is
+     unaffected. -->
+<div id="pane" class="monaco-workbench monaco-pane-view" tabindex="0"></div>
 <script>
 (function () {
   var status = document.getElementById('status');
