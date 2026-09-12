@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,15 @@ type Target struct {
 	ID    string
 	Title string
 	WSURL string
+}
+
+// Window is one live VS Code window as seen by the mirror: the CDP target
+// id (stable while the window is open) plus the current window title.
+// JSON tags match the mirror protocol's lowercase keys (the browser reads
+// w.id / w.title).
+type Window struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
 }
 
 // Discovery runs the connection state machine for the process lifetime:
@@ -117,6 +127,10 @@ func (d *Discovery) scan(ctx context.Context) {
 // SessionFor returns the first live session whose title contains match,
 // or the first live session when match is empty. It returns nil when no
 // window is currently attached.
+//
+// Note: with match empty and several windows open, the choice is arbitrary
+// (map iteration order) — callers that need a stable window must use
+// Windows()/SessionForID instead.
 func (d *Discovery) SessionFor(match string) *Session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -136,6 +150,35 @@ func (d *Discovery) SessionFor(match string) *Session {
 		}
 	}
 	return first
+}
+
+// Windows returns the currently live windows sorted by title, so the order
+// is stable across calls (unlike map iteration). The mirror uses it both to
+// render its window picker and to pick a deterministic default window.
+func (d *Discovery) Windows() []Window {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	wins := make([]Window, 0, len(d.sessions))
+	for _, s := range d.sessions {
+		if s.IsDone() {
+			continue
+		}
+		wins = append(wins, Window{ID: s.ID, Title: s.Title()})
+	}
+	sort.Slice(wins, func(i, j int) bool { return wins[i].Title < wins[j].Title })
+	return wins
+}
+
+// SessionForID returns the live session with the given CDP target id, or nil
+// when no such window is currently attached.
+func (d *Discovery) SessionForID(id string) *Session {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s := d.sessions[id]
+	if s == nil || s.IsDone() {
+		return nil
+	}
+	return s
 }
 
 func (d *Discovery) stopAll() {

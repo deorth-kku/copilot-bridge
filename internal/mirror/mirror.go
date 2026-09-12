@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -43,7 +44,14 @@ type stateMsg struct {
 	// the pane root (no omitempty: an empty path means "the root itself").
 	ScrollPath []int  `json:"scrollPath"`
 	Window     string `json:"window,omitempty"`
-	Err        string `json:"err,omitempty"`
+	// WindowID is the CDP target id of the window currently mirrored; the
+	// browser uses it to mark the selected item in the status-bar picker.
+	WindowID string `json:"windowId,omitempty"`
+	// Windows is the current set of live windows (title-sorted) for the
+	// status-bar picker. Sent with every state message so the picker always
+	// reflects reality (window open/close).
+	Windows []cdp.Window `json:"windows"`
+	Err     string       `json:"err,omitempty"`
 }
 
 // mouseMsg is a browser -> server mouse event. X/Y are relative to the
@@ -76,6 +84,13 @@ type keyMsg struct {
 	Text      string `json:"text,omitempty"`
 }
 
+// windowMsg is a browser -> server window-picker selection: the CDP target
+// id of the window the user wants mirrored.
+type windowMsg struct {
+	Type string `json:"type"` // "window"
+	ID   string `json:"id"`
+}
+
 // Mirror owns the web server, the set of connected browser tabs, and the
 // publish loop that keeps the mirrored pane in sync with the live page.
 type Mirror struct {
@@ -96,6 +111,11 @@ type Mirror struct {
 	// reference across snapshots, so a swap is cheap.
 	snapMu sync.Mutex
 	snap   *snapState
+
+	// selectedID is the CDP target id the user picked in the status-bar
+	// window picker ("" = follow the default). Written by the WS handler,
+	// read by the publish loop — an atomic value keeps it lock-free.
+	selectedID atomic.Value
 }
 
 // snapState is one extracted pane snapshot.
@@ -108,6 +128,7 @@ type snapState struct {
 	themeVars  string
 	themeVer   string
 	window     string
+	windowID   string
 	fp         string
 	rect       cdp.PaneRect
 	scroll     cdp.PaneScroll
@@ -285,12 +306,13 @@ func (m *Mirror) sendFullState(c *client) {
 			Type: "state", HTML: s.html, CSS: s.css, CSSVer: s.cssVer,
 			RootStyle: s.rootStyle, ThemeVars: s.themeVars, ThemeVer: s.themeVer,
 			Rect: s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
-			Window: s.window, Err: s.err,
+			Window: s.window, WindowID: s.windowID, Err: s.err,
 		}
 	} else {
 		msg = stateMsg{Type: "state", Err: "waiting for VS Code window"}
 	}
 	m.snapMu.Unlock()
+	msg.Windows = m.disc.Windows()
 	if b, err := json.Marshal(msg); err == nil {
 		select {
 		case c.send <- b:
@@ -313,10 +335,39 @@ func (m *Mirror) publishLoop(ctx context.Context) {
 	}
 }
 
+// pickSession resolves which window to mirror. Priority:
+//  1. the user's explicit status-bar picker selection (selectedID);
+//  2. the -window title filter (startup flag);
+//  3. the first window in stable title-sorted order.
+//
+// The stable default (instead of SessionFor's arbitrary map order) is what
+// stops the mirror flickering between windows when several are open.
+func (m *Mirror) pickSession(wins []cdp.Window) (*cdp.Session, string) {
+	if len(wins) == 0 {
+		return nil, ""
+	}
+	if sel, _ := m.selectedID.Load().(string); sel != "" {
+		for _, w := range wins {
+			if w.ID == sel {
+				return m.disc.SessionForID(sel), w.ID
+			}
+		}
+	}
+	if m.window != "" {
+		for _, w := range wins {
+			if strings.Contains(w.Title, m.window) {
+				return m.disc.SessionForID(w.ID), w.ID
+			}
+		}
+	}
+	return m.disc.SessionForID(wins[0].ID), wins[0].ID
+}
+
 // refresh probes the pane (cheap fingerprint) and, when something changed,
 // does a full extract and broadcasts a state message.
 func (m *Mirror) refresh() {
-	s := m.disc.SessionFor(m.window)
+	wins := m.disc.Windows()
+	s, winID := m.pickSession(wins)
 	if s == nil {
 		m.publishError("waiting for VS Code window (is it running with the CDP port open?)")
 		return
@@ -381,7 +432,7 @@ func (m *Mirror) refresh() {
 		html: html, css: css, cssVer: cssVer, cssFP: fpst.CSSFP,
 		rootStyle: rootStyle, themeVars: themeVars, themeVer: themeVer,
 		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath,
-		window: s.Title(), fp: fpst.FP,
+		window: s.Title(), windowID: winID, fp: fpst.FP,
 	}
 	m.snapMu.Lock()
 	m.snap = ns
@@ -390,6 +441,7 @@ func (m *Mirror) refresh() {
 	msg := stateMsg{
 		Type: "state", CSSVer: cssVer, RootStyle: rootStyle, ThemeVer: themeVer,
 		Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, Window: s.Title(),
+		WindowID: winID, Windows: wins,
 	}
 	if fpChanged {
 		msg.HTML = html
@@ -427,7 +479,16 @@ func (m *Mirror) handleInput(raw []byte) {
 		return
 	}
 	m.log.Debug("mirror input frame", "type", head.Type)
-	s := m.disc.SessionFor(m.window)
+	if head.Type == "window" {
+		var e windowMsg
+		if err := json.Unmarshal(raw, &e); err != nil {
+			return
+		}
+		m.selectedID.Store(e.ID)
+		m.log.Info("mirror: window selected", "id", e.ID)
+		return
+	}
+	s, _ := m.pickSession(m.disc.Windows())
 	if s == nil {
 		m.log.Debug("mirror input: no session")
 		return

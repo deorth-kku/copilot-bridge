@@ -174,3 +174,43 @@ func TestDiscoveryLifecycle(t *testing.T) {
 
 	cancel()
 }
+
+func TestDiscoveryWindowsSorted(t *testing.T) {
+	wsHost := startHoldWS(t)
+	mock := &mockCDPServer{wsHost: wsHost}
+	mock.set(true, "t2", "t1") // titles: win-t2, win-t1
+	srv := httptest.NewServer(mock)
+	defer srv.Close()
+
+	events := make(chan Event, 16)
+	d := NewDiscovery(strings.TrimPrefix(srv.URL, "http://"), events, discardLog)
+	d.Poll = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	waitFor(t, "both sessions", func() bool { return len(d.Windows()) == 2 })
+
+	// Stable title-sorted order across calls (map iteration is not).
+	for i := 0; i < 20; i++ {
+		wins := d.Windows()
+		if len(wins) != 2 || wins[0].ID != "t1" || wins[1].ID != "t2" {
+			t.Fatalf("expected stable sorted order [t1 t2], got %+v", wins)
+		}
+	}
+
+	// SessionForID returns the live session; unknown id -> nil.
+	if s := d.SessionForID("t2"); s == nil || s.Title() != "win-t2" {
+		t.Fatalf("SessionForID(t2) wrong: %v", s)
+	}
+	if s := d.SessionForID("nope"); s != nil {
+		t.Fatalf("expected nil for unknown id, got %v", s)
+	}
+
+	// A closed window drops out of the list and its session.
+	mock.set(true, "t1")
+	waitFor(t, "t2 gone", func() bool { return len(d.Windows()) == 1 })
+	if s := d.SessionForID("t2"); s != nil {
+		t.Fatalf("expected nil for closed window")
+	}
+}

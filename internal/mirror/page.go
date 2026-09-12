@@ -20,15 +20,17 @@ const pageHTML = `<!doctype html>
     background: #1e1e1e !important;
     overflow: auto !important; height: auto !important;
   }
+  /* The status bar is a window picker: one option per live VS Code window,
+     so several open windows can be switched between. The native select
+     clips long titles on its own. */
   #status {
     position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important;
     height: 26px !important; z-index: 9999 !important;
     background: #323233 !important; color: #d7d7d7 !important;
-    font: 12px/26px monospace !important; padding: 0 10px !important;
-    box-sizing: border-box !important; border-bottom: 1px solid #444 !important;
-    /* Truncate with an ellipsis on narrow viewports (e.g. the integrated
-       browser panel) instead of clipping mid-glyph. */
-    white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important;
+    font: 12px monospace !important; padding: 0 8px !important;
+    box-sizing: border-box !important; border: none !important;
+    border-bottom: 1px solid #444 !important;
+    cursor: pointer !important;
   }
   /* Responsive: the mirror fills the browser viewport (below the status bar)
      instead of the live pane's pixel size. The extracted subtree was laid out
@@ -60,7 +62,7 @@ const pageHTML = `<!doctype html>
 </style>
 </head>
 <body>
-<div id="status">connecting…</div>
+<select id="status"><option>connecting…</option></select>
 <!-- #pane carries ancestor classes the extracted subtree is missing, so that
      workbench CSS rules scoped to those ancestors still match:
      - monaco-workbench: the ~1900 rules scoped to ".monaco-workbench
@@ -84,8 +86,42 @@ const pageHTML = `<!doctype html>
   var ws = null;
   var lastCSSVer = '';
   var lastThemeVer = '';
+  var lastWinVer = '';
 
-  function setStatus(t) { status.textContent = t; }
+  // The status bar is a <select> (window picker). setStatus replaces its
+  // options with a single placeholder (connecting / error states).
+  function setStatus(t) {
+    status.length = 0;
+    var o = document.createElement('option');
+    o.textContent = t;
+    status.appendChild(o);
+  }
+
+  // Rebuild the picker options only when the window set changes — state
+  // messages arrive on every poll while content streams, and rebuilding on
+  // each one would close an open dropdown mid-selection. Otherwise just keep
+  // the selection following the server's current window.
+  function syncWindows(m) {
+    var wins = m.windows || [];
+    var ver = '';
+    for (var i = 0; i < wins.length; i++) ver += wins[i].id + ':' + wins[i].title + ';';
+    if (ver === lastWinVer) {
+      if (m.windowId) status.value = m.windowId;
+      return;
+    }
+    lastWinVer = ver;
+    var dup = {};
+    for (var i = 0; i < wins.length; i++) dup[wins[i].title] = (dup[wins[i].title] || 0) + 1;
+    status.length = 0;
+    for (var i = 0; i < wins.length; i++) {
+      var o = document.createElement('option');
+      o.value = wins[i].id;
+      // Disambiguate same-titled windows with a short id suffix.
+      o.textContent = wins[i].title + (dup[wins[i].title] > 1 ? ' (' + String(wins[i].id).slice(-6) + ')' : '');
+      status.appendChild(o);
+    }
+    if (m.windowId) status.value = m.windowId;
+  }
 
   function connect() {
     var proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -102,7 +138,7 @@ const pageHTML = `<!doctype html>
       // ends; the next state message will catch up.
       if (composing) return;
       if (m.err) { setStatus('! ' + m.err); return; }
-      setStatus('mirroring: ' + (m.window || 'window') + (m.html ? '' : ' (layout)'));
+      syncWindows(m);
       if (m.cssVersion !== lastCSSVer) {
         lastCSSVer = m.cssVersion || '';
         if (m.css != null) cssEl.textContent = m.css;
@@ -233,6 +269,12 @@ const pageHTML = `<!doctype html>
   function send(o) {
     if (ws && ws.readyState === 1) ws.send(JSON.stringify(o));
   }
+
+  // Window picker: switching the option tells the server which VS Code
+  // window to mirror from now on.
+  status.addEventListener('change', function () {
+    send({ type: 'window', id: status.value });
+  });
 
   // Mobile soft-keyboard support: the chat input in the live page is a Monaco
   // editor whose real input element is a textarea (.ime-text-area). Mobile
