@@ -26,8 +26,25 @@ const pageHTML = `<!doctype html>
     background: #323233 !important; color: #d7d7d7 !important;
     font: 12px/26px monospace !important; padding: 0 10px !important;
     box-sizing: border-box !important; border-bottom: 1px solid #444 !important;
+    /* Truncate with an ellipsis on narrow viewports (e.g. the integrated
+       browser panel) instead of clipping mid-glyph. */
+    white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important;
   }
-  #pane { position: relative; margin-top: 26px; overflow: hidden; }
+  /* Responsive: the mirror fills the browser viewport (below the status bar)
+     instead of the live pane's pixel size. The extracted subtree was laid out
+     for the live pane, so re-fit it: the pane root fills #pane, the chat list
+     (sized by an inline height in the live DOM) becomes a flex child filling
+     the remaining space, and monaco-list rows (absolutely positioned with
+     live-computed offsets/heights) reflow at the mirror's width. */
+  #pane {
+    position: relative; margin-top: 26px;
+    width: 100%; height: calc(100vh - 26px);
+    box-sizing: border-box; overflow: hidden;
+  }
+  #pane > * { width: 100% !important; height: 100% !important; min-height: 0 !important; }
+  #pane .interactive-list { height: auto !important; flex: 1 1 0% !important; min-height: 0 !important; }
+  #pane .monaco-list-rows { position: static !important; transform: none !important; top: auto !important; left: auto !important; height: auto !important; overflow: visible !important; contain: none !important; }
+  #pane .monaco-list-row { position: static !important; top: auto !important; height: auto !important; }
   /* Safety net: the chat find widget is hidden in the live page (visibility:hidden)
      by a rule scoped to .monaco-workbench. The #pane.monaco-workbench class below
      normally makes that rule apply, but keep an explicit hide in case it is not. */
@@ -90,18 +107,14 @@ const pageHTML = `<!doctype html>
         applyState(m);
       } else {
         // Layout/scroll-only update (e.g. the live page scrolled): no DOM
-        // re-render, just keep the pane size and local scroll position in
-        // sync with the live page.
-        pane.style.width = m.rect.width + 'px';
-        pane.style.height = m.rect.height + 'px';
+        // re-render, just keep the local scroll position in sync with the
+        // live page.
         restoreScroll(m);
       }
     };
   }
 
   function applyState(m) {
-    pane.style.width = m.rect.width + 'px';
-    pane.style.height = m.rect.height + 'px';
     if (m.rootStyle) {
       var parts = m.rootStyle.split(';');
       for (var i = 0; i < parts.length; i++) {
@@ -109,6 +122,8 @@ const pageHTML = `<!doctype html>
         if (idx <= 0) continue;
         var p = parts[i].slice(0, idx).trim();
         var v = parts[i].slice(idx + 1).trim();
+        // Responsive: never pin the pane to the live pane's pixel size.
+        if (p === 'width' || p === 'height' || p === 'min-width' || p === 'min-height' || p === 'max-width' || p === 'max-height') continue;
         if (p) pane.style.setProperty(p, v);
       }
     }
@@ -138,37 +153,34 @@ const pageHTML = `<!doctype html>
     restoreScroll(m);
   }
 
-  // Best-effort restore of the pane's inner scroll position after a re-render.
-  // The active view's real scroll container is a monaco-list's
-  // .monaco-scrollable-element (a DESCENDANT of the pane root with
-  // overflow:hidden, scrolled programmatically via scrollTop — the same
-  // element the server measures). The pane holds two such lists (chat history
-  // and agent-sessions list); the one with the most scrollable room is the
-  // active one, matching the server's choice. Fall back to the first
-  // overflow:auto/scroll descendant for other pane shapes.
+  // Restore the live scroll position on the SAME element the server measured,
+  // identified by its DOM path from the pane root (m.scrollPath). Path-based
+  // resolution is size-independent, which the responsive layout requires:
+  // the mirror is not the live pane's pixel size, so a "biggest scroller"
+  // heuristic could pick a different element than the server measured.
+  //
+  // The live chat list is bottom-anchored: it keeps scrollTop at 0 and
+  // encodes the scroll position in the rows container's negative top offset
+  // (m.scroll.offset). The distance from the live visible window's bottom to
+  // the content bottom is (scrollH - clientH) + offset — 0 when live is at
+  // the bottom. The mirror's static layout is top-anchored, so show our own
+  // content at the same distance from our own bottom instead of copying the
+  // (always-zero) live scrollTop.
   function restoreScroll(m) {
-    if (!m.scroll) return;
-    var sc = null, best = 0;
-    var cands = pane.querySelectorAll('.monaco-scrollable-element');
-    for (var i = 0; i < cands.length; i++) {
-      var room = (cands[i].scrollHeight || 0) - (cands[i].clientHeight || 0);
-      if (room > best) { best = room; sc = cands[i]; }
+    if (!m.scroll || !m.scrollPath) return;
+    var el = pane.firstElementChild || pane;
+    for (var i = 0; i < m.scrollPath.length; i++) {
+      el = el.children[m.scrollPath[i]];
+      if (!el) return;
     }
-    if (sc) {
-      sc.scrollLeft = m.scroll.left;
-      sc.scrollTop = m.scroll.top;
-      return;
+    el.scrollLeft = m.scroll.left;
+    var max = el.scrollHeight - el.clientHeight;
+    var target = m.scroll.top;
+    if (m.scroll.offset < 0) {
+      var distBottom = (m.scroll.scrollH - m.scroll.h) + m.scroll.offset;
+      target = distBottom <= 0 ? max : max - distBottom;
     }
-    var all = pane.querySelectorAll('*');
-    for (var i = 0; i < all.length; i++) {
-      var el = all[i];
-      var ov = window.getComputedStyle(el).overflowY;
-      if ((ov === 'auto' || ov === 'scroll') && el.scrollHeight > el.clientHeight) {
-        el.scrollLeft = m.scroll.left;
-        el.scrollTop = m.scroll.top;
-        return;
-      }
-    }
+    el.scrollTop = Math.max(0, Math.min(max, target));
   }
 
   function paneCoords(e) {
@@ -253,9 +265,18 @@ const pageHTML = `<!doctype html>
     var ei = elemInfo(e.target, e.clientX, e.clientY);
     send({ type: 'mouse', kind: 'released', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, button: btn(e), buttons: e.buttons, clickCount: e.detail });
   });
+  // Hover is forwarded with the same element-identity mapping as clicks
+  // (needed for the responsive layout, where pane-relative offsets no longer
+  // line up with the live pane). Throttled: each forwarded hover is a CDP
+  // round-trip, and hover only drives hover effects.
+  var lastMoved = 0;
   pane.addEventListener('mousemove', function (e) {
+    var now = Date.now();
+    if (now - lastMoved < 50) return;
+    lastMoved = now;
     var c = paneCoords(e);
-    send({ type: 'mouse', kind: 'moved', x: c.x, y: c.y, buttons: e.buttons });
+    var ei = elemInfo(e.target, e.clientX, e.clientY);
+    send({ type: 'mouse', kind: 'moved', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, buttons: e.buttons });
   });
   pane.addEventListener('wheel', function (e) {
     e.preventDefault();

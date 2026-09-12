@@ -19,21 +19,29 @@ type PaneRect struct {
 // PaneScroll is the scroll state of the pane's nearest scrollable
 // ancestor, used to keep the mirror's scroll position in sync.
 type PaneScroll struct {
-	Left float64 `json:"left"`
-	Top  float64 `json:"top"`
-	W    float64 `json:"w"`
-	H    float64 `json:"h"`
+	Left    float64 `json:"left"`
+	Top     float64 `json:"top"`
+	W       float64 `json:"w"`
+	H       float64 `json:"h"`
+	ScrollH float64 `json:"scrollH"`
+	// Offset is the .monaco-list-rows container's offsetTop within the
+	// scroll element. Bottom-anchored monaco-lists keep scrollTop at 0 and
+	// encode the scroll position in this negative offset instead, so the
+	// mirror needs it to map the live scroll state onto its own (static,
+	// top-anchored) layout.
+	Offset float64 `json:"offset"`
 }
 
 // HTMLState is the result of ExtractHTML.
 type HTMLState struct {
-	Err       string     `json:"err"`
-	HTML      string     `json:"html"`
-	RootStyle string     `json:"rootStyle"`
-	ThemeVars string     `json:"themeVars"`
-	Rect      PaneRect   `json:"rect"`
-	Scroll    PaneScroll `json:"scroll"`
-	CSSFP     string     `json:"cssFP"`
+	Err        string     `json:"err"`
+	HTML       string     `json:"html"`
+	RootStyle  string     `json:"rootStyle"`
+	ThemeVars  string     `json:"themeVars"`
+	Rect       PaneRect   `json:"rect"`
+	Scroll     PaneScroll `json:"scroll"`
+	ScrollPath []int      `json:"scrollPath"`
+	CSSFP      string     `json:"cssFP"`
 }
 
 // CSSState is the result of ExtractCSS.
@@ -45,11 +53,12 @@ type CSSState struct {
 // poll that avoids the costly outerHTML dump until something actually
 // changed.
 type FingerprintState struct {
-	Err    string     `json:"err"`
-	FP     string     `json:"fp"`
-	CSSFP  string     `json:"cssFP"`
-	Rect   PaneRect   `json:"rect"`
-	Scroll PaneScroll `json:"scroll"`
+	Err        string     `json:"err"`
+	FP         string     `json:"fp"`
+	CSSFP      string     `json:"cssFP"`
+	Rect       PaneRect   `json:"rect"`
+	Scroll     PaneScroll `json:"scroll"`
+	ScrollPath []int      `json:"scrollPath"`
 }
 
 // htmlExpr extracts the pane subtree's outerHTML plus the layout metadata
@@ -105,7 +114,8 @@ const htmlExpr = `(selectors) => {
     rootStyle: rootStyle,
     themeVars: themeVars,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
-    scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, w: sc.clientWidth, h: sc.clientHeight },
+    scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
+    scrollPath: scrollPath,
     cssFP: cssFP,
   };
 }`
@@ -123,11 +133,18 @@ const htmlExpr = `(selectors) => {
 const scrollContainerJS = `
   let sc = null;
   try {
-    const cands = el.querySelectorAll('.monaco-scrollable-element');
+    // Only scrollers inside a .monaco-list that are actually visible:
+    // - the chat input's own Monaco editor also has a
+    //   .monaco-scrollable-element, but it reports a sentinel scrollHeight
+    //   (~2^24) that would always win the max-room comparison;
+    // - messages embed nested lists (file-review widgets, collapsed steps)
+    //   whose scrollers are hidden (clientHeight 0) but still report large
+    //   scrollHeights.
+    const cands = el.querySelectorAll('.monaco-list .monaco-scrollable-element');
     let best = 0;
     for (const c of cands) {
       const room = (c.scrollHeight || 0) - (c.clientHeight || 0);
-      if (room > best) { best = room; sc = c; }
+      if (c.clientHeight > 0 && room > best) { best = room; sc = c; }
     }
   } catch (e) {}
   if (!sc) {
@@ -138,6 +155,36 @@ const scrollContainerJS = `
       sc = sc.parentElement;
     }
   }
+` + scrollPathJS
+
+// scrollPathJS is spliced right after scrollContainerJS (same inlining
+// constraint). It records the measured scroll container as a DOM path from
+// the pane root, so the mirror can restore the scroll position on the SAME
+// element the server measured — independent of the mirror's own size (the
+// responsive layout does not preserve live pixel dimensions). null when the
+// container is not a descendant of the pane root (ancestor-walk fallback).
+const scrollPathJS = `
+  let scrollPath = null;
+  try {
+    if (sc === el) {
+      scrollPath = [];
+    } else {
+      scrollPath = [];
+      let n = sc;
+      while (n && n !== el) {
+        const p = n.parentElement;
+        if (!p) { scrollPath = null; break; }
+        scrollPath.unshift(Array.prototype.indexOf.call(p.children, n));
+        n = p;
+      }
+      if (n !== el) scrollPath = null;
+    }
+  } catch (e) { scrollPath = null; }
+  let scrollOffset = 0;
+  try {
+    const rc = sc.querySelector('.monaco-list-rows');
+    if (rc) scrollOffset = rc.offsetTop;
+  } catch (e) { scrollOffset = 0; }
 `
 
 // fpExpr is the cheap per-poll probe: it returns a content fingerprint, a
@@ -168,7 +215,8 @@ const fpExpr = `(selectors) => {
     fp: fp,
     cssFP: cssFP,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
-    scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, w: sc.clientWidth, h: sc.clientHeight },
+    scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
+    scrollPath: scrollPath,
   };
 }`
 

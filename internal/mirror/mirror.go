@@ -39,8 +39,11 @@ type stateMsg struct {
 	ThemeVer  string         `json:"themeVer,omitempty"`
 	Rect      cdp.PaneRect   `json:"rect"`
 	Scroll    cdp.PaneScroll `json:"scroll"`
-	Window    string         `json:"window,omitempty"`
-	Err       string         `json:"err,omitempty"`
+	// ScrollPath identifies the measured scroll container as a DOM path from
+	// the pane root (no omitempty: an empty path means "the root itself").
+	ScrollPath []int  `json:"scrollPath"`
+	Window     string `json:"window,omitempty"`
+	Err        string `json:"err,omitempty"`
 }
 
 // mouseMsg is a browser -> server mouse event. X/Y are relative to the
@@ -97,18 +100,19 @@ type Mirror struct {
 
 // snapState is one extracted pane snapshot.
 type snapState struct {
-	html      string
-	css       string
-	cssVer    string
-	cssFP     string
-	rootStyle string
-	themeVars string
-	themeVer  string
-	window    string
-	fp        string
-	rect      cdp.PaneRect
-	scroll    cdp.PaneScroll
-	err       string
+	html       string
+	css        string
+	cssVer     string
+	cssFP      string
+	rootStyle  string
+	themeVars  string
+	themeVer   string
+	window     string
+	fp         string
+	rect       cdp.PaneRect
+	scroll     cdp.PaneScroll
+	scrollPath []int
+	err        string
 }
 
 // client is one connected browser tab.
@@ -280,7 +284,7 @@ func (m *Mirror) sendFullState(c *client) {
 		msg = stateMsg{
 			Type: "state", HTML: s.html, CSS: s.css, CSSVer: s.cssVer,
 			RootStyle: s.rootStyle, ThemeVars: s.themeVars, ThemeVer: s.themeVer,
-			Rect: s.rect, Scroll: s.scroll,
+			Rect: s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
 			Window: s.window, Err: s.err,
 		}
 	} else {
@@ -330,7 +334,7 @@ func (m *Mirror) refresh() {
 	m.snapMu.Lock()
 	prev := m.snap
 	rectChanged := prev == nil || prev.rect != fpst.Rect
-	scrollChanged := prev == nil || prev.scroll != fpst.Scroll
+	scrollChanged := prev == nil || prev.scroll != fpst.Scroll || !equalInts(prev.scrollPath, fpst.ScrollPath)
 	fpChanged := prev == nil || prev.fp != fpst.FP
 	cssFPChanged := prev == nil || prev.cssFP != fpst.CSSFP
 	var prevCSS, prevCSSVer, prevThemeVer string
@@ -376,7 +380,7 @@ func (m *Mirror) refresh() {
 	ns := &snapState{
 		html: html, css: css, cssVer: cssVer, cssFP: fpst.CSSFP,
 		rootStyle: rootStyle, themeVars: themeVars, themeVer: themeVer,
-		rect: fpst.Rect, scroll: fpst.Scroll,
+		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath,
 		window: s.Title(), fp: fpst.FP,
 	}
 	m.snapMu.Lock()
@@ -385,7 +389,7 @@ func (m *Mirror) refresh() {
 
 	msg := stateMsg{
 		Type: "state", CSSVer: cssVer, RootStyle: rootStyle, ThemeVer: themeVer,
-		Rect: fpst.Rect, Scroll: fpst.Scroll, Window: s.Title(),
+		Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, Window: s.Title(),
 	}
 	if fpChanged {
 		msg.HTML = html
@@ -445,10 +449,11 @@ func (m *Mirror) handleInput(raw []byte) {
 }
 
 // forwardMouse maps a mirror mouse event onto the live page and dispatches the
-// matching CDP input event. Clicks (pressed/released/wheel) are resolved by
-// element identity (DOM-order index + relative position) so they land on the
-// correct live element even when the mirror's rendering is not pixel-identical;
-// hover (moved) uses the cheap pane-relative offset.
+// matching CDP input event. Events carrying an element identity (DOM-order
+// index + relative position) are resolved by that identity so they land on the
+// correct live element even when the mirror's rendering is not pixel-identical
+// (the responsive layout is a different size than the live pane); events
+// without one fall back to the pane-relative offset.
 func (m *Mirror) forwardMouse(s *cdp.Session, e mouseMsg) {
 	m.snapMu.Lock()
 	var rect cdp.PaneRect
@@ -459,7 +464,7 @@ func (m *Mirror) forwardMouse(s *cdp.Session, e mouseMsg) {
 	m.snapMu.Unlock()
 
 	x, y := rect.Left+e.X, rect.Top+e.Y
-	if e.Kind != "moved" {
+	if e.Path != nil {
 		if px, py, ok := cdp.EvalClickPoint(s, selectors, e.Path, e.RelX, e.RelY); ok {
 			x, y = px, py
 		}
@@ -531,6 +536,18 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // hashStr returns a short hex digest used to detect content/CSS changes.
