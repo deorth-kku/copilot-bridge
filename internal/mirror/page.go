@@ -41,6 +41,14 @@ const pageHTML = `<!doctype html>
     width: 100%; height: calc(100vh - 26px);
     box-sizing: border-box; overflow: hidden;
   }
+  /* Clicking the chat area (anything outside the chat input) moves the
+     browser's focus to #pane itself (tabindex=0), and Chromium then paints
+     its UA default focus ring (outline: auto) around the whole pane —
+     VS Code's orange focusBorder color on desktop, white on mobile Chrome.
+     Only the top edge is visible; the other edges sit at the viewport
+     boundary and are clipped. Suppress the ring: the mirror needs no
+     visible focus indicator. */
+  #pane:focus, #pane:focus-visible { outline: none !important; }
   #pane > * { width: 100% !important; height: 100% !important; min-height: 0 !important; }
   #pane .interactive-list { height: auto !important; flex: 1 1 0% !important; min-height: 0 !important; }
   #pane .monaco-list-rows { position: static !important; transform: none !important; top: auto !important; left: auto !important; height: auto !important; overflow: visible !important; contain: none !important; }

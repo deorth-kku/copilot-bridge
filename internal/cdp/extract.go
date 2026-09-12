@@ -123,7 +123,7 @@ const htmlExpr = `(selectors) => {
 // scrollContainerJS is spliced into both htmlExpr and fpExpr (they are
 // evaluated as separate programs, so the helper must be inlined). It locates
 // the element that actually scrolls the active view: monaco-lists scroll
-// their .monaco-scrollable-element DESCENDANT (overflow:hidden, scrolled
+// their .monaco-scrollable-element DIRECT CHILD (overflow:hidden, scrolled
 // programmatically via scrollTop), so a "walk up for overflow:auto/scroll"
 // heuristic never finds it. The pane root contains TWO such lists — the chat
 // message list and the agent-sessions list (session-selection view) — and
@@ -133,14 +133,19 @@ const htmlExpr = `(selectors) => {
 const scrollContainerJS = `
   let sc = null;
   try {
-    // Only scrollers inside a .monaco-list that are actually visible:
+    // Only the DIRECT-CHILD scroller of a .monaco-list that is actually
+    // visible:
     // - the chat input's own Monaco editor also has a
     //   .monaco-scrollable-element, but it reports a sentinel scrollHeight
     //   (~2^24) that would always win the max-room comparison;
+    // - chat messages embed Monaco editors (code blocks) INSIDE list rows,
+    //   so their scrollers are .monaco-list DESCENDANTS carrying the same
+    //   sentinel scrollHeight — a descendant match lets them win whenever
+    //   a code-block editor is rendered/expanded;
     // - messages embed nested lists (file-review widgets, collapsed steps)
     //   whose scrollers are hidden (clientHeight 0) but still report large
     //   scrollHeights.
-    const cands = el.querySelectorAll('.monaco-list .monaco-scrollable-element');
+    const cands = el.querySelectorAll('.monaco-list > .monaco-scrollable-element');
     let best = 0;
     for (const c of cands) {
       const room = (c.scrollHeight || 0) - (c.clientHeight || 0);
