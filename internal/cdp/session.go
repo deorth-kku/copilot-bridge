@@ -74,6 +74,12 @@ type Session struct {
 	events chan Event
 	log    *slog.Logger
 
+	// mirrorWake carries "the page changed" signals from the mirror's
+	// injected observer (Runtime.bindingCalled on MirrorBindingName).
+	// Buffered by 1: a pending wake already guarantees a refresh, and the
+	// refresh reads the latest state, so coalescing extra wakes is safe.
+	mirrorWake chan struct{}
+
 	mu     sync.Mutex
 	conn   *websocket.Conn
 	nextID int
@@ -86,11 +92,12 @@ type Session struct {
 
 func NewSession(id, title, wsURL string, events chan Event, log *slog.Logger) *Session {
 	s := &Session{
-		ID:      id,
-		WSURL:   wsURL,
-		events:  events,
-		log:     log,
-		pending: make(map[int]chan callResult),
+		ID:         id,
+		WSURL:      wsURL,
+		events:     events,
+		log:        log,
+		mirrorWake: make(chan struct{}, 1),
+		pending:    make(map[int]chan callResult),
 	}
 	s.title.Store(&title)
 	return s
@@ -106,6 +113,11 @@ func (s *Session) Title() string {
 
 // SetTitle atomically updates the window title (discovery scan).
 func (s *Session) SetTitle(t string) { s.title.Store(&t) }
+
+// MirrorWake returns the channel signalled (at most one pending) when the
+// page's mirror observer reports a DOM/scroll/resize change. The mirror's
+// publish loop selects on it to drive event-driven refreshes.
+func (s *Session) MirrorWake() <-chan struct{} { return s.mirrorWake }
 
 // IsDone reports whether the session's run loop has exited.
 func (s *Session) IsDone() bool { return s.done.Load() }
@@ -144,6 +156,8 @@ func (s *Session) Run(ctx context.Context) {
 	s.send("Page.enable", nil)
 	s.send("Runtime.addBinding", map[string]any{"name": BindingName})
 	s.send("Runtime.evaluate", map[string]any{"expression": InjectJS, "returnByValue": true})
+	s.send("Runtime.addBinding", map[string]any{"name": MirrorBindingName})
+	s.send("Runtime.evaluate", map[string]any{"expression": MirrorInjectJS, "returnByValue": true})
 
 	go func() {
 		<-ctx.Done()
@@ -190,6 +204,16 @@ func (s *Session) handle(raw []byte) {
 			if err := json.Unmarshal(m.Params, &p); err != nil {
 				continue
 			}
+			if p.Name == MirrorBindingName {
+				// Mirror wake: non-blocking, at most one pending (the
+				// mirror's fingerprint probe reads the latest state, so
+				// coalescing bursts is safe).
+				select {
+				case s.mirrorWake <- struct{}{}:
+				default:
+				}
+				continue
+			}
 			if p.Name != BindingName || p.Payload == s.last {
 				continue
 			}
@@ -211,10 +235,12 @@ func (s *Session) handle(raw []byte) {
 				s.log.Warn("event channel full, dropping", "window", s.Title())
 			}
 		case "Page.frameNavigated":
-			// workbench reload: the binding is gone, reinstall
+			// workbench reload: both bindings are gone, reinstall
 			s.log.Info("frame navigated, re-injecting", "window", s.Title())
 			s.send("Runtime.addBinding", map[string]any{"name": BindingName})
 			s.send("Runtime.evaluate", map[string]any{"expression": InjectJS, "returnByValue": true})
+			s.send("Runtime.addBinding", map[string]any{"name": MirrorBindingName})
+			s.send("Runtime.evaluate", map[string]any{"expression": MirrorInjectJS, "returnByValue": true})
 		}
 	}
 }

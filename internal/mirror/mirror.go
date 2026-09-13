@@ -112,7 +112,11 @@ type Mirror struct {
 	addr      string
 	selectors []string
 	window    string
-	poll      time.Duration
+	// fallback bounds how often the publish loop probes even when the page
+	// sent no wake event. It covers changes the injected observer cannot
+	// see (CSSOM-only edits, dropped wakes) and re-resolves the session
+	// after a window switch or reload.
+	fallback time.Duration
 
 	upgrader websocket.Upgrader
 
@@ -184,7 +188,7 @@ func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string,
 		addr:      addr,
 		selectors: selectors,
 		window:    window,
-		poll:      150 * time.Millisecond,
+		fallback:  1 * time.Second,
 		upgrader: websocket.Upgrader{
 			// Local-only tool; accept any origin (127.0.0.1 / localhost).
 			CheckOrigin: func(*http.Request) bool { return true },
@@ -408,15 +412,29 @@ func (m *Mirror) sendFullState(c *client) {
 	}
 }
 
-// publishLoop probes the pane on a timer and broadcasts changes.
+// publishLoop is event-driven: the page's injected observer (cdp.
+// MirrorInjectJS) pushes a wake through the session's CDP binding when the
+// DOM, scroll position, or window size changes, and the loop refreshes on
+// each wake. A slow fallback ticker covers what the observer cannot see
+// (CSSOM-only edits, dropped wakes) and re-picks the session after a
+// window switch or reload.
 func (m *Mirror) publishLoop(ctx context.Context) {
-	ticker := time.NewTicker(m.poll)
+	ticker := time.NewTicker(m.fallback)
 	defer ticker.Stop()
 	for {
+		s, _ := m.pickSession(m.disc.Windows())
+		var wake <-chan struct{}
+		if s != nil {
+			wake = s.MirrorWake()
+		}
 		select {
 		case <-ctx.Done():
 			return
+		case <-wake:
+			m.log.Debug("mirror: refresh (wake)")
+			m.refresh()
 		case <-ticker.C:
+			m.log.Debug("mirror: refresh (fallback)")
 			m.refresh()
 		}
 	}

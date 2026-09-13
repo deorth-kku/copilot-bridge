@@ -70,3 +70,46 @@ const InjectJS = `(() => {
   (window.__loadLlamaSchedule || push)();
   return 'ok';
 })()`
+
+// MirrorBindingName is the CDP runtime binding global the mirror's change
+// observer pushes through. A second binding (not an extended payload of
+// BindingName) keeps the two pipelines independent: the chat-state push is
+// deduped by payload in the session, which would swallow DOM changes that
+// don't alter the chat state.
+const MirrorBindingName = "vscodeLoadLlamaMirror"
+
+// MirrorInjectJS installs a versioned observer that wakes the mirror
+// (via window.<MirrorBindingName>) whenever the page changes in a way the
+// mirror's fingerprint can see:
+//   - DOM mutations anywhere (childList / characterData / any attribute —
+//     no attributeFilter, so class/style/width changes are covered too);
+//   - scrolling in ANY scrollable descendant: scroll events don't bubble,
+//     but the capture phase at the document root sees them all, so one
+//     listener covers every container the mirror might measure;
+//   - window resize (changes the pane's bounding box).
+//
+// Changes are debounced (50ms) so a streaming chat produces at most ~20
+// wakes/second. It always emits once at the end, so (re)connecting yields
+// an immediate probe.
+const MirrorInjectJS = `(() => {
+  const VERSION = 1;
+  const wake = () => { try { window.` + MirrorBindingName + `('1'); } catch (e) {} };
+  if (window.__mirrorVersion !== VERSION) {
+    if (window.__mirrorMO) { try { window.__mirrorMO.disconnect(); } catch (e) {} }
+    window.__mirrorVersion = VERSION;
+    let timer = null;
+    const schedule = () => {
+      if (timer) return;
+      timer = setTimeout(() => { timer = null; wake(); }, 50);
+    };
+    window.__mirrorSchedule = schedule;
+    window.__mirrorMO = new MutationObserver(schedule);
+    window.__mirrorMO.observe(document.documentElement, {
+      subtree: true, childList: true, characterData: true, attributes: true,
+    });
+    document.addEventListener('scroll', schedule, true);
+    window.addEventListener('resize', schedule);
+  }
+  (window.__mirrorSchedule || wake)();
+  return 'ok';
+})()`

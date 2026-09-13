@@ -16,12 +16,13 @@ import (
 // every command method the client sends (in order) and drives the same
 // flow the real page produces:
 //
-//  1. client: Runtime.enable, Page.enable, Runtime.addBinding, Runtime.evaluate
+//  1. client: Runtime.enable, Page.enable, then addBinding + evaluate for
+//     BOTH bindings (chat state, mirror wake)
 //  2. page:   bindingCalled with EMPTY input (startup snapshot — the
 //     real page always emits this on (re)inject),
 //     then a real input event,
 //     then Page.frameNavigated (workbench reload),
-//  3. client: Runtime.addBinding, Runtime.evaluate (re-injection)
+//  3. client: addBinding + evaluate for both bindings (re-injection)
 //  4. page:   bindingCalled with final input
 func startMockPage(t *testing.T) (wsURL string, methods chan string) {
 	t.Helper()
@@ -87,8 +88,13 @@ func TestSessionHandshakeAndEvents(t *testing.T) {
 	s := NewSession("test-id", "Test Window", wsURL, events, discardLog)
 	go s.Run(context.Background())
 
-	// 1. handshake commands in the expected order
-	for _, want := range []string{"Runtime.enable", "Page.enable", "Runtime.addBinding", "Runtime.evaluate"} {
+	// 1. handshake commands in the expected order (two bindings:
+	//    chat state + mirror wake)
+	for _, want := range []string{
+		"Runtime.enable", "Page.enable",
+		"Runtime.addBinding", "Runtime.evaluate",
+		"Runtime.addBinding", "Runtime.evaluate",
+	} {
 		select {
 		case got := <-methods:
 			if got != want {
@@ -114,8 +120,11 @@ func TestSessionHandshakeAndEvents(t *testing.T) {
 		t.Errorf("unexpected second event: %+v", ev)
 	}
 
-	// 4. frameNavigated triggers re-injection (addBinding + evaluate again)
-	for _, want := range []string{"Runtime.addBinding", "Runtime.evaluate"} {
+	// 4. frameNavigated triggers re-injection of BOTH bindings
+	for _, want := range []string{
+		"Runtime.addBinding", "Runtime.evaluate",
+		"Runtime.addBinding", "Runtime.evaluate",
+	} {
 		select {
 		case got := <-methods:
 			if got != want {
