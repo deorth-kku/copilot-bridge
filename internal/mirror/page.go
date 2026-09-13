@@ -3,7 +3,9 @@ package mirror
 // pageHTML is the single-page mirror client. It renders the extracted pane
 // HTML (styled by the extracted workbench CSS) inside #pane, forwards all
 // mouse/keyboard events to the server as pane-relative coordinates, and
-// re-renders whenever a new state arrives. The extracted HTML carries no
+// patches the pane DOM in place whenever a new state arrives — only the
+// changed nodes are touched, so the browser re-lays-out/repaints just the
+// updated parts instead of the whole page. The extracted HTML carries no
 // scripts, so the mirror is purely a visual replica plus an input-capture
 // surface; all real behavior happens in the live VS Code page.
 const pageHTML = `<!doctype html>
@@ -158,6 +160,81 @@ const pageHTML = `<!doctype html>
     };
   }
 
+  // ---- Incremental DOM patching ------------------------------------
+  // A new state's HTML is parsed into a detached <template> tree and diffed
+  // against the live pane DOM instead of pane.innerHTML = html. Matching
+  // nodes are updated in place (attributes, text), mismatching subtrees are
+  // replaced, surplus old children are removed, new children are appended.
+  // Unchanged subtrees are never touched, so the browser only re-lays-out
+  // and repaints what actually changed, and the focused input element
+  // survives the update (no soft-keyboard flicker, no IME interruption).
+  //
+  // Children are matched by position. That is optimal for the chat pane,
+  // where updates are in-place text changes (streaming) and appends at the
+  // bottom (new messages). A mid-list insertion degrades gracefully: from
+  // the insertion point on, subtrees are replaced wholesale — still correct,
+  // just less efficient.
+  function parseFragment(html) {
+    var tpl = document.createElement('template');
+    tpl.innerHTML = html;
+    return tpl.content.firstElementChild;
+  }
+
+  function patchNode(oldEl, newEl) {
+    if (oldEl.nodeType !== newEl.nodeType ||
+        (oldEl.nodeType === 1 && oldEl.nodeName !== newEl.nodeName)) {
+      // Different kind of node: swap the whole subtree. newEl is detached
+      // (inside the template), so this is a move, not a clone.
+      oldEl.replaceWith(newEl);
+      return;
+    }
+    if (oldEl.nodeType !== 1) {
+      // Text/comment node: update the content in place.
+      if (oldEl.data !== newEl.data) oldEl.data = newEl.data;
+      return;
+    }
+    syncAttrs(oldEl, newEl);
+    patchChildren(oldEl, newEl);
+  }
+
+  function syncAttrs(oldEl, newEl) {
+    var i, a;
+    // Drop attributes the new node no longer has (iterate backwards).
+    for (i = oldEl.attributes.length - 1; i >= 0; i--) {
+      a = oldEl.attributes[i];
+      if (newEl.getAttribute(a.name) === null) oldEl.removeAttribute(a.name);
+    }
+    // Add or update attributes.
+    for (i = 0; i < newEl.attributes.length; i++) {
+      a = newEl.attributes[i];
+      if (oldEl.getAttribute(a.name) !== a.value) oldEl.setAttribute(a.name, a.value);
+    }
+    // Properties that outerHTML does not carry as attributes.
+    if (oldEl.tagName === 'INPUT' || oldEl.tagName === 'TEXTAREA') {
+      if (oldEl.checked !== newEl.checked) oldEl.checked = newEl.checked;
+      if (oldEl.value !== newEl.value) oldEl.value = newEl.value;
+    }
+    if (oldEl.tagName === 'SELECT' && oldEl.selectedIndex !== newEl.selectedIndex) {
+      oldEl.selectedIndex = newEl.selectedIndex;
+    }
+  }
+
+  function patchChildren(oldEl, newEl) {
+    // Snapshot both child lists: patching mutates oldEl's live childNodes.
+    var oldKids = Array.prototype.slice.call(oldEl.childNodes);
+    var newKids = Array.prototype.slice.call(newEl.childNodes);
+    var i;
+    for (i = 0; i < oldKids.length && i < newKids.length; i++) {
+      patchNode(oldKids[i], newKids[i]);
+    }
+    for (i = oldKids.length - 1; i >= newKids.length; i--) {
+      oldEl.removeChild(oldKids[i]);
+    }
+    for (i = oldKids.length; i < newKids.length; i++) {
+      oldEl.appendChild(newKids[i]);
+    }
+  }
+
   function applyState(m) {
     if (m.rootStyle) {
       var parts = m.rootStyle.split(';');
@@ -171,7 +248,18 @@ const pageHTML = `<!doctype html>
         if (p) pane.style.setProperty(p, v);
       }
     }
-    pane.innerHTML = m.html;
+    var newRoot = parseFragment(m.html);
+    var oldRoot = pane.firstElementChild;
+    if (newRoot && oldRoot) {
+      try {
+        patchNode(oldRoot, newRoot);
+      } catch (err) {
+        // Defensive: a full rebuild is always correct.
+        pane.innerHTML = m.html;
+      }
+    } else if (newRoot) {
+      pane.appendChild(newRoot);
+    }
     // The live chat input's textarea (Monaco's ime-text-area) is readonly. In
     // the mirror it must be editable, otherwise: focusing it does not bring
     // up the mobile soft keyboard, and IME composition (e.g. Chinese pinyin)
@@ -184,8 +272,10 @@ const pageHTML = `<!doctype html>
         inputs[i].removeAttribute('aria-hidden');
         if (inputs[i].getAttribute('tabindex') === '-1') inputs[i].setAttribute('tabindex', '0');
       }
-      // Re-rendering replaces the previously focused input element and would
-      // drop focus (killing the soft keyboard / IME session); restore it.
+      // If the patch replaced the previously focused input element (a large
+      // restructure), focus would be dropped (killing the soft keyboard /
+      // IME session); restore it. Usually the input survives in place and
+      // this is a no-op.
       if (inputFocusWanted) {
         var el = findInputIn(box);
         if (el) {
