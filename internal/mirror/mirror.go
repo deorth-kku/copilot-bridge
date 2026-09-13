@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,6 +92,18 @@ type windowMsg struct {
 	ID   string `json:"id"`
 }
 
+// imgEntry is one fetched image resource, cached by the hash of its source
+// URL (which doubles as the /img/<hash> path segment).
+type imgEntry struct {
+	data        []byte
+	contentType string
+}
+
+// imgSrcRe matches blob:/vscode-file: image srcs in extracted pane HTML.
+// These URLs are only valid inside the live page's document, so the mirror
+// rewrites them to /img/<hash> URLs served by this process.
+var imgSrcRe = regexp.MustCompile(`src="((?:blob:|vscode-file:)[^"]*)"`)
+
 // Mirror owns the web server, the set of connected browser tabs, and the
 // publish loop that keeps the mirrored pane in sync with the live page.
 type Mirror struct {
@@ -105,6 +118,9 @@ type Mirror struct {
 
 	clientsMu sync.Mutex
 	clients   map[*client]struct{}
+
+	imgMu sync.Mutex
+	imgs  map[string]imgEntry
 
 	// snap is the latest extracted pane snapshot. The pointer is swapped
 	// under snapMu; the (potentially large) html/css strings are shared by
@@ -174,6 +190,7 @@ func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string,
 			CheckOrigin: func(*http.Request) bool { return true },
 		},
 		clients: make(map[*client]struct{}),
+		imgs:    make(map[string]imgEntry),
 	}
 }
 
@@ -183,6 +200,7 @@ func (m *Mirror) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", m.handlePage)
 	mux.HandleFunc("/ws", m.handleWS)
+	mux.HandleFunc("/img/", m.handleImage)
 	srv := &http.Server{Addr: m.addr, Handler: mux}
 
 	errCh := make(chan error, 1)
@@ -220,6 +238,75 @@ func (m *Mirror) handlePage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(pageHTML))
+}
+
+// handleImage serves one cached image resource under /img/<hash>.
+func (m *Mirror) handleImage(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimPrefix(r.URL.Path, "/img/")
+	if key == "" || strings.Contains(key, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	m.imgMu.Lock()
+	e, ok := m.imgs[key]
+	m.imgMu.Unlock()
+	if !ok {
+		m.log.Debug("image: serve miss", "key", key)
+		http.NotFound(w, r)
+		return
+	}
+	m.log.Debug("image: serve hit", "key", key, "bytes", len(e.data), "type", e.contentType)
+	w.Header().Set("Content-Type", e.contentType)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(e.data)
+}
+
+// rewriteImages replaces blob:/vscode-file: image srcs in the extracted pane
+// HTML with /img/<hash> URLs. Each source URL is fetched from the live page
+// once (via CDP) and cached; on fetch failure the original src is left
+// untouched (the mirror shows a broken image for that one, as before).
+func (m *Mirror) rewriteImages(s *cdp.Session, html string) string {
+	for _, mth := range imgSrcRe.FindAllStringSubmatch(html, -1) {
+		u := mth[1]
+		key := hashStr(u)
+		m.imgMu.Lock()
+		_, ok := m.imgs[key]
+		m.imgMu.Unlock()
+		if !ok {
+			m.log.Debug("image: fetch attempt", "url", u, "key", key)
+			data, ctype, via, err := cdp.FetchImage(s, u)
+			if err != nil {
+				m.log.Warn("image fetch failed", "url", u, "err", err)
+				continue
+			}
+			if ctype == "" {
+				ctype = guessImageType(data)
+			}
+			m.log.Debug("image: fetched", "key", key, "via", via, "bytes", len(data), "type", ctype)
+			m.imgMu.Lock()
+			m.imgs[key] = imgEntry{data: data, contentType: ctype}
+			m.imgMu.Unlock()
+		}
+		html = strings.ReplaceAll(html, `src="`+u+`"`, `src="/img/`+key+`"`)
+	}
+	return html
+}
+
+// guessImageType falls back to magic-byte sniffing when a blob fetch reports
+// no content type.
+func guessImageType(data []byte) string {
+	switch {
+	case len(data) >= 8 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G':
+		return "image/png"
+	case len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8:
+		return "image/jpeg"
+	case len(data) >= 4 && data[0] == 'G' && data[1] == 'I' && data[2] == 'F':
+		return "image/gif"
+	case len(data) >= 12 && string(data[8:12]) == "WEBP":
+		return "image/webp"
+	default:
+		return "image/png"
+	}
 }
 
 func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -411,6 +498,7 @@ func (m *Mirror) refresh() {
 			return
 		}
 		html, rootStyle, themeVars = hs.HTML, hs.RootStyle, hs.ThemeVars
+		html = m.rewriteImages(s, html)
 	} else if prev != nil {
 		html, rootStyle, themeVars = prev.html, prev.rootStyle, prev.themeVars
 	}

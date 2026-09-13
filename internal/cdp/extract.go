@@ -368,34 +368,47 @@ func EvalClickPoint(s *Session, selectors []string, path []int, relX, relY float
 			} `json:"value"`
 		} `json:"result"`
 		Exception struct {
-			Description string `json:"description"`
+			Text string `json:"text"`
+			Obj  struct {
+				Description string `json:"description"`
+			} `json:"exception"`
 		} `json:"exceptionDetails"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return 0, 0, false
 	}
-	if resp.Exception.Description != "" {
+	if resp.Exception.Obj.Description != "" || resp.Exception.Text != "" {
 		return 0, 0, false
 	}
 	return resp.Result.Value.X, resp.Result.Value.Y, true
 }
 
 // decodeEval unwraps a Runtime.evaluate response and decodes result.value
-// into T. Page exceptions are surfaced as errors.
+// into T. Page exceptions are surfaced as errors. Note: CDP puts the
+// exception's description at exceptionDetails.exception.description (with a
+// human-readable fallback at exceptionDetails.text); a rejected promise
+// (awaitPromise) also carries result.value = {}, so the exception check
+// must happen before decoding the value.
 func decodeEval[T any](raw jsontext.Value) (*T, error) {
 	var resp struct {
 		Result struct {
 			Value jsontext.Value `json:"value"`
 		} `json:"result"`
 		Exception struct {
-			Description string `json:"description"`
+			Text string `json:"text"`
+			Obj  struct {
+				Description string `json:"description"`
+			} `json:"exception"`
 		} `json:"exceptionDetails"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, err
 	}
-	if resp.Exception.Description != "" {
-		return nil, errors.New("page exception: " + resp.Exception.Description)
+	if desc := resp.Exception.Obj.Description; desc != "" {
+		return nil, errors.New("page exception: " + desc)
+	}
+	if resp.Exception.Text != "" {
+		return nil, errors.New("page exception: " + resp.Exception.Text)
 	}
 	var out T
 	if err := json.Unmarshal(resp.Result.Value, &out); err != nil {
