@@ -330,9 +330,30 @@ const pageHTML = `<!doctype html>
       // conversation, so the old "same distance from the bottom" formula
       // only holds at the very bottom. Align the mirror's viewport with the
       // live viewport inside the rendered window instead.
-      var aligned = alignToLiveViewport(el, m.scroll, m.scrollRows);
-      if (aligned != null) {
-        target = aligned;
+      var a = alignToLiveViewport(el, m.scroll, m.scrollRows);
+      if (a != null) {
+        // a.above / a.inside are the mirror pixels of the rendered content
+        // that fall above / inside the live viewport. The live viewport's
+        // mirror height (a.inside) can exceed the mirror scroller's own
+        // height (the mirror is shorter than live, or its rows are taller),
+        // in which case the whole live viewport does not fit and one end
+        // must be cut. Scrolling in the mirror is forwarded to live and the
+        // mirror re-anchors, so the cut end is only reachable if live can
+        // still scroll that direction.
+        //
+        // Default: keep the BOTTOM of the live viewport on screen (the
+        // latest messages) — scrollTop = above + (inside - clientH). The
+        // hidden sliver is then the live viewport's TOP, reachable by
+        // scrolling up because live can scroll up.
+        //
+        // Special case: when live is itself at the very top of the
+        // conversation (v0 ~ 0) it cannot scroll up, so anchoring the
+        // bottoms would permanently cut the top. Anchor the TOPS instead
+        // (scrollTop = above); the hidden sliver is the live viewport's
+        // bottom, reachable by scrolling down.
+        var v0 = -m.scroll.offset;
+        var atTop = v0 < 1;
+        target = a.above + (atTop ? 0 : Math.max(0, a.inside - el.clientHeight));
       } else {
         var distBottom = (m.scroll.scrollH - m.scroll.h) + m.scroll.offset;
         target = distBottom <= 0 ? max : max - distBottom;
@@ -341,29 +362,34 @@ const pageHTML = `<!doctype html>
     el.scrollTop = Math.max(0, Math.min(max, target));
   }
 
-  // Aligns the mirror scroller's viewport with the live viewport. The live
-  // list's rendered rows carry [offsetTop, offsetHeight] pairs in
-  // full-content coordinates (rows); the live viewport's top is -scroll.offset
-  // in the same coordinates (the rows container's negative offsetTop encodes
-  // the scroll position, and the live scrollTop is always 0). The mirror
-  // shows the same rows in the same order but at different heights
-  // (responsive width), so skip exactly the mirror pixels of the rows the
-  // live viewport has scrolled past.
+  // Maps the live viewport onto the mirror's rendered rows. The live list's
+  // rendered rows carry [offsetTop, offsetHeight] pairs in full-content
+  // coordinates (rows); the live viewport spans [v0, v0 + scroll.h] in the
+  // same coordinates (the rows container's negative offsetTop encodes the
+  // scroll position, and the live scrollTop is always 0). The mirror shows
+  // the same rows in the same order but at different heights (responsive
+  // width), so this returns the mirror pixels of the rendered content that
+  // fall ABOVE the live viewport (above) and INSIDE it (inside). The caller
+  // picks the scrollTop so the end of the live viewport that must stay
+  // visible is on screen.
   function alignToLiveViewport(el, scroll, rows) {
     if (!rows || !rows.length) return null;
     var rowEls = el.querySelector('.monaco-list-rows');
     if (!rowEls || !rowEls.children.length) return null;
     var v0 = -scroll.offset;
+    var v1 = v0 + scroll.h;
     var n = Math.min(rowEls.children.length, rows.length / 2);
-    var target = 0;
+    var above = 0, inside = 0;
     for (var i = 0; i < n; i++) {
       var top = rows[i * 2], h = rows[i * 2 + 1];
       if (h <= 0) continue;
-      if (top + h <= v0) target += rowEls.children[i].offsetHeight;
-      else if (top < v0) target += rowEls.children[i].offsetHeight * (v0 - top) / h;
-      else break;
+      if (top + h <= v0) { above += rowEls.children[i].offsetHeight; continue; }
+      if (top >= v1) break;
+      var mh = rowEls.children[i].offsetHeight;
+      if (top < v0) above += mh * (v0 - top) / h;
+      inside += mh * (Math.min(top + h, v1) - Math.max(top, v0)) / h;
     }
-    return target;
+    return { above: above, inside: inside };
   }
 
   // The self-drawn scrollbar (.scrollbar > .slider inside a
