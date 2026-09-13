@@ -97,6 +97,11 @@ const pageHTML = `<!doctype html>
     var o = document.createElement('option');
     o.textContent = t;
     status.appendChild(o);
+    // The placeholder destroyed the real options; force syncWindows to
+    // rebuild them on the next state (otherwise the ver-unchanged early
+    // return would leave the picker stuck on the placeholder, e.g. after
+    // a server restart).
+    lastWinVer = '';
   }
 
   // Rebuild the picker options only when the window set changes — state
@@ -418,17 +423,80 @@ const pageHTML = `<!doctype html>
     var ei = elemInfo(e.target, e.clientX, e.clientY);
     send({ type: 'mouse', kind: 'moved', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, buttons: e.buttons });
   });
+  // The live chat list quantizes wheel input (measured on the live page):
+  // any event with |delta| > 10px scrolls exactly one row (~50px) no matter
+  // how large the delta is, and smaller deltas are ignored entirely.
+  // Forwarding every raw event therefore makes touch swipes (dozens of small
+  // high-frequency touchmove events) scroll many times faster than a desktop
+  // wheel (one event per notch). Normalize instead: accumulate deltas per
+  // scrollable element and emit one event per WHEEL_CHUNK px of accumulated
+  // wheel movement (one desktop notch, keeps the wheel feel unchanged) or
+  // TOUCH_CHUNK px of finger movement (1:1 finger tracking), flushing the
+  // remainder when the stream stops.
+  var WHEEL_CHUNK = 100, TOUCH_CHUNK = 50, FLUSH_MIN = 11, FLUSH_MS = 150;
+  var wheelAcc = {}; // key: scroller identity -> { x, y, path, relX, relY, buttons, ax, ay, timer }
+  function flushWheelAcc(key) {
+    var a = wheelAcc[key];
+    if (!a) return;
+    if (a.timer) { clearTimeout(a.timer); a.timer = null; }
+    // FLUSH_MIN is the live list's per-event threshold: below it the flush
+    // would be ignored anyway, so dropping it is invisible.
+    if (Math.abs(a.ay) >= FLUSH_MIN || Math.abs(a.ax) >= FLUSH_MIN) {
+      send({ type: 'mouse', kind: 'wheel', x: a.x, y: a.y, path: a.path, relX: a.relX, relY: a.relY, deltaX: a.ax, deltaY: a.ay, buttons: a.buttons });
+    }
+    a.ax = 0; a.ay = 0;
+    delete wheelAcc[key];
+  }
+  // Key the accumulator by the scrollable element, not by the element under
+  // the cursor: chat list rows are virtualized and their DOM index changes
+  // as the list scrolls, which would fragment the accumulation.
+  function wheelAccKey(target) {
+    var sc = (target && target.closest) ? target.closest('.monaco-scrollable-element') : null;
+    if (!sc) sc = target;
+    var ei = elemInfo(sc, 0, 0);
+    return ei.path ? JSON.stringify(ei.path) : 'root';
+  }
+  // Some devices report wheel deltas in lines (deltaMode 1) or pages
+  // (deltaMode 2); normalize to pixels.
+  function normDelta(v, mode, pageH) {
+    if (mode === 1) return v * 20;
+    if (mode === 2) return v * pageH;
+    return v;
+  }
+  function accumulateWheel(key, x, y, path, relX, relY, buttons, dx, dy, chunk) {
+    var a = wheelAcc[key];
+    if (!a) {
+      a = { x: x, y: y, path: path, relX: relX, relY: relY, buttons: buttons, ax: 0, ay: 0, timer: null };
+      wheelAcc[key] = a;
+    }
+    a.x = x; a.y = y; a.path = path; a.relX = relX; a.relY = relY; a.buttons = buttons;
+    a.ax += dx; a.ay += dy;
+    var n = 0;
+    while (Math.abs(a.ay) >= chunk || Math.abs(a.ax) >= chunk) {
+      var dY = a.ay >= chunk ? chunk : (a.ay <= -chunk ? -chunk : 0);
+      var dX = a.ax >= chunk ? chunk : (a.ax <= -chunk ? -chunk : 0);
+      send({ type: 'mouse', kind: 'wheel', x: a.x, y: a.y, path: a.path, relX: a.relX, relY: a.relY, deltaX: dX, deltaY: dY, buttons: a.buttons });
+      a.ax -= dX; a.ay -= dY;
+      if (++n > 100) break; // safety valve against pathological deltas
+    }
+    if (a.timer) clearTimeout(a.timer);
+    a.timer = setTimeout(function () { flushWheelAcc(key); }, FLUSH_MS);
+  }
   pane.addEventListener('wheel', function (e) {
     e.preventDefault();
     var c = paneCoords(e);
     var ei = elemInfo(e.target, e.clientX, e.clientY);
-    send({ type: 'mouse', kind: 'wheel', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, deltaX: e.deltaX, deltaY: e.deltaY, buttons: e.buttons });
+    var dx = normDelta(e.deltaX, e.deltaMode, pane.clientHeight);
+    var dy = normDelta(e.deltaY, e.deltaMode, pane.clientHeight);
+    accumulateWheel(wheelAccKey(e.target), c.x, c.y, ei.path, ei.relX, ei.relY, e.buttons, dx, dy, WHEEL_CHUNK);
   }, { passive: false });
   // Touch scrolling: touch swipes do not produce wheel events, so forward the
   // finger movement as wheel deltas and let the live page's message history
   // scroll (the mirror's DOM is a static snapshot; native scrolling of it
   // would diverge from the live page). Signs are flipped: finger up scrolls
-  // the page down, matching native touch behavior.
+  // the page down, matching native touch behavior. Deltas are accumulated
+  // (see accumulateWheel) so a swipe scrolls at ~1:1 finger speed instead of
+  // one 50px row per touchmove event.
   var touchState = null;
   var touchMoved = 0;
   pane.addEventListener('touchstart', function (e) {
@@ -449,9 +517,15 @@ const pageHTML = `<!doctype html>
     if (touchMoved <= 4) return; // ignore micro-jitter
     var c = paneCoords(t);
     var ei = elemInfo(touchState.target, t.clientX, t.clientY);
-    send({ type: 'mouse', kind: 'wheel', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, deltaX: -dx, deltaY: -dy, buttons: 0 });
+    accumulateWheel(wheelAccKey(touchState.target), c.x, c.y, ei.path, ei.relX, ei.relY, 0, -dx, -dy, TOUCH_CHUNK);
   }, { passive: false });
-  pane.addEventListener('touchend', function () { touchState = null; });
+  function endTouch() {
+    touchState = null;
+    // Flush pending touch deltas now instead of waiting for the idle timer.
+    for (var k in wheelAcc) flushWheelAcc(k);
+  }
+  pane.addEventListener('touchend', endTouch);
+  pane.addEventListener('touchcancel', endTouch);
   pane.addEventListener('contextmenu', function (e) { e.preventDefault(); });
   // Fallback focus for browsers where the mousedown focus did not stick.
   // Clicking outside the input area drops the focus flag so re-renders do not
