@@ -57,6 +57,14 @@ const pageHTML = `<!doctype html>
   #pane .interactive-list { height: auto !important; flex: 1 1 0% !important; min-height: 0 !important; }
   #pane .monaco-list-rows { position: static !important; transform: none !important; top: auto !important; left: auto !important; height: auto !important; overflow: visible !important; contain: none !important; }
   #pane .monaco-list-row { position: static !important; top: auto !important; height: auto !important; }
+  /* The live todo-list header renders the clear button INSIDE the title row
+     (a flex item on the right). The mirror's DOM places the button container
+     as a sibling of the title row under the block-level .todo-list-expand, so
+     it wraps onto its own line. Re-flow the expand as a flex row so the title
+     and the button sit on one line, like live. */
+  #pane .todo-list-expand { display: flex !important; flex-direction: row !important; align-items: center !important; }
+  #pane .todo-list-expand > a.monaco-button { flex: 1 1 auto !important; min-width: 0 !important; }
+  #pane .todo-clear-button-container { flex: 0 0 auto !important; width: auto !important; }
     /* Safety net: the chat find widget is hidden in the live page (visibility:hidden)
      by a rule scoped to .monaco-workbench. The #pane.monaco-workbench class below
      normally makes that rule apply, but keep an explicit hide in case it is not. */
