@@ -89,6 +89,11 @@ const pageHTML = `<!doctype html>
   var lastCSSVer = '';
   var lastThemeVer = '';
   var lastWinVer = '';
+  // Last live scroll state (m.scroll: live scroller's h/scrollH/offset) and
+  // the DOM path of the scroller the server measured (m.scrollPath). Used to
+  // mirror the live-drawn scrollbar's position/size onto the mirror scroller.
+  var lastScroll = null;
+  var lastScrollPath = null;
 
   // The status bar is a <select> (window picker). setStatus replaces its
   // options with a single placeholder (connecting / error states).
@@ -145,6 +150,8 @@ const pageHTML = `<!doctype html>
       // ends; the next state message will catch up.
       if (composing) return;
       if (m.err) { setStatus('! ' + m.err); return; }
+      if (m.scroll) lastScroll = m.scroll;
+      lastScrollPath = m.scrollPath || null;
       syncWindows(m);
       if (m.cssVersion !== lastCSSVer) {
         lastCSSVer = m.cssVersion || '';
@@ -161,6 +168,7 @@ const pageHTML = `<!doctype html>
         // re-render, just keep the local scroll position in sync with the
         // live page.
         restoreScroll(m);
+        syncDrawnScrollbars();
       }
     };
   }
@@ -290,6 +298,7 @@ const pageHTML = `<!doctype html>
       }
     }
     restoreScroll(m);
+    syncDrawnScrollbars();
   }
 
   // Restore the live scroll position on the SAME element the server measured,
@@ -320,6 +329,61 @@ const pageHTML = `<!doctype html>
       target = distBottom <= 0 ? max : max - distBottom;
     }
     el.scrollTop = Math.max(0, Math.min(max, target));
+  }
+
+  // The self-drawn scrollbar (.scrollbar > .slider inside a
+  // .monaco-scrollable-element) arrives with inline top/height computed for
+  // the live pane's geometry. The mirror scroller is a different height, and
+  // its own content is only the currently rendered (virtualized) rows, so
+  // its native scroll range is unstable and does not represent the chat's
+  // total range. Instead, mirror the LIVE slider state, transformed to the
+  // mirror's height:
+  //   liveRatio = -offset / (scrollH - h)      (0 = top, 1 = bottom)
+  //   sliderH   = clientH * h / scrollH        (live visible/total ratio,
+  //   sliderTop = liveRatio * (clientH - sliderH)   scaled to mirror height)
+  // The track is absolute inside the scroller, so it scrolls out of view with
+  // the content; offset its top by the scroller's scrollTop to pin it to the
+  // top of the visible area. Other (nested) scrollers have no live state, so
+  // they fall back to their own geometry.
+  // Called after every DOM patch, scroll restoration, local scroll, and
+  // viewport resize.
+  function syncDrawnScrollbars() {
+    var root = pane.firstElementChild;
+    if (!root) return;
+    var target = null;
+    if (lastScrollPath && lastScrollPath.length) {
+      target = root;
+      for (var i = 0; i < lastScrollPath.length; i++) {
+        target = target.children[lastScrollPath[i]];
+        if (!target) break;
+      }
+    }
+    var scrollers = root.querySelectorAll('.monaco-list > .monaco-scrollable-element');
+    for (var i = 0; i < scrollers.length; i++) {
+      var el = scrollers[i];
+      var track = el.querySelector(':scope > .scrollbar.vertical');
+      if (!track) continue;
+      var slider = track.querySelector('.slider');
+      if (!slider) continue;
+      var clientH = el.clientHeight;
+      if (clientH <= 0) continue;
+      var ratio, sliderH;
+      if (el === target && lastScroll && lastScroll.scrollH > lastScroll.h) {
+        var liveMax = lastScroll.scrollH - lastScroll.h;
+        ratio = Math.max(0, Math.min(1, -lastScroll.offset / liveMax));
+        sliderH = clientH * lastScroll.h / lastScroll.scrollH;
+      } else {
+        var max = el.scrollHeight - clientH;
+        if (el.scrollHeight <= 0) continue;
+        ratio = max > 0 ? Math.max(0, Math.min(1, el.scrollTop / max)) : 1;
+        sliderH = clientH * clientH / el.scrollHeight;
+      }
+      if (sliderH < 20) sliderH = 20;
+      track.style.height = clientH + 'px';
+      track.style.top = el.scrollTop + 'px';
+      slider.style.top = ratio * (clientH - sliderH) + 'px';
+      slider.style.height = sliderH + 'px';
+    }
   }
 
   function paneCoords(e) {
@@ -527,6 +591,10 @@ const pageHTML = `<!doctype html>
   pane.addEventListener('touchend', endTouch);
   pane.addEventListener('touchcancel', endTouch);
   pane.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  // Keep the self-drawn scrollbar in sync with any local (programmatic)
+  // scrolling of the mirror scrollers and with viewport resizes (rotation).
+  pane.addEventListener('scroll', syncDrawnScrollbars, true);
+  window.addEventListener('resize', syncDrawnScrollbars);
   // Fallback focus for browsers where the mousedown focus did not stick.
   // Clicking outside the input area drops the focus flag so re-renders do not
   // steal focus back into the input. A swipe that ends as a click is ignored.
