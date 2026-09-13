@@ -41,7 +41,12 @@ type HTMLState struct {
 	Rect       PaneRect   `json:"rect"`
 	Scroll     PaneScroll `json:"scroll"`
 	ScrollPath []int      `json:"scrollPath"`
-	CSSFP      string     `json:"cssFP"`
+	// ScrollRows is each currently rendered row's [offsetTop, offsetHeight]
+	// pair in full-content coordinates (see scrollPathJS). The mirror uses it
+	// to align its viewport with the live viewport inside the rendered row
+	// window, because the mirror's content is only that window.
+	ScrollRows []float64 `json:"scrollRows,omitempty"`
+	CSSFP      string    `json:"cssFP"`
 }
 
 // CSSState is the result of ExtractCSS.
@@ -59,6 +64,7 @@ type FingerprintState struct {
 	Rect       PaneRect   `json:"rect"`
 	Scroll     PaneScroll `json:"scroll"`
 	ScrollPath []int      `json:"scrollPath"`
+	ScrollRows []float64  `json:"scrollRows,omitempty"`
 }
 
 // htmlExpr extracts the pane subtree's outerHTML plus the layout metadata
@@ -116,6 +122,7 @@ const htmlExpr = `(selectors) => {
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
     scrollPath: scrollPath,
+    scrollRows: scrollRows,
     cssFP: cssFP,
   };
 }`
@@ -186,9 +193,22 @@ const scrollPathJS = `
     }
   } catch (e) { scrollPath = null; }
   let scrollOffset = 0;
+  let scrollRows = null;
   try {
     const rc = sc.querySelector('.monaco-list-rows');
-    if (rc) scrollOffset = rc.offsetTop;
+    if (rc) {
+      scrollOffset = rc.offsetTop;
+      // Each rendered row's [offsetTop, offsetHeight] in full-content
+      // coordinates. The rows container is full-content-sized and its own
+      // offsetTop encodes the scroll position, so a row's offsetTop within it
+      // is its position in the full conversation (0 = top). The mirror needs
+      // this because its content is only the currently rendered rows (a
+      // sliding window), not the full conversation.
+      if (rc.children.length) {
+        scrollRows = [];
+        for (const r of rc.children) scrollRows.push(r.offsetTop, r.offsetHeight);
+      }
+    }
   } catch (e) { scrollOffset = 0; }
 `
 
@@ -222,6 +242,7 @@ const fpExpr = `(selectors) => {
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
     scrollPath: scrollPath,
+    scrollRows: scrollRows,
   };
 }`
 

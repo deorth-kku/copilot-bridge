@@ -57,7 +57,7 @@ const pageHTML = `<!doctype html>
   #pane .interactive-list { height: auto !important; flex: 1 1 0% !important; min-height: 0 !important; }
   #pane .monaco-list-rows { position: static !important; transform: none !important; top: auto !important; left: auto !important; height: auto !important; overflow: visible !important; contain: none !important; }
   #pane .monaco-list-row { position: static !important; top: auto !important; height: auto !important; }
-  /* Safety net: the chat find widget is hidden in the live page (visibility:hidden)
+    /* Safety net: the chat find widget is hidden in the live page (visibility:hidden)
      by a rule scoped to .monaco-workbench. The #pane.monaco-workbench class below
      normally makes that rule apply, but keep an explicit hide in case it is not. */
   #pane .simple-find-part-wrapper, #pane .monaco-findInput, #pane .simple-find-part { display: none !important; }
@@ -325,10 +325,45 @@ const pageHTML = `<!doctype html>
     var max = el.scrollHeight - el.clientHeight;
     var target = m.scroll.top;
     if (m.scroll.offset < 0) {
-      var distBottom = (m.scroll.scrollH - m.scroll.h) + m.scroll.offset;
-      target = distBottom <= 0 ? max : max - distBottom;
+      // Bottom-anchored live list: the mirror's content is only the live
+      // list's currently rendered rows (a sliding window), not the full
+      // conversation, so the old "same distance from the bottom" formula
+      // only holds at the very bottom. Align the mirror's viewport with the
+      // live viewport inside the rendered window instead.
+      var aligned = alignToLiveViewport(el, m.scroll, m.scrollRows);
+      if (aligned != null) {
+        target = aligned;
+      } else {
+        var distBottom = (m.scroll.scrollH - m.scroll.h) + m.scroll.offset;
+        target = distBottom <= 0 ? max : max - distBottom;
+      }
     }
     el.scrollTop = Math.max(0, Math.min(max, target));
+  }
+
+  // Aligns the mirror scroller's viewport with the live viewport. The live
+  // list's rendered rows carry [offsetTop, offsetHeight] pairs in
+  // full-content coordinates (rows); the live viewport's top is -scroll.offset
+  // in the same coordinates (the rows container's negative offsetTop encodes
+  // the scroll position, and the live scrollTop is always 0). The mirror
+  // shows the same rows in the same order but at different heights
+  // (responsive width), so skip exactly the mirror pixels of the rows the
+  // live viewport has scrolled past.
+  function alignToLiveViewport(el, scroll, rows) {
+    if (!rows || !rows.length) return null;
+    var rowEls = el.querySelector('.monaco-list-rows');
+    if (!rowEls || !rowEls.children.length) return null;
+    var v0 = -scroll.offset;
+    var n = Math.min(rowEls.children.length, rows.length / 2);
+    var target = 0;
+    for (var i = 0; i < n; i++) {
+      var top = rows[i * 2], h = rows[i * 2 + 1];
+      if (h <= 0) continue;
+      if (top + h <= v0) target += rowEls.children[i].offsetHeight;
+      else if (top < v0) target += rowEls.children[i].offsetHeight * (v0 - top) / h;
+      else break;
+    }
+    return target;
   }
 
   // The self-drawn scrollbar (.scrollbar > .slider inside a
@@ -383,6 +418,14 @@ const pageHTML = `<!doctype html>
       track.style.top = el.scrollTop + 'px';
       slider.style.top = ratio * (clientH - sliderH) + 'px';
       slider.style.height = sliderH + 'px';
+      // The live page pins the sticky (pinned) user message to the top of the
+      // list viewport (its scrollTop is always 0, the sticky sits at top:0 in
+      // scroller coordinates). The mirror scroller does scroll, so offset the
+      // sticky by -scrollTop to keep it pinned to the top of the visible area.
+      if (el === target) {
+        var sticky = el.querySelector(':scope > .monaco-tree-sticky-container');
+        if (sticky) sticky.style.top = -el.scrollTop + 'px';
+      }
     }
   }
 
@@ -394,6 +437,25 @@ const pageHTML = `<!doctype html>
   // the pane root) plus the click position as a 0..1 fraction within it. A DOM
   // path is robust to sibling additions elsewhere in the tree (e.g. the
   // conversation growing) that would shift a flat descendant index.
+  // Wheel forwarding only needs to land INSIDE the live scrollable element,
+  // not on the exact touched element. Chat list rows are virtualized: while a
+  // swipe is in flight the live list re-renders and the touched row can move
+  // out of the live viewport (a margin row above/below it), where its DOM
+  // path resolves to an off-screen point and the wheel is silently dropped.
+  // The scroller itself is a stable structural element, so dispatch wheels
+  // at its center. Scrollers other than the measured chat list keep the
+  // precise element mapping.
+  function wheelPoint(target, c) {
+    var sc = (target && target.closest) ? target.closest('.monaco-scrollable-element') : null;
+    if (sc && lastScrollPath) {
+      var ei = elemInfo(sc, 0, 0);
+      if (ei.path && JSON.stringify(ei.path) === JSON.stringify(lastScrollPath)) {
+        return { path: lastScrollPath, relX: 0.5, relY: 0.5 };
+      }
+    }
+    var ei2 = elemInfo(target, c.x, c.y);
+    return { path: ei2.path, relX: ei2.relX, relY: ei2.relY };
+  }
   function elemInfo(target, cx, cy) {
     var root = pane.firstElementChild || pane;
     var t = (target && target !== pane) ? target : root;
@@ -549,10 +611,10 @@ const pageHTML = `<!doctype html>
   pane.addEventListener('wheel', function (e) {
     e.preventDefault();
     var c = paneCoords(e);
-    var ei = elemInfo(e.target, e.clientX, e.clientY);
+    var p = wheelPoint(e.target, c);
     var dx = normDelta(e.deltaX, e.deltaMode, pane.clientHeight);
     var dy = normDelta(e.deltaY, e.deltaMode, pane.clientHeight);
-    accumulateWheel(wheelAccKey(e.target), c.x, c.y, ei.path, ei.relX, ei.relY, e.buttons, dx, dy, WHEEL_CHUNK);
+    accumulateWheel(wheelAccKey(e.target), c.x, c.y, p.path, p.relX, p.relY, e.buttons, dx, dy, WHEEL_CHUNK);
   }, { passive: false });
   // Touch scrolling: touch swipes do not produce wheel events, so forward the
   // finger movement as wheel deltas and let the live page's message history
@@ -580,8 +642,8 @@ const pageHTML = `<!doctype html>
     touchMoved += Math.abs(dx) + Math.abs(dy);
     if (touchMoved <= 4) return; // ignore micro-jitter
     var c = paneCoords(t);
-    var ei = elemInfo(touchState.target, t.clientX, t.clientY);
-    accumulateWheel(wheelAccKey(touchState.target), c.x, c.y, ei.path, ei.relX, ei.relY, 0, -dx, -dy, TOUCH_CHUNK);
+    var p = wheelPoint(touchState.target, c);
+    accumulateWheel(wheelAccKey(touchState.target), c.x, c.y, p.path, p.relX, p.relY, 0, -dx, -dy, TOUCH_CHUNK);
   }, { passive: false });
   function endTouch() {
     touchState = null;

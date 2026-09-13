@@ -43,8 +43,12 @@ type stateMsg struct {
 	Scroll    cdp.PaneScroll `json:"scroll"`
 	// ScrollPath identifies the measured scroll container as a DOM path from
 	// the pane root (no omitempty: an empty path means "the root itself").
-	ScrollPath []int  `json:"scrollPath"`
-	Window     string `json:"window,omitempty"`
+	ScrollPath []int `json:"scrollPath"`
+	// ScrollRows is each rendered row's [offsetTop, offsetHeight] pair in
+	// full-content coordinates; the browser uses it to align its viewport
+	// with the live viewport inside the rendered row window.
+	ScrollRows []float64 `json:"scrollRows,omitempty"`
+	Window     string    `json:"window,omitempty"`
 	// WindowID is the CDP target id of the window currently mirrored; the
 	// browser uses it to mark the selected item in the status-bar picker.
 	WindowID string `json:"windowId,omitempty"`
@@ -153,6 +157,7 @@ type snapState struct {
 	rect       cdp.PaneRect
 	scroll     cdp.PaneScroll
 	scrollPath []int
+	scrollRows []float64
 	err        string
 }
 
@@ -490,7 +495,8 @@ func (m *Mirror) refresh() {
 	m.snapMu.Lock()
 	prev := m.snap
 	rectChanged := prev == nil || prev.rect != fpst.Rect
-	scrollChanged := prev == nil || prev.scroll != fpst.Scroll || !equalInts(prev.scrollPath, fpst.ScrollPath)
+	scrollChanged := prev == nil || prev.scroll != fpst.Scroll || !equalInts(prev.scrollPath, fpst.ScrollPath) ||
+		!equalFloats(prev.scrollRows, fpst.ScrollRows)
 	fpChanged := prev == nil || prev.fp != fpst.FP
 	cssFPChanged := prev == nil || prev.cssFP != fpst.CSSFP
 	var prevCSS, prevCSSVer, prevThemeVer string
@@ -537,7 +543,7 @@ func (m *Mirror) refresh() {
 	ns := &snapState{
 		html: html, css: css, cssVer: cssVer, cssFP: fpst.CSSFP,
 		rootStyle: rootStyle, themeVars: themeVars, themeVer: themeVer,
-		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath,
+		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath, scrollRows: fpst.ScrollRows,
 		window: s.Title(), windowID: winID, fp: fpst.FP,
 	}
 	m.snapMu.Lock()
@@ -546,8 +552,8 @@ func (m *Mirror) refresh() {
 
 	msg := stateMsg{
 		Type: "state", CSSVer: cssVer, RootStyle: rootStyle, ThemeVer: themeVer,
-		Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, Window: s.Title(),
-		WindowID: winID, Windows: wins,
+		Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
+		Window: s.Title(), WindowID: winID, Windows: wins,
 	}
 	if fpChanged {
 		msg.HTML = html
@@ -636,6 +642,18 @@ func (m *Mirror) forwardMouse(s *cdp.Session, e mouseMsg) {
 			x, y = px, py
 		}
 	}
+	// Wheels only need to land somewhere inside the pane (the exact element
+	// under the cursor is irrelevant); clicks need the precise spot. A wheel
+	// whose path resolved off-screen (a virtualized row scrolled out of the
+	// live viewport, or a stale pane-relative fallback) would be dropped by
+	// the browser, so clamp it to the pane center instead.
+	if e.Kind == "wheel" && rect.Width > 0 && rect.Height > 0 {
+		if x < rect.Left || x > rect.Left+rect.Width || y < rect.Top || y > rect.Top+rect.Height {
+			x = rect.Left + rect.Width/2
+			y = rect.Top + rect.Height/2
+			m.log.Debug("mirror forwardMouse: wheel point outside pane, clamped to center", "x", x, "y", y)
+		}
+	}
 	m.log.Debug("mirror forwardMouse", "kind", e.Kind, "path", e.Path, "relX", e.RelX, "relY", e.RelY, "x", x, "y", y)
 
 	params := map[string]any{"x": x, "y": y}
@@ -706,6 +724,18 @@ func orDefault(s, def string) string {
 }
 
 func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalFloats(a, b []float64) bool {
 	if len(a) != len(b) {
 		return false
 	}
