@@ -24,6 +24,7 @@ type Loader struct {
 	mu       sync.Mutex
 	last     map[string]time.Time
 	nonLlama map[string]struct{} // server roots proven to not be llama.cpp
+	inflight map[string]struct{} // model ids with a load request in flight
 }
 
 // New creates a Loader. proxyFunc (from config.Settings.ProxyFunc)
@@ -46,6 +47,7 @@ func New(cooldown time.Duration, log *slog.Logger, proxyFunc func(*http.Request)
 		log:      log,
 		last:     make(map[string]time.Time),
 		nonLlama: make(map[string]struct{}),
+		inflight: make(map[string]struct{}),
 	}
 }
 
@@ -53,7 +55,11 @@ func New(cooldown time.Duration, log *slog.Logger, proxyFunc func(*http.Request)
 // The cooldown timestamp is refreshed when the request is SENT (not on
 // success), so a dead server cannot be hammered. Server roots that answer
 // with a code proving they are not llama.cpp are remembered and skipped
-// entirely from then on.
+//
+// The mutex guards the bookkeeping only, never the HTTP request: holding
+// it across the (up to 10s) request would serialize every model's loads
+// behind one dead server. The inflight set keeps concurrent requests for
+// the same model deduped while the lock is released.
 func (l *Loader) Load(m config.Model) {
 	// The load endpoint is relative to the server ROOT, not to baseUrl:
 	// baseUrl http://abc.com/v1 -> POST http://abc.com/models/load
@@ -66,15 +72,28 @@ func (l *Loader) Load(m config.Model) {
 	loadURL := root + "/models/load"
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if _, ok := l.nonLlama[root]; ok {
+		l.mu.Unlock()
 		l.log.Debug("skip: not a llama.cpp endpoint", "model", m.ID, "url", root)
 		return
 	}
 	if last, ok := l.last[m.ID]; ok && time.Since(last) < l.cooldown {
+		l.mu.Unlock()
 		l.log.Debug("cooldown active, skip", "model", m.ID)
 		return
 	}
+	if _, ok := l.inflight[m.ID]; ok {
+		l.mu.Unlock()
+		l.log.Debug("load in flight, skip", "model", m.ID)
+		return
+	}
+	l.inflight[m.ID] = struct{}{}
+	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		delete(l.inflight, m.ID)
+		l.mu.Unlock()
+	}()
 
 	body, _ := json.Marshal(map[string]string{"model": m.ID})
 	req, err := http.NewRequest(http.MethodPost, loadURL, bytes.NewReader(body))
@@ -93,16 +112,22 @@ func (l *Loader) Load(m config.Model) {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	loaded := l.classify(m, root, loadURL, resp.StatusCode, b)
 	if loaded {
+		l.mu.Lock()
 		l.last[m.ID] = time.Now()
+		l.mu.Unlock()
 	}
 }
 
-// loadResponse is the exact /models/load reply shape. Both replies
-// share this struct; pointer fields plus DisallowUnknownFields make
-// the match strict:
+// loadResponse is the /models/load reply shape. Both known replies share
+// this struct:
 //
 //	{"success": true}
 //	{"error":{"code":400,"message":"model is already running","type":"invalid_request_error"}}
+//
+// Matching is deliberately loose (plain Unmarshal, unknown fields
+// ignored): the status code plus the success flag / exact error message
+// identifies a genuine llama.cpp reply, and anything else falls through
+// to the warn in classify.
 type loadResponse struct {
 	Success bool `json:"success"`
 	Error   struct {
@@ -148,7 +173,9 @@ func (l *Loader) classify(m config.Model, root, loadURL string, status int, b []
 	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusUnauthorized, http.StatusForbidden:
 		// no /models/load route (or auth-walled): not llama.cpp,
 		// remember the endpoint and stop trying
+		l.mu.Lock()
 		l.nonLlama[root] = struct{}{}
+		l.mu.Unlock()
 		l.log.Info("endpoint is not llama.cpp, will skip", "model", m.ID, "url", root, "status", status)
 		return false
 	}
