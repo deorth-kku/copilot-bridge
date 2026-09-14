@@ -32,15 +32,19 @@ import (
 // HTML and CSS are only present when they changed (the browser keeps its
 // last copy otherwise); rect/scroll/rootStyle/cssVersion are always sent.
 type stateMsg struct {
-	Type      string         `json:"type"` // "state"
-	HTML      string         `json:"html,omitempty"`
-	CSS       string         `json:"css,omitempty"`
-	CSSVer    string         `json:"cssVersion,omitempty"`
-	RootStyle string         `json:"rootStyle,omitempty"`
-	ThemeVars string         `json:"themeVars,omitempty"`
-	ThemeVer  string         `json:"themeVer,omitempty"`
-	Rect      cdp.PaneRect   `json:"rect"`
-	Scroll    cdp.PaneScroll `json:"scroll"`
+	Type      string `json:"type"` // "state"
+	HTML      string `json:"html,omitempty"`
+	CSS       string `json:"css,omitempty"`
+	CSSVer    string `json:"cssVersion,omitempty"`
+	RootStyle string `json:"rootStyle,omitempty"`
+	ThemeVars string `json:"themeVars,omitempty"`
+	ThemeVer  string `json:"themeVer,omitempty"`
+	// ThemeBg is the pane root's effective background color; the browser
+	// pins it on html/body (--mirror-bg) so the page frame matches the live
+	// theme.
+	ThemeBg string         `json:"themeBg,omitempty"`
+	Rect    cdp.PaneRect   `json:"rect"`
+	Scroll  cdp.PaneScroll `json:"scroll"`
 	// ScrollPath identifies the measured scroll container as a DOM path from
 	// the pane root (no omitempty: an empty path means "the root itself").
 	ScrollPath []int `json:"scrollPath"`
@@ -151,6 +155,7 @@ type snapState struct {
 	rootStyle  string
 	themeVars  string
 	themeVer   string
+	themeBg    string
 	window     string
 	windowID   string
 	fp         string
@@ -401,6 +406,7 @@ func (m *Mirror) sendFullState(c *client) {
 		msg = stateMsg{
 			Type: "state", HTML: s.html, CSS: s.css, CSSVer: s.cssVer,
 			RootStyle: s.rootStyle, ThemeVars: s.themeVars, ThemeVer: s.themeVer,
+			ThemeBg: s.themeBg,
 			Rect: s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
 			Window: s.window, WindowID: s.windowID, Err: s.err,
 		}
@@ -510,7 +516,7 @@ func (m *Mirror) refresh() {
 	}
 
 	// Full HTML extract only when the content fingerprint changed.
-	var html, rootStyle, themeVars string
+	var html, rootStyle, themeVars, themeBg string
 	if fpChanged {
 		hs, err := cdp.ExtractHTML(s, m.selectors)
 		if err != nil {
@@ -521,10 +527,10 @@ func (m *Mirror) refresh() {
 			m.publishError(hs.Err)
 			return
 		}
-		html, rootStyle, themeVars = hs.HTML, hs.RootStyle, hs.ThemeVars
+		html, rootStyle, themeVars, themeBg = hs.HTML, hs.RootStyle, hs.ThemeVars, hs.ThemeBg
 		html = m.rewriteImages(s, html)
 	} else if prev != nil {
-		html, rootStyle, themeVars = prev.html, prev.rootStyle, prev.themeVars
+		html, rootStyle, themeVars, themeBg = prev.html, prev.rootStyle, prev.themeVars, prev.themeBg
 	}
 	themeVer := hashStr(themeVars)
 	sendTheme := themeVars != "" && themeVer != prevThemeVer
@@ -542,7 +548,7 @@ func (m *Mirror) refresh() {
 
 	ns := &snapState{
 		html: html, css: css, cssVer: cssVer, cssFP: fpst.CSSFP,
-		rootStyle: rootStyle, themeVars: themeVars, themeVer: themeVer,
+		rootStyle: rootStyle, themeVars: themeVars, themeVer: themeVer, themeBg: themeBg,
 		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath, scrollRows: fpst.ScrollRows,
 		window: s.Title(), windowID: winID, fp: fpst.FP,
 	}
@@ -563,6 +569,7 @@ func (m *Mirror) refresh() {
 	}
 	if sendTheme {
 		msg.ThemeVars = themeVars
+		msg.ThemeBg = themeBg
 	}
 	if b, e := json.Marshal(msg); e == nil {
 		m.broadcast(b)

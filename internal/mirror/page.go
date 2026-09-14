@@ -19,7 +19,9 @@ const pageHTML = `<!doctype html>
 <style>
   html, body {
     margin: 0 !important; padding: 0 !important;
-    background: #1e1e1e !important;
+    /* --mirror-bg is set by the theme message (the live pane root's
+       effective background); #1e1e1e is the pre-theme fallback. */
+    background: var(--mirror-bg, #1e1e1e) !important;
     overflow: auto !important; height: auto !important;
   }
   /* The status bar is a window picker: one option per live VS Code window,
@@ -167,7 +169,7 @@ const pageHTML = `<!doctype html>
       }
       if (m.themeVer !== lastThemeVer) {
         lastThemeVer = m.themeVer || '';
-        if (m.themeVars != null) themeEl.textContent = '#pane { ' + m.themeVars + ' }';
+        if (m.themeVars != null) themeEl.textContent = ':root { --mirror-bg: ' + (m.themeBg || '#1e1e1e') + '; } #pane { ' + m.themeVars + ' }';
       }
       if (m.html != null) {
         applyState(m);

@@ -34,10 +34,14 @@ type PaneScroll struct {
 
 // HTMLState is the result of ExtractHTML.
 type HTMLState struct {
-	Err        string     `json:"err"`
-	HTML       string     `json:"html"`
-	RootStyle  string     `json:"rootStyle"`
-	ThemeVars  string     `json:"themeVars"`
+	Err       string `json:"err"`
+	HTML      string `json:"html"`
+	RootStyle string `json:"rootStyle"`
+	ThemeVars string `json:"themeVars"`
+	// ThemeBg is the pane root's effective background color (the nearest
+	// non-transparent ancestor's computed value); the mirror pins it on its
+	// own root and page body.
+	ThemeBg    string     `json:"themeBg"`
 	Rect       PaneRect   `json:"rect"`
 	Scroll     PaneScroll `json:"scroll"`
 	ScrollPath []int      `json:"scrollPath"`
@@ -94,6 +98,7 @@ const htmlExpr = `(selectors) => {
   // subtree; carrying the computed values over is what makes themed colors
   // render correctly in the mirror.
   let themeVars = '';
+  let themeBg = '';
   try {
     const cs = getComputedStyle(el);
     for (let i = 0; i < cs.length; i++) {
@@ -114,11 +119,24 @@ const htmlExpr = `(selectors) => {
       const v = cs.getPropertyValue(p).trim();
       if (v) themeVars += p + ': ' + v + ';';
     }
+    // Carry over the pane root's effective background color: the live page
+    // paints the pane's visible background with an ancestor-scoped rule
+    // (e.g. the side-bar part) that the extracted subtree cannot match, so
+    // pin the computed value onto the mirror root (#pane via themeVars, the
+    // page body via --mirror-bg).
+    let bgEl = el;
+    while (bgEl) {
+      const b = getComputedStyle(bgEl).backgroundColor.trim();
+      if (b && b !== 'rgba(0, 0, 0, 0)') { themeBg = b; break; }
+      bgEl = bgEl.parentElement;
+    }
+    if (themeBg) themeVars += 'background-color: ' + themeBg + ';';
   } catch (e) {}
   return {
     html: el.outerHTML,
     rootStyle: rootStyle,
     themeVars: themeVars,
+    themeBg: themeBg,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
     scrollPath: scrollPath,
