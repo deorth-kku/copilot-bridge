@@ -466,26 +466,29 @@ const pageHTML = `<!doctype html>
     }
     // The mirror viewport is not the live window: a transferred position can
     // overflow it. Flip the popup to the other side of the anchor (keeping
-    // the live gap), then clamp horizontally.
-    if (used) {
-      var vh = window.innerHeight, vw = window.innerWidth;
-      if (top < 0 || top + lastPopup.height > vh) {
-        if (lastPopup.top < lastPopup.anchor.top) {
-          // Live popup sat above the anchor; move it below.
-          var gap = lastPopup.anchor.top - (lastPopup.top + lastPopup.height);
-          top = ar.top + ar.height + Math.max(0, gap);
-        } else {
-          // Live popup sat below the anchor; move it above.
-          var gap2 = lastPopup.top - (lastPopup.anchor.top + lastPopup.anchor.height);
-          top = ar.top - lastPopup.height - Math.max(0, gap2);
-        }
+    // the live gap) when anchor-based placement overflows.
+    var vh = window.innerHeight, vw = window.innerWidth;
+    if (used && (top < 0 || top + lastPopup.height > vh)) {
+      if (lastPopup.top < lastPopup.anchor.top) {
+        // Live popup sat above the anchor; move it below.
+        var gap = lastPopup.anchor.top - (lastPopup.top + lastPopup.height);
+        top = ar.top + ar.height + Math.max(0, gap);
+      } else {
+        // Live popup sat below the anchor; move it above.
+        var gap2 = lastPopup.top - (lastPopup.anchor.top + lastPopup.anchor.height);
+        top = ar.top - lastPopup.height - Math.max(0, gap2);
       }
-      if (top < 0) top = 0;
-      if (top + lastPopup.height > vh) top = Math.max(0, vh - lastPopup.height);
     }
+    // The final clamps apply to BOTH branches: the fallback position is a
+    // live pane-relative offset, which in the responsive mirror can land far
+    // outside the viewport (e.g. a bottom-right popup like the context-usage
+    // widget pushed below it). Clamping keeps it on screen near its anchor
+    // area.
+    if (top < 0) top = 0;
+    if (top + lastPopup.height > vh) top = Math.max(0, vh - lastPopup.height);
     if (left < 0) left = 0;
-    if (left + lastPopup.width > window.innerWidth) {
-      left = Math.max(0, window.innerWidth - lastPopup.width);
+    if (left + lastPopup.width > vw) {
+      left = Math.max(0, vw - lastPopup.width);
     }
     popupEl.style.position = 'fixed';
     popupEl.style.left = left + 'px';

@@ -156,22 +156,28 @@ const htmlExpr = `(selectors) => {
     if (themeBg) themeVars += 'background-color: ' + themeBg + ';';
   } catch (e) {}
   // Context views (popup menus, dropdowns, tooltips) render OUTSIDE the
-  // pane root — in a single .context-view container that is a child of the
-  // workbench root — so the pane subtree alone never contains them. Capture
-  // the currently visible one, positioned relative to the pane root, so the
-  // mirror can render it in the same pane-relative spot.
+  // pane root — in .context-view containers that are children of the
+  // workbench root — so the pane subtree alone never contains them. There
+  // can be MORE THAN ONE: the action-list menus live in one (which stays in
+  // the DOM, hidden, between openings) while hover-style popups such as the
+  // context-usage "Session Info" widget render in a separate one. Capture
+  // the currently visible one (the last visible in DOM order, i.e. the one
+  // painted on top), positioned relative to the pane root, so the mirror can
+  // render it in the same pane-relative spot.
   let popup = null;
   try {
-    const cv = document.querySelector('.context-view');
+    let cv = null;
+    for (const c of document.querySelectorAll('.context-view')) {
+      const cr = c.getBoundingClientRect();
+      if (cr.width > 0 && cr.height > 0) cv = c;
+    }
     if (cv) {
       const cr = cv.getBoundingClientRect();
-      if (cr.width > 0 && cr.height > 0) {
-        popup = {
-          html: cv.outerHTML,
-          left: cr.left - r.left, top: cr.top - r.top,
-          width: cr.width, height: cr.height,
-        };
-      }
+      popup = {
+        html: cv.outerHTML,
+        left: cr.left - r.left, top: cr.top - r.top,
+        width: cr.width, height: cr.height,
+      };
     }
   } catch (e) {}
   return {
@@ -299,15 +305,19 @@ const fpExpr = `(selectors) => {
   // The context view (popup menus) sits OUTSIDE the pane root, so the pane's
   // own content never changes when a popup opens, closes, or moves — fold a
   // cheap popup fingerprint into fp so any of those triggers a re-extract.
+  // As in htmlExpr, pick the visible .context-view (there can be several:
+  // the hidden menu one plus hover popups such as the context-usage widget).
   let popFP = '';
   try {
-    const cv = document.querySelector('.context-view');
+    let cv = null;
+    for (const c of document.querySelectorAll('.context-view')) {
+      const cr = c.getBoundingClientRect();
+      if (cr.width > 0 && cr.height > 0) cv = c;
+    }
     if (cv) {
       const cr = cv.getBoundingClientRect();
-      if (cr.width > 0 && cr.height > 0) {
-        popFP = cv.innerText.length + ':' + cv.childElementCount + ':' +
-          Math.round(cr.left) + ':' + Math.round(cr.top);
-      }
+      popFP = cv.innerText.length + ':' + cv.childElementCount + ':' +
+        Math.round(cr.left) + ':' + Math.round(cr.top);
     }
   } catch (e) {}
   const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP;
@@ -435,8 +445,14 @@ const clickPointExpr = `(args) => {
   let p = path;
   // A path starting with -1 is rooted at the live context view (popup)
   // instead of the pane root; the remaining indices are relative to it.
+  // There can be several .context-view elements (the hidden menu one plus
+  // hover popups such as the context-usage widget); use the visible one.
   if (Array.isArray(p) && p.length > 0 && p[0] === -1) {
-    root = document.querySelector('.context-view');
+    const cvs = document.querySelectorAll('.context-view');
+    for (const c of cvs) {
+      const cr = c.getBoundingClientRect();
+      if (cr.width > 0 && cr.height > 0) root = c;
+    }
     if (root) p = p.slice(1);
   } else {
     for (const sel of sels) { try { root = document.querySelector(sel); } catch (e) {} if (root) break; }
