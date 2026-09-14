@@ -77,7 +77,8 @@ func Load(path string) (*Settings, error) {
 // VS Code http.proxy / http.noProxy settings. It returns nil when no
 // proxy is configured, in which case the HTTP client connects directly.
 // noProxy entries are host suffixes: "qwen.lan" matches qwen.lan and
-// any *.qwen.lan host.
+// any *.qwen.lan host. Wildcards follow VS Code: "*" (or "*.domain")
+// matches everything (resp. that domain and its subdomains).
 func (s *Settings) ProxyFunc() func(*http.Request) (*url.URL, error) {
 	if s == nil || s.Proxy == "" {
 		return nil
@@ -86,13 +87,22 @@ func (s *Settings) ProxyFunc() func(*http.Request) (*url.URL, error) {
 	if err != nil {
 		return nil
 	}
+	wildcard := false
 	var noProxy []string
 	for _, h := range s.NoProxy {
-		if h = strings.TrimPrefix(strings.TrimSpace(h), "."); h != "" {
+		if h = strings.TrimSpace(h); h == "*" {
+			wildcard = true
+			continue
+		}
+		h = strings.TrimPrefix(h, "*.")
+		if h = strings.TrimPrefix(h, "."); h != "" {
 			noProxy = append(noProxy, h)
 		}
 	}
 	return func(req *http.Request) (*url.URL, error) {
+		if wildcard {
+			return nil, nil // noProxy "*": direct connection everywhere
+		}
 		host := req.URL.Hostname()
 		for _, h := range noProxy {
 			if host == h || strings.HasSuffix(host, "."+h) {
