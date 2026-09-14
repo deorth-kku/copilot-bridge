@@ -13,18 +13,26 @@ const BindingName = "vscodeLoadLlama"
 // variable and calls it.
 const extractFn = `() => {
     const q = sel => document.querySelector(sel);
-    const vis = el => el && !!(el.offsetWidth || el.offsetHeight);
+    // Normalized boolean: a missing element must yield false (not null),
+    // so the payload's *Visible fields are always JSON booleans.
+    const vis = el => !!(el && (el.offsetWidth || el.offsetHeight));
 
     const inputEditor = q('.chat-input-container .interactive-input-editor .monaco-editor')
                      || q('.interactive-input-editor .monaco-editor');
     const inputText = inputEditor ? (inputEditor.innerText || '').replace(/\n+$/, '') : null;
 
     const modelEl = q('a.model-picker-name');
-    const model = modelEl ? (modelEl.getAttribute('aria-label') || '').replace(/^Models,\s*/, '')
-                          : (modelEl ? modelEl.textContent.trim() : null);
+    // aria-label is the stable key; fall back to the visible text when the
+    // attribute is ABSENT (null). The empty-string coalesce must come
+    // AFTER the textContent fallback: (null || '') would swallow the null
+    // and the fallback would never run.
+    const model = modelEl
+      ? ((modelEl.getAttribute('aria-label') || modelEl.textContent) || '').replace(/^Models,\s*/, '').trim()
+      : null;
     const effortEl = q('.model-picker-config');
-    const effort = effortEl ? (effortEl.getAttribute('aria-label') || '').replace(/^Reasoning Effort:\s*/i, '')
-                            : (effortEl ? effortEl.textContent.trim() : null);
+    const effort = effortEl
+      ? ((effortEl.getAttribute('aria-label') || effortEl.textContent) || '').replace(/^Reasoning Effort:\s*/i, '').trim()
+      : null;
     const modeEl = q('.chat-input-picker-item .chat-input-picker-label');
     const mode = modeEl ? modeEl.textContent.trim() : null;
 
@@ -96,6 +104,10 @@ const MirrorInjectJS = `(() => {
   const wake = () => { try { window.` + MirrorBindingName + `('1'); } catch (e) {} };
   if (window.__mirrorVersion !== VERSION) {
     if (window.__mirrorMO) { try { window.__mirrorMO.disconnect(); } catch (e) {} }
+    // Drop the previous install's scroll/resize listeners as well, so a
+    // VERSION bump does not stack another pair on top of the old ones.
+    if (window.__mirrorScrollH) document.removeEventListener('scroll', window.__mirrorScrollH, true);
+    if (window.__mirrorResizeH) window.removeEventListener('resize', window.__mirrorResizeH);
     window.__mirrorVersion = VERSION;
     let timer = null;
     const schedule = () => {
@@ -107,7 +119,9 @@ const MirrorInjectJS = `(() => {
     window.__mirrorMO.observe(document.documentElement, {
       subtree: true, childList: true, characterData: true, attributes: true,
     });
+    window.__mirrorScrollH = schedule;
     document.addEventListener('scroll', schedule, true);
+    window.__mirrorResizeH = schedule;
     window.addEventListener('resize', schedule);
   }
   (window.__mirrorSchedule || wake)();

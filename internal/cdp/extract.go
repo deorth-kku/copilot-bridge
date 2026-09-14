@@ -374,7 +374,11 @@ const cssExpr = `async () => {
       } catch (e) { continue; }
       if (!b64) continue;
       const dataURI = 'data:' + mime(abs) + ';base64,' + b64;
-      text = text.split(m[1]).join(m[1].replace(raw, dataURI));
+      // Re-wrap in the ORIGINAL quotes. m[1] may carry a ?query/#hash tail
+      // that was stripped from raw; splicing raw into m[1] would leave
+      // that tail AFTER the base64 payload and corrupt the data URI.
+      const q = /^["']/.test(m[1]) ? m[1].charAt(0) : '';
+      text = text.split(m[1]).join(q + dataURI + q);
     }
     css += text + '\n';
   }
