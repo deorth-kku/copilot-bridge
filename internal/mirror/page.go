@@ -105,7 +105,27 @@ const pageHTML = `<!doctype html>
      content stays visible. */
   #pane .chat-welcome-view-container[style*="height: 0px"] .chat-welcome-view { display: none !important; }
   #pane .monaco-list-rows { position: static !important; transform: none !important; top: auto !important; left: auto !important; height: auto !important; overflow: visible !important; contain: none !important; }
-  #pane .monaco-list-row { position: static !important; top: auto !important; height: auto !important; }
+  #pane .monaco-list-row { position: static !important; top: auto !important; }
+  /* Rows OUTSIDE popups reflow to their content height (the responsive
+     mirror width wraps text differently than the live pane). */
+  #pane .monaco-list-row:not(.context-view .monaco-list-row) { height: auto !important; }
+  /* Popup (.context-view) rows keep their FIXED live height and clip
+     overflowing content, exactly like the live: some rows carry a 48px-tall
+     .description span (sized for two-line items) that only shows one line,
+     and the live row is fixed at 24px with overflow:hidden. Forcing
+     height:auto (as the non-popup rule does) would stretch the mirror row to
+     48px — the Local/permission menus looked doubled in height. */
+  #pane .context-view .monaco-list-row { overflow: hidden !important; }
+  /* Live separator rows carry margin: 4px 6px, but the live list positions
+     rows by CUMULATIVE HEIGHT (absolute top = previous tops + heights),
+     ignoring margins — so the row after a separator starts at
+     separator-top + 8px, overlapping the separator's bottom margin by 4px.
+     The mirror's flow layout instead adds the margins: margin-top pushes the
+     line down 4px (correct, matches live) and margin-bottom pushes the next
+     row down another 4px — leaving 8px more space under the line than live.
+     Cancelling the bottom margin makes the separator contribute exactly its
+     8px height to the flow, matching the live layout. */
+  #pane .context-view .action-widget .monaco-list-row.separator { margin-bottom: -4px !important; }
   /* The live todo-list header renders the clear button INSIDE the title row
      (a flex item on the right). The mirror's DOM places the button container
      as a sibling of the title row under the block-level .todo-list-expand, so
