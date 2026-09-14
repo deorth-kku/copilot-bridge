@@ -57,6 +57,41 @@ const pageHTML = `<!doctype html>
   #pane:focus, #pane:focus-visible { outline: none !important; }
   #pane > * { width: 100% !important; height: 100% !important; min-height: 0 !important; }
   #pane .interactive-list { height: auto !important; flex: 1 1 0% !important; min-height: 0 !important; }
+  /* The session-selection view has the same re-fit problem as the chat list,
+     but its list container is .agent-sessions-control-container (NOT
+     .interactive-list), so the rule above does not reach it: it keeps the
+     live pane's inline list height, which is taller than the (shorter)
+     mirror viewport. The flex chain then squashes the sibling input
+     container (.chat-controls-container, flex-basis 0) to zero and the
+     input renders below the visible area. Re-fit the chain: the list takes
+     the remaining space, the input keeps its natural size. */
+  #pane .agent-sessions-container { flex: 1 1 0% !important; min-height: 0 !important; }
+  #pane .agent-sessions-container > .agent-sessions-control-container {
+    display: flex !important; flex-direction: column !important;
+    height: auto !important; flex: 1 1 0% !important; min-height: 0 !important;
+  }
+  #pane .agent-sessions-container .agent-sessions-viewer { display: flex !important; flex-direction: column !important; flex: 1 1 0% !important; min-height: 0 !important; }
+  #pane .agent-sessions-container .agent-sessions-viewer > .monaco-list { height: auto !important; flex: 1 1 0% !important; min-height: 0 !important; }
+  /* The controls container has no workbench rule (default flex 0 1 auto), so
+     which behavior it needs depends on the active view, detected by the
+     sibling .agent-sessions-container's inline style: in the CHAT view it is
+     hidden (inline display: none) and the controls container must FILL the
+     wrapper — its list is content-sized in the mirror (live keeps a fixed
+     inline list height), so an auto-height container would hug a short
+     history and leave the input floating above the bottom. In the SESSION
+     view it keeps its natural (content) size so the sessions list can take
+     the remaining space. */
+  #pane .agent-sessions-container[style*="display: none"] ~ .chat-controls-container { flex: 1 1 0% !important; min-height: 0 !important; }
+  #pane .agent-sessions-container:not([style*="display: none"]) ~ .chat-controls-container { flex: 0 1 auto !important; height: auto !important; min-height: 0 !important; }
+  /* The welcome view ("Build with Agent" row) is collapsed by an inline
+     height: 0px in the session view, where live clips its content (overflow
+     hidden). In the mirror the input container is sized to its content, and
+     the welcome view's ~24px content still contributes to that auto height
+     (even when the container itself is 0), making the input area taller
+     than live. Hide the content exactly when live collapsed the container;
+     in the chat getting-started view live sets a real inline height and the
+     content stays visible. */
+  #pane .chat-welcome-view-container[style*="height: 0px"] .chat-welcome-view { display: none !important; }
   #pane .monaco-list-rows { position: static !important; transform: none !important; top: auto !important; left: auto !important; height: auto !important; overflow: visible !important; contain: none !important; }
   #pane .monaco-list-row { position: static !important; top: auto !important; height: auto !important; }
   /* The live todo-list header renders the clear button INSIDE the title row
@@ -319,11 +354,10 @@ const pageHTML = `<!doctype html>
   //
   // The live chat list is bottom-anchored: it keeps scrollTop at 0 and
   // encodes the scroll position in the rows container's negative top offset
-  // (m.scroll.offset). The distance from the live visible window's bottom to
-  // the content bottom is (scrollH - clientH) + offset — 0 when live is at
-  // the bottom. The mirror's static layout is top-anchored, so show our own
-  // content at the same distance from our own bottom instead of copying the
-  // (always-zero) live scrollTop.
+  // (m.scroll.offset). The session-picker list is top-anchored: offsetTop
+  // stays 0 and the position is the scroller's scrollTop. Both are mapped
+  // onto the mirror's (static, top-anchored) layout by aligning the mirror's
+  // viewport with the live viewport inside the rendered row window.
   function restoreScroll(m) {
     if (!m.scroll || !m.scrollPath) return;
     var el = pane.firstElementChild || pane;
@@ -334,40 +368,45 @@ const pageHTML = `<!doctype html>
     el.scrollLeft = m.scroll.left;
     var max = el.scrollHeight - el.clientHeight;
     var target = m.scroll.top;
-    if (m.scroll.offset < 0) {
-      // Bottom-anchored live list: the mirror's content is only the live
-      // list's currently rendered rows (a sliding window), not the full
-      // conversation, so the old "same distance from the bottom" formula
-      // only holds at the very bottom. Align the mirror's viewport with the
-      // live viewport inside the rendered window instead.
-      var a = alignToLiveViewport(el, m.scroll, m.scrollRows);
-      if (a != null) {
-        // a.above / a.inside are the mirror pixels of the rendered content
-        // that fall above / inside the live viewport. The live viewport's
-        // mirror height (a.inside) can exceed the mirror scroller's own
-        // height (the mirror is shorter than live, or its rows are taller),
-        // in which case the whole live viewport does not fit and one end
-        // must be cut. Scrolling in the mirror is forwarded to live and the
-        // mirror re-anchors, so the cut end is only reachable if live can
-        // still scroll that direction.
-        //
-        // Default: keep the BOTTOM of the live viewport on screen (the
-        // latest messages) — scrollTop = above + (inside - clientH). The
-        // hidden sliver is then the live viewport's TOP, reachable by
-        // scrolling up because live can scroll up.
-        //
-        // Special case: when live is itself at the very top of the
-        // conversation (v0 ~ 0) it cannot scroll up, so anchoring the
-        // bottoms would permanently cut the top. Anchor the TOPS instead
-        // (scrollTop = above); the hidden sliver is the live viewport's
-        // bottom, reachable by scrolling down.
-        var v0 = -m.scroll.offset;
-        var atTop = v0 < 1;
-        target = a.above + (atTop ? 0 : Math.max(0, a.inside - el.clientHeight));
-      } else {
-        var distBottom = (m.scroll.scrollH - m.scroll.h) + m.scroll.offset;
-        target = distBottom <= 0 ? max : max - distBottom;
-      }
+    var a = alignToLiveViewport(el, m.scroll, m.scrollRows);
+    if (a != null) {
+      // The mirror's content is only the live list's currently rendered
+      // rows (a sliding window), not the full conversation, so align the
+      // mirror's viewport with the live viewport inside the rendered
+      // window.
+      //
+      // a.above / a.inside are the mirror pixels of the rendered content
+      // that fall above / inside the live viewport. The live viewport's
+      // mirror height (a.inside) can exceed the mirror scroller's own
+      // height (the mirror is shorter than live, or its rows are taller),
+      // in which case the whole live viewport does not fit and one end
+      // must be cut. Scrolling in the mirror is forwarded to live and the
+      // mirror re-anchors, so the cut end is only reachable if live can
+      // still scroll that direction.
+      //
+      // Bottom-anchored lists (chat messages, offset < 0) default to keeping
+      // the BOTTOM of the live viewport on screen (the latest messages) —
+      // scrollTop = above + (inside - clientH); the hidden sliver is the
+      // live viewport's top, reachable by scrolling up.
+      //
+      // Top-anchored lists (session picker, offset >= 0) default to keeping
+      // the TOP on screen (scrollTop = above); the hidden sliver is the
+      // live viewport's bottom, reachable by scrolling down.
+      //
+      // Special cases pin the opposite end when live cannot scroll away
+      // from it: a bottom-anchored list at the very top (v0 ~ 0) anchors
+      // the TOPS, and a top-anchored list at the very bottom (v1 ~ scrollH)
+      // anchors the BOTTOMS — otherwise the cut sliver would be
+      // permanently invisible.
+      var v0 = m.scroll.top - m.scroll.offset;
+      var v1 = v0 + m.scroll.h;
+      var atTop = v0 < 1;
+      var atBottom = v1 >= m.scroll.scrollH - 1;
+      var anchorBottom = m.scroll.offset < 0 ? !atTop : atBottom;
+      target = a.above + (anchorBottom ? Math.max(0, a.inside - el.clientHeight) : 0);
+    } else {
+      var distBottom = (m.scroll.scrollH - m.scroll.h) + m.scroll.offset;
+      target = distBottom <= 0 ? max : max - distBottom;
     }
     el.scrollTop = Math.max(0, Math.min(max, target));
   }
@@ -375,18 +414,20 @@ const pageHTML = `<!doctype html>
   // Maps the live viewport onto the mirror's rendered rows. The live list's
   // rendered rows carry [offsetTop, offsetHeight] pairs in full-content
   // coordinates (rows); the live viewport spans [v0, v0 + scroll.h] in the
-  // same coordinates (the rows container's negative offsetTop encodes the
-  // scroll position, and the live scrollTop is always 0). The mirror shows
-  // the same rows in the same order but at different heights (responsive
-  // width), so this returns the mirror pixels of the rendered content that
-  // fall ABOVE the live viewport (above) and INSIDE it (inside). The caller
-  // picks the scrollTop so the end of the live viewport that must stay
-  // visible is on screen.
+  // same coordinates. v0 combines the scroller's scrollTop with the rows
+  // container's offsetTop: bottom-anchored lists (chat) keep scrollTop at 0
+  // and encode the position in the rows' negative offsetTop (v0 = -offset);
+  // top-anchored lists (session picker) keep offsetTop at 0 and use
+  // scrollTop (v0 = top). The mirror shows the same rows in the same order
+  // but at different heights (responsive width), so this returns the mirror
+  // pixels of the rendered content that fall ABOVE the live viewport
+  // (above) and INSIDE it (inside). The caller picks the scrollTop so the
+  // end of the live viewport that must stay visible is on screen.
   function alignToLiveViewport(el, scroll, rows) {
     if (!rows || !rows.length) return null;
     var rowEls = el.querySelector('.monaco-list-rows');
     if (!rowEls || !rowEls.children.length) return null;
-    var v0 = -scroll.offset;
+    var v0 = scroll.top - scroll.offset;
     var v1 = v0 + scroll.h;
     var n = Math.min(rowEls.children.length, rows.length / 2);
     var above = 0, inside = 0;
@@ -409,7 +450,8 @@ const pageHTML = `<!doctype html>
   // its native scroll range is unstable and does not represent the chat's
   // total range. Instead, mirror the LIVE slider state, transformed to the
   // mirror's height:
-  //   liveRatio = -offset / (scrollH - h)      (0 = top, 1 = bottom)
+  //   liveRatio = (top - offset) / (scrollH - h)  (0 = top, 1 = bottom;
+  //     bottom-anchored lists have top = 0, top-anchored have offset = 0)
   //   sliderH   = clientH * h / scrollH        (live visible/total ratio,
   //   sliderTop = liveRatio * (clientH - sliderH)   scaled to mirror height)
   // The track is absolute inside the scroller, so it scrolls out of view with
@@ -441,7 +483,7 @@ const pageHTML = `<!doctype html>
       var ratio, sliderH;
       if (el === target && lastScroll && lastScroll.scrollH > lastScroll.h) {
         var liveMax = lastScroll.scrollH - lastScroll.h;
-        ratio = Math.max(0, Math.min(1, -lastScroll.offset / liveMax));
+        ratio = Math.max(0, Math.min(1, (lastScroll.top - lastScroll.offset) / liveMax));
         sliderH = clientH * lastScroll.h / lastScroll.scrollH;
       } else {
         var max = el.scrollHeight - clientH;
