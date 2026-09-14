@@ -79,6 +79,10 @@ type Session struct {
 	// Buffered by 1: a pending wake already guarantees a refresh, and the
 	// refresh reads the latest state, so coalescing extra wakes is safe.
 	mirrorWake chan struct{}
+	// nav queues Page.frameNavigated re-injection requests from the read
+	// loop to the Run goroutine. Buffered by 1: one pending request is
+	// enough (re-injection is idempotent), extra navigations coalesce.
+	nav chan struct{}
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -97,6 +101,7 @@ func NewSession(id, title, wsURL string, events chan Event, log *slog.Logger) *S
 		events:     events,
 		log:        log,
 		mirrorWake: make(chan struct{}, 1),
+		nav:        make(chan struct{}, 1),
 		pending:    make(map[int]chan callResult),
 	}
 	s.title.Store(&title)
@@ -154,26 +159,80 @@ func (s *Session) Run(ctx context.Context) {
 	s.log.Info("attached window", "title", s.Title())
 	s.send("Runtime.enable", nil)
 	s.send("Page.enable", nil)
-	s.send("Runtime.addBinding", map[string]any{"name": BindingName})
-	s.send("Runtime.evaluate", map[string]any{"expression": InjectJS, "returnByValue": true})
-	s.send("Runtime.addBinding", map[string]any{"name": MirrorBindingName})
-	s.send("Runtime.evaluate", map[string]any{"expression": MirrorInjectJS, "returnByValue": true})
+
+	// The read loop must run BEFORE the injection Calls below: Call waits
+	// for a response that only the read loop can deliver. Run blocks until
+	// the loop ends so IsDone() flips only when the connection is really
+	// gone (the discovery scan relies on that to restart the session).
+	// frameNavigated re-injection requests are queued on s.nav and served
+	// by THIS goroutine, so injection pairs never interleave with each
+	// other or with the startup pair.
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		// The CSS extraction (with inlined @font-face data URIs) can be
+		// several megabytes, so the read limit must be well above the
+		// default 1MB.
+		conn.SetReadLimit(32 << 20)
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				s.log.Debug("read loop ended", "window", s.Title(), "err", err)
+				return
+			}
+			s.handle(raw)
+		}
+	}()
 
 	go func() {
 		<-ctx.Done()
 		s.Stop()
 	}()
 
-	// The CSS extraction (with inlined @font-face data URIs) can be several
-	// megabytes, so the read limit must be well above the default 1MB.
-	conn.SetReadLimit(32 << 20)
+	s.inject(BindingName, InjectJS)
+	s.inject(MirrorBindingName, MirrorInjectJS)
+
+	// Serve re-injection requests until the connection drops.
 	for {
-		_, raw, err := conn.ReadMessage()
-		if err != nil {
-			s.log.Debug("read loop ended", "window", s.Title(), "err", err)
+		select {
+		case <-readDone:
 			return
+		case <-s.nav:
+			s.inject(BindingName, InjectJS)
+			s.inject(MirrorBindingName, MirrorInjectJS)
 		}
-		s.handle(raw)
+	}
+}
+
+// inject installs one runtime binding and evaluates its observer script,
+// logging any failure. A failing evaluate (a syntax error, or a runtime
+// exception during early navigation) must show up in the log instead of
+// silently killing the pipeline. (Syntax and behavior of the injected JS
+// are covered by internal/jscheck: node --check plus node:test suites, so
+// a syntax error should be caught by `go test ./internal/...` before it
+// ever reaches here.)
+func (s *Session) inject(name, js string) {
+	if _, err := s.Call("Runtime.addBinding", map[string]any{"name": name}); err != nil {
+		s.log.Error("addBinding failed", "binding", name, "err", err)
+		return
+	}
+	raw, err := s.Call("Runtime.evaluate", map[string]any{"expression": js, "returnByValue": true})
+	if err != nil {
+		s.log.Error("injection failed", "binding", name, "err", err)
+		return
+	}
+	// A page-side exception is NOT a CDP error: it rides inside the result
+	// as exceptionDetails.
+	var r struct {
+		Exception struct {
+			Text string `json:"text"`
+			Obj  struct {
+				Description string `json:"description"`
+			} `json:"exception"`
+		} `json:"exceptionDetails"`
+	}
+	if err := json.Unmarshal(raw, &r); err == nil && (r.Exception.Obj.Description != "" || r.Exception.Text != "") {
+		s.log.Error("injection threw", "binding", name, "err", r.Exception.Obj.Description)
 	}
 }
 
@@ -235,12 +294,15 @@ func (s *Session) handle(raw []byte) {
 				s.log.Warn("event channel full, dropping", "window", s.Title())
 			}
 		case "Page.frameNavigated":
-			// workbench reload: both bindings are gone, reinstall
+			// workbench reload: both bindings are gone, reinstall. Queue the
+			// request for the Run goroutine: inject uses Call, which waits
+			// for responses the read loop is the only deliverer of, so it
+			// must not run here, and it must not race other injections.
 			s.log.Info("frame navigated, re-injecting", "window", s.Title())
-			s.send("Runtime.addBinding", map[string]any{"name": BindingName})
-			s.send("Runtime.evaluate", map[string]any{"expression": InjectJS, "returnByValue": true})
-			s.send("Runtime.addBinding", map[string]any{"name": MirrorBindingName})
-			s.send("Runtime.evaluate", map[string]any{"expression": MirrorInjectJS, "returnByValue": true})
+			select {
+			case s.nav <- struct{}{}:
+			default:
+			}
 		}
 	}
 }

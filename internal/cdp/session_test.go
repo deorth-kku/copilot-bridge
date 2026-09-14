@@ -52,6 +52,11 @@ func startMockPage(t *testing.T) (wsURL string, methods chan string) {
 			}
 			method, _ := m["method"].(string)
 			methods <- method
+			// Answer id-carrying commands: the session's injection uses
+			// Call for addBinding/evaluate and waits for these responses.
+			if id, ok := m["id"]; ok {
+				conn.WriteJSON(map[string]any{"id": id, "result": map[string]any{}})
+			}
 			if method == "Runtime.evaluate" {
 				evaluates++
 				if evaluates == 1 {
@@ -178,17 +183,37 @@ func startControlledPage(t *testing.T) (wsURL string, push chan string) {
 		// NOTE: no connect handshake here — the client only dials after
 		// this function returns the URL, so waiting for a connection
 		// would deadlock. The buffered push channel decouples timing.
+		// Single writer goroutine: both the pushed binding events and the
+		// id-matched command responses (the session's injection Calls wait
+		// for them) go through it, so the connection never has two
+		// concurrent writers.
+		responses := make(chan map[string]any, 16)
 		go func() {
-			for p := range push {
-				c.WriteJSON(map[string]any{
-					"method": "Runtime.bindingCalled",
-					"params": map[string]any{"name": BindingName, "payload": p},
-				})
+			for {
+				select {
+				case p, ok := <-push:
+					if !ok {
+						return
+					}
+					c.WriteJSON(map[string]any{
+						"method": "Runtime.bindingCalled",
+						"params": map[string]any{"name": BindingName, "payload": p},
+					})
+				case r := <-responses:
+					c.WriteJSON(r)
+				}
 			}
 		}()
 		for {
-			if _, _, err := c.ReadMessage(); err != nil {
+			_, raw, err := c.ReadMessage()
+			if err != nil {
 				return
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err == nil {
+				if id, ok := m["id"]; ok {
+					responses <- map[string]any{"id": id, "result": map[string]any{}}
+				}
 			}
 		}
 	}))
