@@ -55,7 +55,19 @@ const pageHTML = `<!doctype html>
      boundary and are clipped. Suppress the ring: the mirror needs no
      visible focus indicator. */
   #pane:focus, #pane:focus-visible { outline: none !important; }
-  #pane > * { width: 100% !important; height: 100% !important; min-height: 0 !important; }
+  /* The popup (.context-view) is a sibling of the pane root inside #pane;
+     it keeps its live pixel size (the re-fit rule must not stretch it). */
+  #pane > :not(.context-view) { width: 100% !important; height: 100% !important; min-height: 0 !important; }
+  /* VS Code adds full-viewport transparent overlays (.context-view-pointerBlock,
+     .context-view-block) inside the context view for "click outside to close".
+     They sit on top of the popup content, so a real click's hit-test returns the
+     overlay instead of the menu row; the forwarded click is then computed from the
+     overlay's full-viewport rect and lands at the wrong live position. Make them
+     transparent to pointer events so clicks reach the actual menu rows. Clicks
+     outside the popup still pass through to the pane and forward to live, which
+     closes the live popup as before. */
+  #pane .context-view .context-view-pointerBlock,
+  #pane .context-view .context-view-block { pointer-events: none !important; }
   #pane .interactive-list { height: auto !important; flex: 1 1 0% !important; min-height: 0 !important; }
   /* The session-selection view has the same re-fit problem as the chat list,
      but its list container is .agent-sessions-control-container (NOT
@@ -215,6 +227,7 @@ const pageHTML = `<!doctype html>
         restoreScroll(m);
         syncDrawnScrollbars();
       }
+      updatePopup(m);
     };
   }
 
@@ -344,6 +357,140 @@ const pageHTML = `<!doctype html>
     }
     restoreScroll(m);
     syncDrawnScrollbars();
+  }
+
+  // ---- Popup (context view) rendering ---------------------------------
+  // Popup menus (agent/mode picker, model picker, reasoning effort, ...)
+  // render in the live page's .context-view container, which is OUTSIDE the
+  // pane root, so the pane HTML alone never contains them. The server
+  // extracts the visible container (m.popup) and the mirror renders it as a
+  // sibling of the pane root inside #pane. It is positioned FIXED in
+  // viewport coordinates (pane origin + the server's pane-relative offset):
+  // fixed positioning escapes #pane's overflow clipping (the popup can sit
+  // lower than the mirror viewport) while the element stays inside #pane in
+  // the DOM, so workbench CSS scoping and event bubbling keep working.
+  var popupEl = null;
+  var lastPopup = null;
+  // lastAnchorPath is the DOM path (from the pane root) of the control the
+  // user last clicked (mousedown). The next popup is positioned relative to
+  // the mirror's copy of that control, NOT at the live pane-relative
+  // position: the mirror's responsive layout does not preserve live pixel
+  // offsets, so a copied position lands the popup in the wrong place.
+  var lastAnchorPath = null;
+  // Resolve a DOM path (child indices from the pane root) to a current
+  // element, or null when the path no longer resolves (DOM re-patched).
+  function resolvePath(path) {
+    var el = pane.firstElementChild;
+    if (!el) return null;
+    if (!path || !path.length) return el;
+    for (var i = 0; i < path.length; i++) {
+      el = el.children[path[i]];
+      if (!el) return null;
+    }
+    return el;
+  }
+  // Validate the live anchor (popup rect vs live anchor rect, both in LIVE
+  // pane-relative coordinates). A popup opens flush against one of its
+  // anchor's horizontal edges (VS Code aligns the popup's bottom with the
+  // anchor's top when it opens above, and vice versa), and its horizontal
+  // span overlaps the anchor's span or extends only slightly beyond it: a
+  // popup may be anchored to a WIDER group than the clicked control (the
+  // model picker spans the model-name button AND the effort button, so its
+  // right edge sits ~40px right of the clicked button's right edge). A
+  // stale anchor (the last click was on a different control, or the popup
+  // was keyboard-opened) is neither vertically flush with nor horizontally
+  // near the open popup, no matter its size.
+  function popupNearAnchor(p, a) {
+    var pT = p.top, pB = p.top + p.height;
+    var pL = p.left, pR = p.left + p.width;
+    var aT = a.top, aB = a.top + a.height;
+    var aL = a.left, aR = a.left + a.width;
+    var vGap = Math.min(Math.abs(pB - aT), Math.abs(pT - aB));
+    if (vGap > 40) return false;
+    var hGap = pR < aL ? aL - pR : (aR < pL ? pL - aR : 0);
+    return hGap <= 150;
+  }
+  // The mirror-resolved anchor must be the same control the server resolved
+  // live: a stale path that resolves to a sibling control has a very
+  // different size (the responsive layout preserves control widths).
+  function anchorSizeMatches(mirror, live) {
+    return Math.abs(mirror.width - live.width) <= Math.max(24, live.width * 0.5) &&
+           Math.abs(mirror.height - live.height) <= Math.max(8, live.height * 0.5);
+  }
+  function positionPopup() {
+    if (!popupEl || !lastPopup) return;
+    var pr = pane.getBoundingClientRect();
+    var left, top;
+    // Anchor-relative placement: the server sends the live popup rect and
+    // the live anchor rect, both pane-relative; their difference is a pure
+    // offset that transfers to the mirror. Apply it to the mirror's own
+    // copy of the anchor (its current rect in mirror viewport coordinates).
+    var used = false;
+    var ar = null;
+    if (lastAnchorPath && lastPopup.anchor) {
+      var a = resolvePath(lastAnchorPath);
+      if (a) {
+        var ar0 = a.getBoundingClientRect();
+        if (popupNearAnchor(lastPopup, lastPopup.anchor) &&
+            anchorSizeMatches(ar0, lastPopup.anchor)) {
+          ar = ar0;
+          left = ar.left + (lastPopup.left - lastPopup.anchor.left);
+          top = ar.top + (lastPopup.top - lastPopup.anchor.top);
+          used = true;
+        }
+      }
+    }
+    if (!used) {
+      left = pr.left + lastPopup.left;
+      top = pr.top + lastPopup.top;
+    }
+    // The mirror viewport is not the live window: a transferred position can
+    // overflow it. Flip the popup to the other side of the anchor (keeping
+    // the live gap), then clamp horizontally.
+    if (used) {
+      var vh = window.innerHeight, vw = window.innerWidth;
+      if (top < 0 || top + lastPopup.height > vh) {
+        if (lastPopup.top < lastPopup.anchor.top) {
+          // Live popup sat above the anchor; move it below.
+          var gap = lastPopup.anchor.top - (lastPopup.top + lastPopup.height);
+          top = ar.top + ar.height + Math.max(0, gap);
+        } else {
+          // Live popup sat below the anchor; move it above.
+          var gap2 = lastPopup.top - (lastPopup.anchor.top + lastPopup.anchor.height);
+          top = ar.top - lastPopup.height - Math.max(0, gap2);
+        }
+      }
+      if (top < 0) top = 0;
+      if (top + lastPopup.height > vh) top = Math.max(0, vh - lastPopup.height);
+    }
+    if (left < 0) left = 0;
+    if (left + lastPopup.width > window.innerWidth) {
+      left = Math.max(0, window.innerWidth - lastPopup.width);
+    }
+    popupEl.style.position = 'fixed';
+    popupEl.style.left = left + 'px';
+    popupEl.style.top = top + 'px';
+  }
+  function updatePopup(m) {
+    // A defensive pane.innerHTML rebuild in applyState detaches the popup;
+    // drop the stale reference so it is re-appended on the next HTML update.
+    if (popupEl && !popupEl.isConnected) popupEl = null;
+    if (!m.popup) {
+      if (popupEl) { popupEl.remove(); popupEl = null; }
+      lastPopup = null;
+      return;
+    }
+    lastPopup = m.popup;
+    if (m.popup.html != null) {
+      var want = parseFragment(m.popup.html);
+      if (popupEl) {
+        patchNode(popupEl, want);
+      } else {
+        pane.appendChild(want);
+        popupEl = want;
+      }
+    }
+    positionPopup();
   }
 
   // Restore the live scroll position on the SAME element the server measured,
@@ -537,6 +684,28 @@ const pageHTML = `<!doctype html>
   function elemInfo(target, cx, cy) {
     var root = pane.firstElementChild || pane;
     var t = (target && target !== pane) ? target : root;
+    // The popup (.context-view) is a sibling of the pane root, so no path
+    // from the pane root reaches it: prefix its path with -1 and the server
+    // resolves it against the live .context-view instead.
+    var pv = (t && t.closest) ? t.closest('.context-view') : null;
+    if (pv) {
+      var pidx = [];
+      var n2 = t;
+      while (n2 && n2 !== pv) {
+        var p2 = n2.parentElement;
+        if (!p2) break;
+        pidx.unshift(Array.prototype.indexOf.call(p2.children, n2));
+        n2 = p2;
+      }
+      if (n2 === pv) {
+        var tr2 = t.getBoundingClientRect();
+        var rx2 = tr2.width > 0 ? (cx - tr2.left) / tr2.width : 0;
+        var ry2 = tr2.height > 0 ? (cy - tr2.top) / tr2.height : 0;
+        if (rx2 < 0) rx2 = 0; else if (rx2 > 1) rx2 = 1;
+        if (ry2 < 0) ry2 = 0; else if (ry2 > 1) ry2 = 1;
+        return { path: [-1].concat(pidx), relX: rx2, relY: ry2 };
+      }
+    }
     var path = [];
     var node = t;
     var underRoot = (t === root);
@@ -606,7 +775,26 @@ const pageHTML = `<!doctype html>
     focusInputAt(e.target);
     var c = paneCoords(e);
     var ei = elemInfo(e.target, e.clientX, e.clientY);
-    send({ type: 'mouse', kind: 'pressed', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, button: btn(e), buttons: e.buttons, clickCount: e.detail });
+    // Anchor for the next popup: the nearest button-like ancestor of the
+    // click target. VS Code anchors context views to the clicked control,
+    // and the click may land on a child of it (icon span, label), so walk
+    // up to the control itself. Clicks INSIDE the popup never update the
+    // anchor: menu rows embed <a> elements (e.g. the model-picker pin
+    // icons) that would corrupt it, and the open popup must not be
+    // re-anchored (and re-positioned) while a click is in flight.
+    var inPopup = (e.target && e.target.closest) ? e.target.closest('.context-view') : null;
+    var anchorPath = null;
+    if (!inPopup) {
+      // VS Code labels its controls with role/aria-label, but not every one is
+      // a semantic button: the model picker is a DIV with role="group" (a split
+      // of the model-name button and the effort button), so match any element
+      // carrying a role or aria-label (plus real buttons/links). closest()
+      // returns the nearest such ancestor, i.e. the clicked control itself.
+      var anc = e.target.closest('[role], [aria-label], button, a');
+      anchorPath = (anc && anc !== pane) ? elemInfo(anc, e.clientX, e.clientY).path : null;
+      lastAnchorPath = anchorPath;
+    }
+    send({ type: 'mouse', kind: 'pressed', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, button: btn(e), buttons: e.buttons, clickCount: e.detail, anchorPath: anchorPath });
   });
   pane.addEventListener('mouseup', function (e) {
     e.preventDefault();
@@ -735,6 +923,7 @@ const pageHTML = `<!doctype html>
   // scrolling of the mirror scrollers and with viewport resizes (rotation).
   pane.addEventListener('scroll', syncDrawnScrollbars, true);
   window.addEventListener('resize', syncDrawnScrollbars);
+  window.addEventListener('resize', positionPopup);
   // Fallback focus for browsers where the mousedown focus did not stick.
   // Clicking outside the input area drops the focus flag so re-renders do not
   // steal focus back into the input. A swipe that ends as a click is ignored.

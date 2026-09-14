@@ -51,11 +51,34 @@ type HTMLState struct {
 	// window, because the mirror's content is only that window.
 	ScrollRows []float64 `json:"scrollRows,omitempty"`
 	CSSFP      string    `json:"cssFP"`
+	// Popup is the currently visible context view (nil when none is open).
+	Popup *PopupState `json:"popup"`
 }
 
 // CSSState is the result of ExtractCSS.
 type CSSState struct {
 	CSS string `json:"css"`
+}
+
+// PopupState is one visible context view (popup menu, dropdown, tooltip)
+// captured alongside the pane. VS Code renders context views OUTSIDE the
+// pane root — in a single .context-view container that is a child of the
+// workbench root — so the pane subtree alone never contains them. Left/Top
+// are the container's offset relative to the pane root's bounding box, so
+// the mirror can place it in the same pane-relative spot.
+type PopupState struct {
+	HTML   string  `json:"html,omitempty"`
+	Left   float64 `json:"left"`
+	Top    float64 `json:"top"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+	// Anchor is the live bounding box of the control that opened the popup
+	// (the last clicked button), in the same pane-relative coordinates as
+	// Left/Top. The mirror's responsive layout does not preserve live
+	// pane-relative offsets, so it positions the popup by applying the
+	// (popup - anchor) offset to its own copy of that control. Nil when the
+	// anchor is unknown (e.g. the popup was opened via the keyboard).
+	Anchor *PaneRect `json:"anchor,omitempty"`
 }
 
 // FingerprintState is the result of Fingerprint: a cheap probe run every
@@ -132,6 +155,25 @@ const htmlExpr = `(selectors) => {
     }
     if (themeBg) themeVars += 'background-color: ' + themeBg + ';';
   } catch (e) {}
+  // Context views (popup menus, dropdowns, tooltips) render OUTSIDE the
+  // pane root — in a single .context-view container that is a child of the
+  // workbench root — so the pane subtree alone never contains them. Capture
+  // the currently visible one, positioned relative to the pane root, so the
+  // mirror can render it in the same pane-relative spot.
+  let popup = null;
+  try {
+    const cv = document.querySelector('.context-view');
+    if (cv) {
+      const cr = cv.getBoundingClientRect();
+      if (cr.width > 0 && cr.height > 0) {
+        popup = {
+          html: cv.outerHTML,
+          left: cr.left - r.left, top: cr.top - r.top,
+          width: cr.width, height: cr.height,
+        };
+      }
+    }
+  } catch (e) {}
   return {
     html: el.outerHTML,
     rootStyle: rootStyle,
@@ -142,6 +184,7 @@ const htmlExpr = `(selectors) => {
     scrollPath: scrollPath,
     scrollRows: scrollRows,
     cssFP: cssFP,
+    popup: popup,
   };
 }`
 
@@ -253,7 +296,21 @@ const fpExpr = `(selectors) => {
   // text content) still triggers a full re-extract of themeVars.
   let themeInd = '';
   try { themeInd = getComputedStyle(el).getPropertyValue('--vscode-foreground').trim(); } catch (e) {}
-  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd;
+  // The context view (popup menus) sits OUTSIDE the pane root, so the pane's
+  // own content never changes when a popup opens, closes, or moves — fold a
+  // cheap popup fingerprint into fp so any of those triggers a re-extract.
+  let popFP = '';
+  try {
+    const cv = document.querySelector('.context-view');
+    if (cv) {
+      const cr = cv.getBoundingClientRect();
+      if (cr.width > 0 && cr.height > 0) {
+        popFP = cv.innerText.length + ':' + cv.childElementCount + ':' +
+          Math.round(cr.left) + ':' + Math.round(cr.top);
+      }
+    }
+  } catch (e) {}
+  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP;
   return {
     fp: fp,
     cssFP: cssFP,
@@ -375,11 +432,19 @@ func ExtractCSS(s *Session) (*CSSState, error) {
 const clickPointExpr = `(args) => {
   const sels = args[0], path = args[1], rx = args[2], ry = args[3];
   let root = null;
-  for (const sel of sels) { try { root = document.querySelector(sel); } catch (e) {} if (root) break; }
+  let p = path;
+  // A path starting with -1 is rooted at the live context view (popup)
+  // instead of the pane root; the remaining indices are relative to it.
+  if (Array.isArray(p) && p.length > 0 && p[0] === -1) {
+    root = document.querySelector('.context-view');
+    if (root) p = p.slice(1);
+  } else {
+    for (const sel of sels) { try { root = document.querySelector(sel); } catch (e) {} if (root) break; }
+  }
   if (!root) return null;
   let el = root;
-  if (Array.isArray(path)) {
-    for (const i of path) {
+  if (Array.isArray(p)) {
+    for (const i of p) {
       if (!el.children[i]) { el = null; break; }
       el = el.children[i];
     }
@@ -420,6 +485,65 @@ func EvalClickPoint(s *Session, selectors []string, path []int, relX, relY float
 		return 0, 0, false
 	}
 	return resp.Result.Value.X, resp.Result.Value.Y, true
+}
+
+// rectExpr resolves a DOM path (child indices from the pane root) to the
+// target element's bounding box in viewport coordinates. ok:false (via a
+// null return) when the path does not resolve.
+const rectExpr = `(args) => {
+  const sels = args[0], path = args[1];
+  let root = null;
+  for (const sel of sels) { try { root = document.querySelector(sel); } catch (e) {} if (root) break; }
+  if (!root) return null;
+  let el = root;
+  if (Array.isArray(path) && path.length) {
+    for (const i of path) {
+      if (!el.children[i]) return null;
+      el = el.children[i];
+    }
+  }
+  const r = el.getBoundingClientRect();
+  return { ok: true, left: r.left, top: r.top, width: r.width, height: r.height };
+}`
+
+// EvalRect resolves a DOM path to the element's bounding box in viewport
+// coordinates. ok is false when the path does not resolve.
+func EvalRect(s *Session, selectors []string, path []int) (PaneRect, bool) {
+	args, _ := json.Marshal([]any{selectors, path})
+	raw, err := callExpr(s, rectExpr, string(args))
+	if err != nil {
+		return PaneRect{}, false
+	}
+	var resp struct {
+		Result struct {
+			Value struct {
+				OK     bool    `json:"ok"`
+				Left   float64 `json:"left"`
+				Top    float64 `json:"top"`
+				Width  float64 `json:"width"`
+				Height float64 `json:"height"`
+			} `json:"value"`
+		} `json:"result"`
+		Exception struct {
+			Text string `json:"text"`
+			Obj  struct {
+				Description string `json:"description"`
+			} `json:"exception"`
+		} `json:"exceptionDetails"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return PaneRect{}, false
+	}
+	if resp.Exception.Obj.Description != "" || resp.Exception.Text != "" {
+		return PaneRect{}, false
+	}
+	if !resp.Result.Value.OK {
+		return PaneRect{}, false
+	}
+	return PaneRect{
+		Left: resp.Result.Value.Left, Top: resp.Result.Value.Top,
+		Width: resp.Result.Value.Width, Height: resp.Result.Value.Height,
+	}, true
 }
 
 // decodeEval unwraps a Runtime.evaluate response and decodes result.value

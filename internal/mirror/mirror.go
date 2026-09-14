@@ -52,7 +52,12 @@ type stateMsg struct {
 	// full-content coordinates; the browser uses it to align its viewport
 	// with the live viewport inside the rendered row window.
 	ScrollRows []float64 `json:"scrollRows,omitempty"`
-	Window     string    `json:"window,omitempty"`
+	// Popup is the visible context view (popup menu / dropdown) that renders
+	// outside the pane root. HTML is only present when it changed since the
+	// last message; Left/Top are pane-relative and always present. Null when
+	// no popup is open (the browser removes its copy).
+	Popup  *cdp.PopupState `json:"popup,omitempty"`
+	Window string          `json:"window,omitempty"`
 	// WindowID is the CDP target id of the window currently mirrored; the
 	// browser uses it to mark the selected item in the status-bar picker.
 	WindowID string `json:"windowId,omitempty"`
@@ -80,6 +85,12 @@ type mouseMsg struct {
 	DeltaX  float64 `json:"deltaX,omitempty"`
 	DeltaY  float64 `json:"deltaY,omitempty"`
 	Clicks  int     `json:"clickCount,omitempty"`
+	// AnchorPath identifies the control the user clicked (the nearest
+	// button-like ancestor of the click target, as a DOM path from the pane
+	// root). The mirror anchors the next popup's position to it, because the
+	// live pane-relative popup offset does not transfer to the mirror's
+	// responsive layout.
+	AnchorPath []int `json:"anchorPath,omitempty"`
 }
 
 // keyMsg is a browser -> server keyboard event.
@@ -144,6 +155,12 @@ type Mirror struct {
 	// window picker ("" = follow the default). Written by the WS handler,
 	// read by the publish loop — an atomic value keeps it lock-free.
 	selectedID atomic.Value
+
+	// lastAnchor is the DOM path (from the pane root) of the control the
+	// user last clicked (a pressed mouse event carrying an anchorPath). The
+	// publish loop resolves it to a live rect to anchor the open popup's
+	// position. Written by the WS handler, read by the publish loop.
+	lastAnchor atomic.Value
 }
 
 // snapState is one extracted pane snapshot.
@@ -163,7 +180,19 @@ type snapState struct {
 	scroll     cdp.PaneScroll
 	scrollPath []int
 	scrollRows []float64
-	err        string
+	// popupHTML/popupFP capture the visible context view (popup menu) that
+	// renders outside the pane root; popupFP == "" means no popup is open.
+	popupHTML string
+	popupFP   string
+	popupLeft float64
+	popupTop  float64
+	popupW    float64
+	popupH    float64
+	// popupAnchor is the live rect (pane-relative) of the control that
+	// opened the popup; the mirror offsets the popup from its own copy of
+	// that control instead of copying the live pane-relative position.
+	popupAnchor *cdp.PaneRect
+	err         string
 }
 
 // client is one connected browser tab.
@@ -407,8 +436,11 @@ func (m *Mirror) sendFullState(c *client) {
 			Type: "state", HTML: s.html, CSS: s.css, CSSVer: s.cssVer,
 			RootStyle: s.rootStyle, ThemeVars: s.themeVars, ThemeVer: s.themeVer,
 			ThemeBg: s.themeBg,
-			Rect: s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
+			Rect:    s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
 			Window: s.window, WindowID: s.windowID, Err: s.err,
+		}
+		if s.popupFP != "" {
+			msg.Popup = &cdp.PopupState{HTML: s.popupHTML, Left: s.popupLeft, Top: s.popupTop, Width: s.popupW, Height: s.popupH, Anchor: s.popupAnchor}
 		}
 	} else {
 		msg = stateMsg{Type: "state", Err: "waiting for VS Code window"}
@@ -517,6 +549,7 @@ func (m *Mirror) refresh() {
 
 	// Full HTML extract only when the content fingerprint changed.
 	var html, rootStyle, themeVars, themeBg string
+	var newPopup *cdp.PopupState
 	if fpChanged {
 		hs, err := cdp.ExtractHTML(s, m.selectors)
 		if err != nil {
@@ -528,6 +561,9 @@ func (m *Mirror) refresh() {
 			return
 		}
 		html, rootStyle, themeVars, themeBg = hs.HTML, hs.RootStyle, hs.ThemeVars, hs.ThemeBg
+		if hs.Popup != nil {
+			newPopup = hs.Popup
+		}
 		html = m.rewriteImages(s, html)
 	} else if prev != nil {
 		html, rootStyle, themeVars, themeBg = prev.html, prev.rootStyle, prev.themeVars, prev.themeBg
@@ -552,6 +588,28 @@ func (m *Mirror) refresh() {
 		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath, scrollRows: fpst.ScrollRows,
 		window: s.Title(), windowID: winID, fp: fpst.FP,
 	}
+	if newPopup != nil {
+		ns.popupHTML = newPopup.HTML
+		ns.popupFP = hashStr(newPopup.HTML)
+		ns.popupLeft = newPopup.Left
+		ns.popupTop = newPopup.Top
+		ns.popupW = newPopup.Width
+		ns.popupH = newPopup.Height
+	}
+	// Resolve the popup's anchor (the last clicked control) to a live rect
+	// on every refresh while a popup is open: one cheap eval, only while
+	// visible. The mirror applies the live (popup - anchor) offset to its
+	// own copy of the control, which is size-independent.
+	if ns.popupFP != "" {
+		if ap, _ := m.lastAnchor.Load().([]int); ap != nil {
+			if ar, ok := cdp.EvalRect(s, m.selectors, ap); ok {
+				ns.popupAnchor = &cdp.PaneRect{
+					Left: ar.Left - fpst.Rect.Left, Top: ar.Top - fpst.Rect.Top,
+					Width: ar.Width, Height: ar.Height,
+				}
+			}
+		}
+	}
 	m.snapMu.Lock()
 	m.snap = ns
 	m.snapMu.Unlock()
@@ -563,6 +621,16 @@ func (m *Mirror) refresh() {
 	}
 	if fpChanged {
 		msg.HTML = html
+	}
+	// The popup is part of the content fingerprint, so it only changes when
+	// fpChanged. Always advertise its position while it is open (the browser
+	// keeps its DOM and just re-positions); re-send the HTML only when it
+	// actually changed.
+	if ns.popupFP != "" {
+		msg.Popup = &cdp.PopupState{Left: ns.popupLeft, Top: ns.popupTop, Width: ns.popupW, Height: ns.popupH, Anchor: ns.popupAnchor}
+		if prev == nil || prev.popupFP != ns.popupFP {
+			msg.Popup.HTML = ns.popupHTML
+		}
 	}
 	if sendCSS {
 		msg.CSS = css
@@ -617,6 +685,12 @@ func (m *Mirror) handleInput(raw []byte) {
 		var e mouseMsg
 		if err := json.Unmarshal(raw, &e); err != nil {
 			return
+		}
+		// Remember the control that was clicked so the next popup can be
+		// anchored to it. Only pressed events carry a meaningful anchor;
+		// nil (e.g. clicks inside the popup itself) leaves the previous one.
+		if e.Kind == "pressed" && e.AnchorPath != nil {
+			m.lastAnchor.Store(e.AnchorPath)
 		}
 		m.forwardMouse(s, e)
 	case "key":
