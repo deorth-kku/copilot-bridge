@@ -138,17 +138,27 @@ const pageHTML = `<!doctype html>
      by a rule scoped to .monaco-workbench. The #pane.monaco-workbench class below
      normally makes that rule apply, but keep an explicit hide in case it is not. */
   #pane .simple-find-part-wrapper, #pane .monaco-findInput, #pane .simple-find-part { display: none !important; }
-  /* The reasoning-trace spinner label (the "Thinking/Considering/Analyzing"
-     row that tails the streaming list) and the collapsed active-title shimmer
-     render their text via an animated gradient: background-clip:text plus a
-     transparent text fill plus a background shorthand whose stops are theme
-     vars. The live cssText serializes that shorthand with an EMPTY
-     background-image (a browser quirk for shorthand+var gradients), so the
+  /* Shimmer text labels render via an animated gradient: background-clip:
+     text plus a transparent text fill plus a background shorthand whose
+     stops are theme vars. The live CSSOM serializes that shorthand without
+     the gradient (a browser quirk for shorthand+var gradients), so the
      extracted mirror CSS carries no gradient and the clipped text paints
-     nothing — only the leading dot glyph is visible. Re-apply the gradient
-     from the same theme vars the workbench rule uses. */
+     nothing. Affected selectors:
+     - .chat-thinking-spinner-item .chat-thinking-spinner-label: the
+       "Thinking/Considering/Analyzing" row that tails the streaming list
+       (only the leading dot glyph was visible).
+     - .chat-thinking-title-shimmer: the collapsed active-title shimmer.
+     - .progress-container.shimmer-progress .rendered-markdown.progress-step
+       > p (and .chat-progress-shimmer-text): the DOT-LESS status labels
+       ("Evaluating", "Working", …) on the progress row.
+     - .chat-confirmation-widget.shimmer-progress …title-inner > p: the
+       shimmer title of collapsible tool widgets.
+     Re-apply the gradient from the same theme vars the workbench rule uses. */
   #pane .chat-thinking-spinner-item .chat-thinking-spinner-label,
-  #pane .chat-thinking-title-shimmer {
+  #pane .chat-thinking-title-shimmer,
+  #pane .progress-container.shimmer-progress .rendered-markdown.progress-step > p,
+  #pane .progress-container.shimmer-progress .rendered-markdown.progress-step .chat-progress-shimmer-text,
+  #pane .chat-confirmation-widget.shimmer-progress .chat-confirmation-widget-title-inner > .rendered-markdown > p {
     background-image: linear-gradient(90deg,
       var(--vscode-descriptionForeground) 0%,
       var(--vscode-descriptionForeground) 30%,
