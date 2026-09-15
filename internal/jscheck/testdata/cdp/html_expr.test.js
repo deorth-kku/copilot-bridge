@@ -173,3 +173,25 @@ test('htmlExpr: ancestor-walk fallback when no monaco-list scroller exists', () 
     assert.equal(r.scroll.offset, 0);
   } finally { uninstallGlobals(); }
 });
+
+test('htmlExpr: nestedScrolls captures the reasoning-trace list scroll state', () => {
+  const { root } = buildPane();
+  const pane = root.querySelector('.chat-viewpane-container');
+  const row = pane.children[0].children[0].children[0].children[0]; // rows > row
+  const box = new El('div', { attrs: { class: 'chat-used-context chat-thinking-box' } });
+  const list = new El('div', {
+    attrs: { class: 'chat-used-context-list chat-thinking-streaming' },
+    scrollTop: 500,
+    scrollHeight: 800,
+    clientHeight: 200,
+  });
+  box.appendChild(list);
+  row.appendChild(box);
+  try {
+    const r = htmlExpr(['.chat-viewpane-container']);
+    // pane > chatList(0) > chatSc(0) > rows(0) > row(0) > box(0) > list(0)
+    assert.deepEqual(r.nestedScrolls, [
+      { path: [0, 0, 0, 0, 0, 0], top: 500, scrollH: 800, clientH: 200 },
+    ]);
+  } finally { uninstallGlobals(); }
+});

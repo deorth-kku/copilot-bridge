@@ -171,6 +171,11 @@ const pageHTML = `<!doctype html>
   // mirror the live-drawn scrollbar's position/size onto the mirror scroller.
   var lastScroll = null;
   var lastScrollPath = null;
+  // Last live nested-scroll state (m.nestedScrolls): the reasoning-trace
+  // list of each .chat-thinking-box. Used to restore the list's scrollTop
+  // (VS Code pins it to the bottom while streaming) and to redraw its
+  // self-drawn slider, which arrives with live inline geometry.
+  var lastNestedScrolls = null;
 
   // The status bar is a <select> (window picker). setStatus replaces its
   // options with a single placeholder (connecting / error states).
@@ -229,6 +234,7 @@ const pageHTML = `<!doctype html>
       if (m.err) { setStatus('! ' + m.err); return; }
       if (m.scroll) lastScroll = m.scroll;
       lastScrollPath = m.scrollPath || null;
+      lastNestedScrolls = m.nestedScrolls || null;
       syncWindows(m);
       if (m.cssVersion !== lastCSSVer) {
         lastCSSVer = m.cssVersion || '';
@@ -245,6 +251,7 @@ const pageHTML = `<!doctype html>
         // re-render, just keep the local scroll position in sync with the
         // live page.
         restoreScroll(m);
+        restoreNestedScrolls(m);
         syncDrawnScrollbars();
       }
       updatePopup(m);
@@ -375,6 +382,7 @@ const pageHTML = `<!doctype html>
         }
       }
     }
+    restoreNestedScrolls(m);
     restoreScroll(m);
     syncDrawnScrollbars();
   }
@@ -581,6 +589,35 @@ const pageHTML = `<!doctype html>
     el.scrollTop = Math.max(0, Math.min(max, target));
   }
 
+  // The reasoning-trace list (.chat-used-context-list inside a
+  // .chat-thinking-box) is a NESTED scroll container: the main pane
+  // scroller's state never covers it. While the trace streams, VS Code pins
+  // its scrollTop to the bottom (DomScrollableElement applies
+  // setScrollPosition to the wrapped list element), but the extracted HTML
+  // carries no scrollTop, so the mirror's fresh copy would otherwise always
+  // show the TOP of the trace. Map the live ratio (top / (scrollH -
+  // clientH)) onto the mirror's own content, which is the same text at a
+  // different (responsive) width.
+  function restoreNestedScrolls(m) {
+    if (!m.nestedScrolls || !m.nestedScrolls.length) return;
+    var root = pane.firstElementChild;
+    if (!root) return;
+    for (var i = 0; i < m.nestedScrolls.length; i++) {
+      var ns = m.nestedScrolls[i];
+      var el = root;
+      for (var j = 0; j < ns.path.length; j++) {
+        el = el.children[ns.path[j]];
+        if (!el) { el = null; break; }
+      }
+      if (!el) continue;
+      var liveMax = ns.scrollH - ns.clientH;
+      var max = el.scrollHeight - el.clientHeight;
+      if (max <= 0) continue;
+      var ratio = liveMax > 0 ? Math.max(0, Math.min(1, ns.top / liveMax)) : 0;
+      el.scrollTop = ratio * max;
+    }
+  }
+
   // Maps the live viewport onto the mirror's rendered rows. The live list's
   // rendered rows carry [offsetTop, offsetHeight] pairs in full-content
   // coordinates (rows); the live viewport spans [v0, v0 + scroll.h] in the
@@ -626,8 +663,9 @@ const pageHTML = `<!doctype html>
   //   sliderTop = liveRatio * (clientH - sliderH)   scaled to mirror height)
   // The track is absolute inside the scroller, so it scrolls out of view with
   // the content; offset its top by the scroller's scrollTop to pin it to the
-  // top of the visible area. Other (nested) scrollers have no live state, so
-  // they fall back to their own geometry.
+  // top of the visible area. Other (nested) scrollers fall back to their own
+  // geometry — except the reasoning-trace wrap of a .chat-thinking-box, whose
+  // live state is carried in lastNestedScrolls and handled after the loop.
   // Called after every DOM patch, scroll restoration, local scroll, and
   // viewport resize.
   function syncDrawnScrollbars() {
@@ -673,6 +711,38 @@ const pageHTML = `<!doctype html>
       if (el === target) {
         var sticky = el.querySelector(':scope > .monaco-tree-sticky-container');
         if (sticky) sticky.style.top = -el.scrollTop + 'px';
+      }
+    }
+    // The reasoning-trace wrap of each .chat-thinking-box is a nested
+    // .monaco-scrollable-element (NOT a .monaco-list child, so the loop above
+    // never touches it). Its slider arrives with live inline geometry (pinned
+    // to the bottom while the trace streams) that matches neither the
+    // mirror's (different) size nor the mirror list's own scrollTop before
+    // restoreNestedScrolls ran, so recompute it from the live ratio.
+    if (lastNestedScrolls && lastNestedScrolls.length) {
+      for (var k = 0; k < lastNestedScrolls.length; k++) {
+        var ns = lastNestedScrolls[k];
+        var listEl = root;
+        for (var j = 0; j < ns.path.length; j++) {
+          listEl = listEl ? listEl.children[ns.path[j]] : null;
+        }
+        if (!listEl) continue;
+        var wrap = listEl.parentElement;
+        if (!wrap) continue;
+        var vtrack = wrap.querySelector(':scope > .scrollbar.vertical');
+        if (!vtrack) continue;
+        var vslider = vtrack.querySelector('.slider');
+        if (!vslider) continue;
+        var vch = wrap.clientHeight;
+        if (vch <= 0) continue;
+        var vliveMax = ns.scrollH - ns.clientH;
+        var vratio = vliveMax > 0 ? Math.max(0, Math.min(1, ns.top / vliveMax)) : 0;
+        var vsliderH = ns.scrollH > 0 ? vch * ns.clientH / ns.scrollH : vch;
+        if (vsliderH < 20) vsliderH = 20;
+        vtrack.style.height = vch + 'px';
+        vtrack.style.top = wrap.scrollTop + 'px';
+        vslider.style.top = vratio * (vch - vsliderH) + 'px';
+        vslider.style.height = vsliderH + 'px';
       }
     }
   }

@@ -432,3 +432,55 @@ test('mirror: drawn scrollbar mirrors the live slider, and local scroll pins tra
     assert.equal(sticky.style.top, '-50px');
   } finally { uninstallGlobals(); }
 });
+
+test('mirror: reasoning-trace list follows the live bottom-pinned scroll', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element">' +
+        '<div class="monaco-list-rows"><div class="monaco-list-row">' +
+        '<div class="chat-used-context chat-thinking-box"><div class="monaco-scrollable-element">' +
+        '<div class="chat-used-context-list chat-thinking-streaming"></div>' +
+        '<div class="scrollbar vertical"><div class="slider"></div></div>' +
+        '</div></div></div></div></div></div></div>',
+      scroll: { left: 0, top: 0, offset: -100, h: 300, scrollH: 1000 },
+      scrollPath: [0, 0],
+      // Live list pinned to the bottom: top = scrollH - clientH.
+      nestedScrolls: [{ path: [0, 0, 0, 0, 0, 0, 0], top: 360, scrollH: 480, clientH: 120 }],
+    });
+    // root > monaco-list(0) > scroller(0) > rows(0) > row(0) > box(0) > wrap(0) > list(0)
+    const rootEl = pane.children[0];
+    const scroller = rootEl.children[0].children[0];
+    scroller.clientHeight = 300;
+    scroller.scrollHeight = 600;
+    const list = scroller.children[0].children[0].children[0].children[0].children[0];
+    list.scrollHeight = 480;
+    list.clientHeight = 120;
+    const wrap = list.parentElement;
+    wrap.clientHeight = 240;
+    const vtrack = wrap.children[1];
+    const vslider = vtrack.children[0];
+    // The stub has no layout, so the geometry is set after the first state;
+    // a scroll-only update re-runs the restore with the geometry in place.
+    state(ws, {
+      scroll: { left: 0, top: 0, offset: -100, h: 300, scrollH: 1000 },
+      scrollPath: [0, 0],
+      nestedScrolls: [{ path: [0, 0, 0, 0, 0, 0, 0], top: 360, scrollH: 480, clientH: 120 }],
+    });
+    // ratio = 360 / (480 - 120) = 1 -> the mirror list pins to its own bottom.
+    assert.equal(list.scrollTop, 360); // 1 * (480 - 120)
+    // The slider mirrors the live bottom position, scaled to the mirror wrap.
+    assert.equal(vtrack.style.height, '240px');
+    assert.equal(vtrack.style.top, '0px'); // wrap.scrollTop stays 0 (the LIST scrolls)
+    assert.equal(vslider.style.height, '60px'); // 240 * 120/480
+    assert.equal(vslider.style.top, '180px'); // 1 * (240 - 60)
+    // A later scroll-only update keeps the list following the live ratio.
+    state(ws, {
+      scroll: { left: 0, top: 0, offset: -100, h: 300, scrollH: 1000 },
+      scrollPath: [0, 0],
+      nestedScrolls: [{ path: [0, 0, 0, 0, 0, 0, 0], top: 180, scrollH: 480, clientH: 120 }],
+    });
+    assert.equal(list.scrollTop, 180); // 0.5 * (480 - 120)
+    assert.equal(vslider.style.top, '90px'); // 0.5 * (240 - 60)
+  } finally { uninstallGlobals(); }
+});

@@ -53,6 +53,11 @@ type stateMsg struct {
 	// full-content coordinates; the browser uses it to align its viewport
 	// with the live viewport inside the rendered row window.
 	ScrollRows []float64 `json:"scrollRows,omitempty"`
+	// NestedScrolls carries the scroll state of nested scroll containers the
+	// main scroller does not cover (currently: the reasoning-trace list of
+	// each .chat-thinking-box); the browser maps each live ratio onto its own
+	// copy of the element.
+	NestedScrolls []cdp.NestedScroll `json:"nestedScrolls,omitempty"`
 	// Popup is the visible context view (popup menu / dropdown) that renders
 	// outside the pane root. HTML is only present when it changed since the
 	// last message; Left/Top are pane-relative and always present. Null when
@@ -184,6 +189,9 @@ type snapState struct {
 	scroll     cdp.PaneScroll
 	scrollPath []int
 	scrollRows []float64
+	// nestedScrolls: scroll state of nested scrollers (reasoning-trace
+	// lists) the main scroller does not cover.
+	nestedScrolls []cdp.NestedScroll
 	// popupHTML/popupFP capture the visible context view (popup menu) that
 	// renders outside the pane root; popupFP == "" means no popup is open.
 	popupHTML string
@@ -427,7 +435,8 @@ func (m *Mirror) sendFullState(c *client) {
 			RootStyle: s.rootStyle, ThemeVars: s.themeVars, ThemeVer: s.themeVer,
 			ThemeBg: s.themeBg,
 			Rect:    s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
-			Window: s.window, WindowID: s.windowID, Err: s.err,
+			NestedScrolls: s.nestedScrolls,
+			Window:        s.window, WindowID: s.windowID, Err: s.err,
 		}
 		if s.popupFP != "" {
 			msg.Popup = &cdp.PopupState{HTML: s.popupHTML, Left: s.popupLeft, Top: s.popupTop, Width: s.popupW, Height: s.popupH, Anchor: s.popupAnchor}
@@ -528,13 +537,18 @@ func (m *Mirror) refresh() {
 		!equalFloats(prev.scrollRows, fpst.ScrollRows)
 	fpChanged := prev == nil || prev.fp != fpst.FP
 	cssFPChanged := prev == nil || prev.cssFP != fpst.CSSFP
+	// Nested scrollers (reasoning-trace lists) scroll without any DOM change:
+	// while the trace streams, VS Code pins the list's scrollTop to the
+	// bottom on every content chunk, and the user can scroll a finished box.
+	// Neither changes the content fingerprint, so compare them explicitly.
+	nestedChanged := prev == nil || !equalNested(prev.nestedScrolls, fpst.NestedScrolls)
 	var prevCSS, prevCSSVer, prevThemeVer string
 	if prev != nil {
 		prevCSS, prevCSSVer, prevThemeVer = prev.css, prev.cssVer, prev.themeVer
 	}
 	m.snapMu.Unlock()
 
-	if !(rectChanged || scrollChanged || fpChanged || cssFPChanged) {
+	if !(rectChanged || scrollChanged || fpChanged || cssFPChanged || nestedChanged) {
 		return
 	}
 
@@ -577,7 +591,8 @@ func (m *Mirror) refresh() {
 		html: html, css: css, cssVer: cssVer, cssFP: fpst.CSSFP,
 		rootStyle: rootStyle, themeVars: themeVars, themeVer: themeVer, themeBg: themeBg,
 		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath, scrollRows: fpst.ScrollRows,
-		window: s.Title(), windowID: winID, fp: fpst.FP,
+		nestedScrolls: fpst.NestedScrolls,
+		window:        s.Title(), windowID: winID, fp: fpst.FP,
 	}
 	if newPopup != nil {
 		ns.popupHTML = newPopup.HTML
@@ -608,7 +623,8 @@ func (m *Mirror) refresh() {
 
 	msg := stateMsg{
 		Type: "state", CSSVer: cssVer, RootStyle: rootStyle, ThemeVer: themeVer,
-		Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
+		NestedScrolls: fpst.NestedScrolls,
+		Rect:          fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
 		Window: s.Title(), WindowID: winID, Windows: wins,
 	}
 	if fpChanged {
@@ -814,6 +830,19 @@ func equalFloats(a, b []float64) bool {
 	}
 	for i := range a {
 		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalNested(a, b []cdp.NestedScroll) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Top != b[i].Top || a[i].ScrollH != b[i].ScrollH || a[i].ClientH != b[i].ClientH ||
+			!equalInts(a[i].Path, b[i].Path) {
 			return false
 		}
 	}

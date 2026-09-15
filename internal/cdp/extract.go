@@ -32,6 +32,22 @@ type PaneScroll struct {
 	Offset float64 `json:"offset"`
 }
 
+// NestedScroll is the scroll state of a nested scroll container inside the
+// pane that the main pane scroller does not cover. Currently: the
+// reasoning-trace list of a .chat-thinking-box (.chat-used-context-list,
+// ~200px max-height while streaming). While the trace streams, VS Code pins
+// its scrollTop to the bottom (DomScrollableElement applies
+// setScrollPosition to the wrapped list element), but the extracted HTML
+// carries no scrollTop, so the mirror maps the live ratio
+// (Top / (ScrollH - ClientH)) onto its own copy of the list.
+type NestedScroll struct {
+	// Path is the DOM path from the pane root to the list element.
+	Path    []int   `json:"path"`
+	Top     float64 `json:"top"`
+	ScrollH float64 `json:"scrollH"`
+	ClientH float64 `json:"clientH"`
+}
+
 // HTMLState is the result of ExtractHTML.
 type HTMLState struct {
 	Err       string `json:"err"`
@@ -50,7 +66,10 @@ type HTMLState struct {
 	// to align its viewport with the live viewport inside the rendered row
 	// window, because the mirror's content is only that window.
 	ScrollRows []float64 `json:"scrollRows,omitempty"`
-	CSSFP      string    `json:"cssFP"`
+	// NestedScrolls carries the scroll state of nested scroll containers the
+	// main scroller does not cover (see NestedScroll).
+	NestedScrolls []NestedScroll `json:"nestedScrolls,omitempty"`
+	CSSFP         string         `json:"cssFP"`
 	// Popup is the currently visible context view (nil when none is open).
 	Popup *PopupState `json:"popup"`
 }
@@ -85,13 +104,14 @@ type PopupState struct {
 // poll that avoids the costly outerHTML dump until something actually
 // changed.
 type FingerprintState struct {
-	Err        string     `json:"err"`
-	FP         string     `json:"fp"`
-	CSSFP      string     `json:"cssFP"`
-	Rect       PaneRect   `json:"rect"`
-	Scroll     PaneScroll `json:"scroll"`
-	ScrollPath []int      `json:"scrollPath"`
-	ScrollRows []float64  `json:"scrollRows,omitempty"`
+	Err           string         `json:"err"`
+	FP            string         `json:"fp"`
+	CSSFP         string         `json:"cssFP"`
+	Rect          PaneRect       `json:"rect"`
+	Scroll        PaneScroll     `json:"scroll"`
+	ScrollPath    []int          `json:"scrollPath"`
+	ScrollRows    []float64      `json:"scrollRows,omitempty"`
+	NestedScrolls []NestedScroll `json:"nestedScrolls,omitempty"`
 }
 
 // htmlExpr extracts the pane subtree's outerHTML plus the layout metadata
@@ -189,6 +209,7 @@ const htmlExpr = `(selectors) => {
     scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
     scrollPath: scrollPath,
     scrollRows: scrollRows,
+    nestedScrolls: nestedScrolls,
     cssFP: cssFP,
     popup: popup,
   };
@@ -277,6 +298,39 @@ const scrollPathJS = `
       }
     }
   } catch (e) { scrollOffset = 0; }
+` + nestedScrollJS
+
+// nestedScrollJS is spliced right after scrollPathJS (same inlining
+// constraint). It records the scroll state of each nested scroll container
+// the main scroller never covers — currently the reasoning-trace list of
+// every .chat-thinking-box (.chat-used-context-list, ~200px max-height while
+// streaming). While the trace streams, VS Code pins the list's scrollTop to
+// the bottom (DomScrollableElement applies setScrollPosition to the wrapped
+// list element), but the extracted HTML carries no scrollTop, so without
+// this the mirror would always show the TOP of the trace. The mirror maps
+// the live ratio (top / (scrollH - clientH)) onto its own copy of the list.
+const nestedScrollJS = `
+  let nestedScrolls = null;
+  try {
+    const boxes = el.querySelectorAll('.chat-thinking-box');
+    if (boxes.length) {
+      nestedScrolls = [];
+      for (const box of boxes) {
+        const list = box.querySelector('.chat-used-context-list');
+        if (!list) continue;
+        let path = [];
+        let n = list;
+        while (n && n !== el) {
+          const p = n.parentElement;
+          if (!p) { path = null; break; }
+          path.unshift(Array.prototype.indexOf.call(p.children, n));
+          n = p;
+        }
+        if (!path) continue;
+        nestedScrolls.push({ path: path, top: list.scrollTop || 0, scrollH: list.scrollHeight || 0, clientH: list.clientHeight || 0 });
+      }
+    }
+  } catch (e) { nestedScrolls = null; }
 `
 
 // fpExpr is the cheap per-poll probe: it returns a content fingerprint, a
@@ -327,6 +381,7 @@ const fpExpr = `(selectors) => {
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
     scrollPath: scrollPath,
+    nestedScrolls: nestedScrolls,
     scrollRows: scrollRows,
   };
 }`

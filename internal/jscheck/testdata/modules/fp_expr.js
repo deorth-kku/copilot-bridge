@@ -72,6 +72,28 @@ module.exports = (selectors) => {
     }
   } catch (e) { scrollOffset = 0; }
 
+  let nestedScrolls = null;
+  try {
+    const boxes = el.querySelectorAll('.chat-thinking-box');
+    if (boxes.length) {
+      nestedScrolls = [];
+      for (const box of boxes) {
+        const list = box.querySelector('.chat-used-context-list');
+        if (!list) continue;
+        let path = [];
+        let n = list;
+        while (n && n !== el) {
+          const p = n.parentElement;
+          if (!p) { path = null; break; }
+          path.unshift(Array.prototype.indexOf.call(p.children, n));
+          n = p;
+        }
+        if (!path) continue;
+        nestedScrolls.push({ path: path, top: list.scrollTop || 0, scrollH: list.scrollHeight || 0, clientH: list.clientHeight || 0 });
+      }
+    }
+  } catch (e) { nestedScrolls = null; }
+
   let cssFP = '';
   try {
     cssFP = document.styleSheets.length + ':' +
@@ -108,6 +130,7 @@ module.exports = (selectors) => {
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
     scrollPath: scrollPath,
+    nestedScrolls: nestedScrolls,
     scrollRows: scrollRows,
   };
 };

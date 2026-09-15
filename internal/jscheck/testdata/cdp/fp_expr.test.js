@@ -91,3 +91,36 @@ test('fpExpr: missing model picker contributes empty model to fp', () => {
     assert.equal(r.fp, '1:0:0::');
   } finally { uninstallGlobals(); }
 });
+
+test('fpExpr: nestedScrolls captures the reasoning-trace list scroll state', () => {
+  const { root } = buildPane();
+  const pane = root.querySelector('.chat-viewpane-container');
+  const chatSc = pane.children[0].children[0];
+  const rows = new El('div', { attrs: { class: 'monaco-list-rows' } });
+  const row = new El('div', { attrs: { class: 'monaco-list-row' } });
+  rows.appendChild(row);
+  chatSc.appendChild(rows);
+  const box = new El('div', { attrs: { class: 'chat-used-context chat-thinking-box' } });
+  const list = new El('div', {
+    attrs: { class: 'chat-used-context-list chat-thinking-streaming' },
+    scrollTop: 400,
+    scrollHeight: 600,
+    clientHeight: 200,
+  });
+  box.appendChild(list);
+  row.appendChild(box);
+  try {
+    const r = fpExpr(['.chat-viewpane-container']);
+    // pane > chatList(0) > chatSc(0) > rows(0) > row(0) > box(0) > list(0)
+    assert.deepEqual(r.nestedScrolls, [
+      { path: [0, 0, 0, 0, 0, 0], top: 400, scrollH: 600, clientH: 200 },
+    ]);
+  } finally { uninstallGlobals(); }
+});
+
+test('fpExpr: no thinking box -> nestedScrolls null', () => {
+  buildPane();
+  try {
+    assert.equal(fpExpr(['.chat-viewpane-container']).nestedScrolls, null);
+  } finally { uninstallGlobals(); }
+});
