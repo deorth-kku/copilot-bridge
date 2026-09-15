@@ -32,7 +32,9 @@ func TestProcessEvent(t *testing.T) {
 
 	dir := t.TempDir()
 	p := filepath.Join(dir, "settings.json")
-	content := fmt.Sprintf(`{"oaicopilot.models":[{"id":"Qwen3.8-27B","displayName":"Qwen3.8 27B","baseUrl":"%s/v1"}]}`, srv.URL)
+	content := fmt.Sprintf(`{"oaicopilot.models":[`+
+		`{"id":"Qwen3.8-27B","displayName":"Qwen3.8 27B","baseUrl":"%s/v1","optimization":"llama.cpp"},`+
+		`{"id":"Remote-Model","displayName":"Remote","baseUrl":"%s/v1","optimization":"openrouter"}]}`, srv.URL, srv.URL)
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +53,8 @@ func TestProcessEvent(t *testing.T) {
 	processEvent(cdp.Event{Window: "w", Input: "hello", Model: ""}, settings, ld, log)
 	// unknown model -> no load
 	processEvent(cdp.Event{Window: "w", Input: "hello", Model: "Unknown"}, settings, ld, log)
+	// non-llama.cpp optimization -> no load
+	processEvent(cdp.Event{Window: "w", Input: "hello", Model: "Remote"}, settings, ld, log)
 
 	mu.Lock()
 	n := len(reqs)

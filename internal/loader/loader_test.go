@@ -85,24 +85,28 @@ func TestLoadDifferentModelsIndependent(t *testing.T) {
 	}
 }
 
-func TestLoadMarksNonLlamaAndSkips(t *testing.T) {
-	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n++
-		w.WriteHeader(http.StatusNotFound) // no /models/load route
+func TestLoadSameIDDifferentServersIndependent(t *testing.T) {
+	var n1, n2 int
+	srv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n1++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success": true}`))
 	}))
-	defer srv.Close()
+	defer srv1.Close()
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n2++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success": true}`))
+	}))
+	defer srv2.Close()
 
-	// short cooldown so the 2nd/3rd calls are NOT blocked by cooldown
-	l := New(10*time.Millisecond, discardLog, nil)
-	m := config.Model{ID: "m1", BaseURL: srv.URL}
-	l.Load(m)
-	time.Sleep(20 * time.Millisecond)
-	l.Load(m) // must be skipped via the non-llama set, not cooldown
-	time.Sleep(20 * time.Millisecond)
-	l.Load(m)
-	if n != 1 {
-		t.Fatalf("expected 1 request after non-llama marking, got %d", n)
+	l := New(30*time.Second, discardLog, nil)
+	// Same model id on two different servers: the (server, id) keys differ,
+	// so each server gets its own load (no cross-server cooldown sharing).
+	l.Load(config.Model{ID: "m1", BaseURL: srv1.URL})
+	l.Load(config.Model{ID: "m1", BaseURL: srv2.URL})
+	if n1 != 1 || n2 != 1 {
+		t.Fatalf("expected 1 request per server, got srv1=%d srv2=%d", n1, n2)
 	}
 }
 

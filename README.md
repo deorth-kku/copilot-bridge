@@ -10,7 +10,10 @@ Watches VS Code Copilot chat inputs via CDP (port 9222) and pre-loads the select
   (50ms debounce) pushes `{input, model, effort, mode}` via a runtime binding.
 - On every non-empty input event: looks up the model in the VS Code user
   `settings.json` (`oaicopilot.models`, loaded at startup and hot-reloaded
-  on change) and sends
+  on change). Only models whose `optimization` field is `llama.cpp` are
+  pre-loaded; other values (openrouter, etc.) are remote API providers
+  with no `/models/load` endpoint and are skipped.
+- For a loadable model, sends
   `POST {server root}/models/load` with
   `{"model": "<id>"}` — the path is relative to the server ROOT
   (baseUrl `http://abc.com/v1` → `http://abc.com/models/load`).
@@ -19,9 +22,8 @@ Watches VS Code Copilot chat inputs via CDP (port 9222) and pre-loads the select
   (noProxy entries are host suffixes); with no proxy configured the
   client connects directly.
 - Response handling: `400 "model is already running"` is treated as
-  normal (model already loaded). Endpoints answering `404/405/401/403`
-  are remembered as non-llama.cpp and skipped entirely afterwards, so
-  remote API providers (openrouter, etc.) are only probed once.
+  normal (model already loaded); `404 "File Not Found"` means the model
+  is not on the server.
 - Survives VS Code fully exiting and restarting (state machine:
   waiting → monitoring → disconnected → ...).
 

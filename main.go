@@ -123,6 +123,13 @@ func processEvent(ev cdp.Event, store *config.Store, ld *loader.Loader, log *slo
 		log.Warn("model not found in settings, skip", "model", ev.Model, "window", ev.Window)
 		return
 	}
+	// Only llama.cpp-backed models are pre-loaded. The decision is taken
+	// from the settings "optimization" field: other values (openrouter,
+	// etc.) are remote API providers with no /models/load endpoint.
+	if m.Optimization != "llama.cpp" {
+		log.Debug("skip: not a llama.cpp model", "model", ev.Model, "optimization", m.Optimization, "window", ev.Window)
+		return
+	}
 	log.Info("input event", "window", ev.Window, "model", ev.Model,
 		"effort", ev.Effort, "mode", ev.Mode, "inputLen", len(input))
 	// Async: Load does a blocking HTTP POST (up to the client timeout).

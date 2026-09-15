@@ -14,7 +14,7 @@ func TestLoad(t *testing.T) {
 	content := `{
   "oaicopilot.models": [
     {"id": "__provider__local", "displayName": "Local"},
-    {"id": "Qwen3.8-27B", "displayName": "Qwen3.8 27B", "baseUrl": "http://127.0.0.1:8080/"},
+    {"id": "Qwen3.8-27B", "displayName": "Qwen3.8 27B", "baseUrl": "http://127.0.0.1:8080/", "optimization": "llama.cpp"},
     {"id": "Ornith-1.5-35B", "baseUrl": "http://10.0.0.5:8080"}
   ]
 }`
@@ -30,6 +30,10 @@ func TestLoad(t *testing.T) {
 	if got := s.Models["Qwen3.8 27B"]; got.ID != "Qwen3.8-27B" || got.BaseURL != "http://127.0.0.1:8080" {
 		t.Errorf("displayName key wrong: %+v", got)
 	}
+	// optimization field parsed
+	if got := s.Models["Qwen3.8 27B"]; got.Optimization != "llama.cpp" {
+		t.Errorf("optimization wrong: %+v", got)
+	}
 	// id alias key
 	if got := s.Models["Qwen3.8-27B"]; got.BaseURL != "http://127.0.0.1:8080" {
 		t.Errorf("id alias key wrong: %+v", got)
@@ -37,6 +41,10 @@ func TestLoad(t *testing.T) {
 	// entry without displayName keyed by id only
 	if got := s.Models["Ornith-1.5-35B"]; got.BaseURL != "http://10.0.0.5:8080" {
 		t.Errorf("no-displayName entry wrong: %+v", got)
+	}
+	// absent optimization stays empty
+	if got := s.Models["Ornith-1.5-35B"]; got.Optimization != "" {
+		t.Errorf("expected empty optimization, got %q", got.Optimization)
 	}
 	// provider header skipped
 	if _, ok := s.Models["__provider__local"]; ok {

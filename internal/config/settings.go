@@ -15,8 +15,9 @@ import (
 
 // Model is a loadable model entry from oaicopilot.models.
 type Model struct {
-	ID      string
-	BaseURL string
+	ID           string
+	BaseURL      string
+	Optimization string
 }
 
 // Settings holds the lookup table: key is the display name shown in the
@@ -29,9 +30,10 @@ type Settings struct {
 }
 
 type rawModel struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"displayName"`
-	BaseURL     string `json:"baseUrl"`
+	ID           string `json:"id"`
+	DisplayName  string `json:"displayName"`
+	BaseURL      string `json:"baseUrl"`
+	Optimization string `json:"optimization"`
 }
 
 // Load parses path and returns the model table. Entries whose id starts
@@ -64,7 +66,11 @@ func Load(path string) (*Settings, error) {
 		if m.BaseURL == "" {
 			continue
 		}
-		model := Model{ID: m.ID, BaseURL: strings.TrimRight(m.BaseURL, "/")}
+		model := Model{
+			ID:           m.ID,
+			BaseURL:      strings.TrimRight(m.BaseURL, "/"),
+			Optimization: strings.TrimSpace(m.Optimization),
+		}
 		s.Models[m.ID] = model
 		if name := strings.TrimSpace(m.DisplayName); name != "" {
 			s.Models[name] = model

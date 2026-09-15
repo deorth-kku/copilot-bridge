@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"vscode-load-llama/internal/config"
 )
 
@@ -21,10 +23,14 @@ type Loader struct {
 	client   *http.Client
 	log      *slog.Logger
 
-	mu       sync.Mutex
-	last     map[string]time.Time
-	nonLlama map[string]struct{} // server roots proven to not be llama.cpp
-	inflight map[string]struct{} // model ids with a load request in flight
+	mu   sync.Mutex
+	last map[string]time.Time
+
+	// sf dedups concurrent load requests for the same model id: only one
+	// HTTP request runs at a time per model; a caller that arrives while
+	// one is in flight waits for it and shares the outcome instead of
+	// firing a duplicate request.
+	sf singleflight.Group
 }
 
 // New creates a Loader. proxyFunc (from config.Settings.ProxyFunc)
@@ -46,20 +52,25 @@ func New(cooldown time.Duration, log *slog.Logger, proxyFunc func(*http.Request)
 		client:   client,
 		log:      log,
 		last:     make(map[string]time.Time),
-		nonLlama: make(map[string]struct{}),
-		inflight: make(map[string]struct{}),
 	}
 }
 
-// Load requests a model load if the cooldown for m.ID has expired.
-// The cooldown timestamp is refreshed when the request is SENT (not on
-// success), so a dead server cannot be hammered. Server roots that answer
-// with a code proving they are not llama.cpp are remembered and skipped
+// Load requests a model load if the cooldown for this (server, model)
+// pair has expired. The cooldown timestamp is armed only on a successful
+// reply (success or "already running"), so a genuine failure or a dead
+// server does not suppress the next retry.
 //
-// The mutex guards the bookkeeping only, never the HTTP request: holding
-// it across the (up to 10s) request would serialize every model's loads
-// behind one dead server. The inflight set keeps concurrent requests for
-// the same model deduped while the lock is released.
+// A model id alone is NOT a unique key: the same id can be served by
+// several different servers (e.g. a cloud baseUrl and a local backup).
+// The (server root, model id) pair is what identifies a distinct load,
+// so both the cooldown and the in-flight dedup are keyed by it.
+//
+// The mutex guards only the `last` bookkeeping, never the HTTP request:
+// holding it across the (up to 10s) request would serialize every model's
+// loads behind one dead server. Concurrent requests for the same
+// (server, model) pair are deduped by singleflight: the first caller runs
+// the request, and any caller that arrives while it is in flight waits for
+// it and shares the outcome rather than firing a duplicate request.
 func (l *Loader) Load(m config.Model) {
 	// The load endpoint is relative to the server ROOT, not to baseUrl:
 	// baseUrl http://abc.com/v1 -> POST http://abc.com/models/load
@@ -70,52 +81,45 @@ func (l *Loader) Load(m config.Model) {
 	}
 	root := u.Scheme + "://" + u.Host
 	loadURL := root + "/models/load"
+	// Unique key for this load: the server root plus the model id. The
+	// id can repeat across servers, so it must be combined with the root.
+	key := root + "\x00" + m.ID
 
 	l.mu.Lock()
-	if _, ok := l.nonLlama[root]; ok {
-		l.mu.Unlock()
-		l.log.Debug("skip: not a llama.cpp endpoint", "model", m.ID, "url", root)
-		return
-	}
-	if last, ok := l.last[m.ID]; ok && time.Since(last) < l.cooldown {
+	if last, ok := l.last[key]; ok && time.Since(last) < l.cooldown {
 		l.mu.Unlock()
 		l.log.Debug("cooldown active, skip", "model", m.ID)
 		return
 	}
-	if _, ok := l.inflight[m.ID]; ok {
-		l.mu.Unlock()
-		l.log.Debug("load in flight, skip", "model", m.ID)
-		return
-	}
-	l.inflight[m.ID] = struct{}{}
 	l.mu.Unlock()
-	defer func() {
-		l.mu.Lock()
-		delete(l.inflight, m.ID)
-		l.mu.Unlock()
-	}()
 
-	body, _ := json.Marshal(map[string]string{"model": m.ID})
-	req, err := http.NewRequest(http.MethodPost, loadURL, bytes.NewReader(body))
-	if err != nil {
-		l.log.Error("build request failed", "model", m.ID, "err", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
+	// Dedup concurrent loads for this (server, model) pair. The closure
+	// runs at most once per in-flight window; its return value is ignored
+	// (logging happens inside), only the dedup matters.
+	_, _, _ = l.sf.Do(key, func() (any, error) {
+		body, _ := json.Marshal(map[string]string{"model": m.ID})
+		req, err := http.NewRequest(http.MethodPost, loadURL, bytes.NewReader(body))
+		if err != nil {
+			l.log.Error("build request failed", "model", m.ID, "err", err)
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := l.client.Do(req)
-	if err != nil {
-		l.log.Error("models/load failed", "model", m.ID, "url", loadURL, "err", err)
-		return
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	loaded := l.classify(m, root, loadURL, resp.StatusCode, b)
-	if loaded {
-		l.mu.Lock()
-		l.last[m.ID] = time.Now()
-		l.mu.Unlock()
-	}
+		resp, err := l.client.Do(req)
+		if err != nil {
+			l.log.Error("models/load failed", "model", m.ID, "url", loadURL, "err", err)
+			return nil, err
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		loaded := l.classify(m, loadURL, resp.StatusCode, b)
+		if loaded {
+			l.mu.Lock()
+			l.last[key] = time.Now()
+			l.mu.Unlock()
+		}
+		return nil, nil
+	})
 }
 
 // loadResponse is the /models/load reply shape. Both known replies share
@@ -138,7 +142,7 @@ type loadResponse struct {
 }
 
 // classify interprets the load response and logs it accordingly.
-func (l *Loader) classify(m config.Model, root, loadURL string, status int, b []byte) bool {
+func (l *Loader) classify(m config.Model, loadURL string, status int, b []byte) bool {
 	// Unmarshal once, before the switch: the success and "already
 	// running" branches validate the same struct. Malformed JSON and
 	// unknown fields fail the decode, so reset to zero-valued and let
@@ -158,26 +162,6 @@ func (l *Loader) classify(m config.Model, root, loadURL string, status int, b []
 			l.log.Info("model not found", "model", m.ID, "url", loadURL)
 			return false
 		}
-	}
-	switch status {
-	case
-		http.StatusMultipleChoices,
-		http.StatusMovedPermanently,
-		http.StatusFound,
-		http.StatusSeeOther,
-		http.StatusNotModified,
-		http.StatusUseProxy,
-		http.StatusTemporaryRedirect,
-		http.StatusPermanentRedirect: // openrouter use redirect
-		fallthrough
-	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusUnauthorized, http.StatusForbidden:
-		// no /models/load route (or auth-walled): not llama.cpp,
-		// remember the endpoint and stop trying
-		l.mu.Lock()
-		l.nonLlama[root] = struct{}{}
-		l.mu.Unlock()
-		l.log.Info("endpoint is not llama.cpp, will skip", "model", m.ID, "url", root, "status", status)
-		return false
 	}
 	l.log.Warn("models/load unexpected response", "model", m.ID, "url", loadURL,
 		"status", status, "resp", string(b))
