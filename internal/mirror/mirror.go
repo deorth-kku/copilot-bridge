@@ -131,7 +131,7 @@ type imgEntry struct {
 var imgSrcRe = regexp.MustCompile(`src="((?:blob:|vscode-file:)[^"]*)"`)
 
 // Mirror owns the web server, the set of connected browser tabs, and the
-// publish loop that keeps the mirrored pane in sync with the live page.
+// publish loop that keeps each mirrored pane in sync with its live page.
 type Mirror struct {
 	disc      *cdp.Discovery
 	log       *slog.Logger
@@ -147,7 +147,7 @@ type Mirror struct {
 	upgrader websocket.Upgrader
 
 	// clients is the set of connected browser tabs. It is a lock-free
-	// hash-trie map, so add/remove/broadcast never take a shared lock.
+	// hash-trie map, so add/remove/send never take a shared lock.
 	clients hashtriemap.HashTrieMap[*client, struct{}]
 
 	// imgs caches fetched image resources by the hash of their source URL.
@@ -155,22 +155,23 @@ type Mirror struct {
 	// from the single publish-loop goroutine never block.
 	imgs hashtriemap.HashTrieMap[string, imgEntry]
 
-	// snap is the latest extracted pane snapshot. The pointer is swapped
-	// under snapMu; the (potentially large) html/css strings are shared by
-	// reference across snapshots, so a swap is cheap.
+	// snaps holds the latest extracted pane snapshot per mirrored window.
+	// The map is mutable shared state, so it is guarded by snapMu; the
+	// (potentially large) html/css strings are shared by reference across
+	// snapshots, so a swap is cheap.
 	snapMu sync.Mutex
-	snap   *snapState
+	snaps  map[string]*snapState
 
-	// selectedID is the CDP target id the user picked in the status-bar
-	// window picker (nil = follow the default). Written by the WS handler,
-	// read by the publish loop — an atomic pointer keeps it lock-free.
-	selectedID atomic.Pointer[string]
-
-	// lastAnchor is the DOM path (from the pane root) of the control the
-	// user last clicked (a pressed mouse event carrying an anchorPath). The
-	// publish loop resolves it to a live rect to anchor the open popup's
-	// position. Written by the WS handler, read by the publish loop.
-	lastAnchor atomic.Pointer[[]int]
+	// hub fans the MirrorWake channels of all watched sessions into one
+	// channel so the publish loop can select on "any watched window
+	// changed" (the watched window set is dynamic, so a plain select
+	// cannot express it).
+	hub *wakeHub
+	// refreshNow is signalled by the WS handler (new client, picker change)
+	// so the publish loop re-resolves the client groups and refreshes
+	// immediately instead of waiting for the next fallback tick. Buffered
+	// by 1: one pending signal coalesces.
+	refreshNow chan struct{}
 }
 
 // snapState is one extracted pane snapshot.
@@ -201,11 +202,6 @@ type snapState struct {
 	popupTop  float64
 	popupW    float64
 	popupH    float64
-	// popupAnchor is the live rect (pane-relative) of the control that
-	// opened the popup; the mirror offsets the popup from its own copy of
-	// that control instead of copying the live pane-relative position.
-	popupAnchor *cdp.PaneRect
-	err         string
 }
 
 // client is one connected browser tab.
@@ -213,6 +209,75 @@ type client struct {
 	conn *websocket.Conn
 	send chan []byte
 	done chan struct{}
+	// selID is this tab's status-bar window picker selection (nil = follow
+	// the default: -window flag, else first window). Per-client, so several
+	// browsers can mirror different VS Code windows at once. Written by the
+	// WS handler, read by the publish loop — an atomic pointer keeps it
+	// lock-free.
+	selID atomic.Pointer[string]
+	// lastAnchor is the DOM path (from the pane root) of the control THIS
+	// tab last clicked (a pressed mouse event carrying an anchorPath). The
+	// publish loop resolves it to a live rect to anchor the open popup's
+	// position for this tab. Written by the WS handler, read by the publish
+	// loop.
+	lastAnchor atomic.Pointer[[]int]
+	// lastWin is the window id of the last successful full state this tab
+	// rendered (nil = none yet). When the tab's current window differs from
+	// it (just connected, or just switched via the picker), the next
+	// refresh forces a full HTML/CSS send for this tab even if the window
+	// has not changed since the last refresh.
+	lastWin atomic.Pointer[string]
+}
+
+// wakeHub fans the MirrorWake channels of several sessions into one channel
+// so the publish loop can select on "any watched window changed". One
+// forwarding goroutine runs per subscribed channel; it is cancelled via a
+// quit channel because mirrorWake is never closed.
+type wakeHub struct {
+	mu   sync.Mutex
+	out  chan struct{}
+	subs map[<-chan struct{}]chan struct{} // wake channel -> its quit signal
+}
+
+func newWakeHub() *wakeHub {
+	return &wakeHub{out: make(chan struct{}, 64), subs: make(map[<-chan struct{}]chan struct{})}
+}
+
+// add subscribes one session's wake channel. Idempotent: the forwarding
+// goroutine is spawned once per channel.
+func (h *wakeHub) add(ch <-chan struct{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.subs[ch]; ok {
+		return
+	}
+	quit := make(chan struct{})
+	h.subs[ch] = quit
+	go func() {
+		for {
+			select {
+			case <-ch:
+				// Non-blocking: one pending token already guarantees a
+				// refresh, and the refresh reads the latest state.
+				select {
+				case h.out <- struct{}{}:
+				default:
+				}
+			case <-quit:
+				return
+			}
+		}
+	}()
+}
+
+// remove unsubscribes and stops the forwarding goroutine.
+func (h *wakeHub) remove(ch <-chan struct{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if q, ok := h.subs[ch]; ok {
+		delete(h.subs, ch)
+		close(q)
+	}
 }
 
 // lanIP returns the machine's primary LAN IPv4 address (via the route to a
@@ -235,12 +300,15 @@ func lanIP() string {
 // substring used to pick the VS Code window (empty = first window).
 func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string, window string) *Mirror {
 	return &Mirror{
-		disc:      disc,
-		log:       log,
-		addr:      addr,
-		selectors: selectors,
-		window:    window,
-		fallback:  1 * time.Second,
+		disc:       disc,
+		log:        log,
+		addr:       addr,
+		selectors:  selectors,
+		window:     window,
+		fallback:   1 * time.Second,
+		snaps:      make(map[string]*snapState),
+		hub:        newWakeHub(),
+		refreshNow: make(chan struct{}, 1),
 		upgrader: websocket.Upgrader{
 			// Local-only tool; accept any origin (127.0.0.1 / localhost).
 			CheckOrigin: func(*http.Request) bool { return true },
@@ -367,8 +435,12 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 	m.addClient(c)
 	defer m.removeClient(c)
 
-	// Render immediately with whatever we already have.
+	// Render immediately with whatever we already have, then ask the
+	// publish loop for a fresh refresh: a just-connected tab has no
+	// selection yet, and its default window's snapshot may be missing or
+	// stale.
 	m.sendFullState(c)
+	m.signalRefresh()
 	go m.writePump(c)
 
 	conn.SetReadLimit(1 << 20)
@@ -377,7 +449,17 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
-		m.handleInput(raw)
+		m.handleInput(c, raw)
+	}
+}
+
+// signalRefresh asks the publish loop to re-resolve the client groups and
+// refresh immediately (picker change, new client). Non-blocking: one
+// pending signal coalesces.
+func (m *Mirror) signalRefresh() {
+	select {
+	case m.refreshNow <- struct{}{}:
+	default:
 	}
 }
 
@@ -425,30 +507,14 @@ func (m *Mirror) closeClients() {
 	}
 }
 
-func (m *Mirror) broadcast(b []byte) {
-	start := time.Now()
-	dropped := 0
-	m.clients.All()(func(c *client, _ struct{}) bool {
-		select {
-		case c.send <- b:
-		default:
-			// Slow client: drop the frame rather than stall the publisher.
-			dropped++
-		}
-		return true
-	})
-	if dropped > 0 {
-		m.log.Warn("broadcast: frame dropped (slow client)", "dropped", dropped, "ms", time.Since(start).Milliseconds(), "bytes", len(b))
-	} else {
-		m.log.Debug("broadcast", "ms", time.Since(start).Milliseconds(), "bytes", len(b))
+// sendTo queues one frame for a single client. Non-blocking: a slow client
+// drops the frame rather than stalling the publisher.
+func (m *Mirror) sendTo(c *client, b []byte) {
+	select {
+	case c.send <- b:
+	default:
+		m.log.Warn("send: frame dropped (slow client)", "bytes", len(b))
 	}
-}
-
-// countClients returns the number of connected browser tabs.
-func (m *Mirror) countClients() int {
-	n := 0
-	m.clients.All()(func(_ *client, _ struct{}) bool { n++; return true })
-	return n
 }
 
 // imgCount returns the number of cached image resources.
@@ -476,141 +542,244 @@ func (m *Mirror) memReporter(ctx context.Context) {
 	}
 }
 
+// sendFullState sends the client a full snapshot of the window it is
+// currently mirroring (a new client has no selection yet: the default
+// window), plus the current window set for the status-bar picker.
 func (m *Mirror) sendFullState(c *client) {
+	wins := m.disc.Windows()
+	id := m.clientWinID(c, wins)
 	m.snapMu.Lock()
 	var msg stateMsg
-	if s := m.snap; s != nil {
+	if s := m.snaps[id]; s != nil {
 		msg = stateMsg{
 			Type: "state", HTML: s.html, CSS: s.css, CSSVer: s.cssVer,
 			RootStyle: s.rootStyle, ThemeVars: s.themeVars, ThemeVer: s.themeVer,
 			ThemeBg: s.themeBg,
 			Rect:    s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
 			NestedScrolls: s.nestedScrolls,
-			Window:        s.window, WindowID: s.windowID, Err: s.err,
+			Window:        s.window, WindowID: s.windowID,
 		}
 		if s.popupFP != "" {
-			msg.Popup = &cdp.PopupState{HTML: s.popupHTML, Left: s.popupLeft, Top: s.popupTop, Width: s.popupW, Height: s.popupH, Anchor: s.popupAnchor}
+			// A just-connected tab has no anchor of its own yet: the browser
+			// falls back to the live pane-relative popup offset.
+			msg.Popup = &cdp.PopupState{HTML: s.popupHTML, Left: s.popupLeft, Top: s.popupTop, Width: s.popupW, Height: s.popupH}
 		}
 	} else {
 		msg = stateMsg{Type: "state", Err: "waiting for VS Code window"}
 	}
 	m.snapMu.Unlock()
-	msg.Windows = m.disc.Windows()
+	msg.Windows = wins
 	if b, err := json.Marshal(msg); err == nil {
-		select {
-		case c.send <- b:
-		default:
-		}
+		m.sendTo(c, b)
+	}
+	// Only a successful full state counts as "rendered" for this client:
+	// the browser ignores states carrying an error, so an error (or a
+	// missing snapshot) must not suppress the next full send.
+	if msg.Err == "" {
+		c.lastWin.Store(&id)
 	}
 }
 
-// publishLoop is event-driven: the page's injected observer (cdp.
-// MirrorInjectJS) pushes a wake through the session's CDP binding when the
-// DOM, scroll position, or window size changes, and the loop refreshes on
-// each wake. A slow fallback ticker covers what the observer cannot see
-// (CSSOM-only edits, dropped wakes) and re-picks the session after a
-// window switch or reload.
+// publishLoop keeps every watched window in sync with its live page.
+// Clients are grouped by the window each one mirrors (its own status-bar
+// selection, falling back to the -window flag or the first window); each
+// distinct window is refreshed once per cycle and its state is sent only to
+// the clients watching it, so several browser tabs can mirror different
+// VS Code windows at once.
+//
+// The loop is event-driven: the page's injected observer (cdp.MirrorInjectJS)
+// pushes a wake through the session's CDP binding when the DOM, scroll
+// position, or window size changes, and the hub fans every watched
+// session's wake into one channel. A slow fallback ticker covers what the
+// observer cannot see (CSSOM-only edits, dropped wakes) and re-picks the
+// session after a window switch or reload.
 func (m *Mirror) publishLoop(ctx context.Context) {
 	ticker := time.NewTicker(m.fallback)
 	defer ticker.Stop()
-	// pageHealth samples the live page's DOM/JS-heap size once a minute so
+	// pageHealth samples each live page's DOM/JS-heap size once a minute so
 	// the log can correlate refresh latency with renderer growth over long
 	// sessions (the suspected cause of the slow-mirror-over-time symptom).
 	healthTicker := time.NewTicker(60 * time.Second)
 	defer healthTicker.Stop()
+	// subs tracks which sessions the hub is subscribed to. Only the
+	// publish-loop goroutine touches it, so no lock is needed.
+	subs := make(map[*cdp.Session]struct{})
 	for {
-		s, _ := m.pickSession(m.disc.Windows())
-		var wake <-chan struct{}
-		if s != nil {
-			wake = s.MirrorWake()
+		wins := m.disc.Windows()
+		groups := m.groupClients(wins)
+		// Subscribe the hub to exactly the sessions of the watched windows
+		// (the default window is always watched, even with no clients).
+		watched := make(map[*cdp.Session]struct{}, len(groups))
+		for winID := range groups {
+			if s := m.disc.SessionForID(winID); s != nil {
+				watched[s] = struct{}{}
+			}
+		}
+		for s := range subs {
+			if _, ok := watched[s]; !ok {
+				m.hub.remove(s.MirrorWake())
+				delete(subs, s)
+			}
+		}
+		for s := range watched {
+			if _, ok := subs[s]; !ok {
+				m.hub.add(s.MirrorWake())
+				subs[s] = struct{}{}
+			}
 		}
 		select {
 		case <-ctx.Done():
+			// Stop the hub's forwarding goroutines for the remaining
+			// subscriptions (mirrorWake is never closed, so they would
+			// otherwise leak past shutdown).
+			for s := range subs {
+				m.hub.remove(s.MirrorWake())
+			}
 			return
-		case <-wake:
+		case <-m.hub.out:
 			m.log.Debug("mirror: refresh (wake)")
-			m.refresh()
+			m.refreshAll()
+		case <-m.refreshNow:
+			m.log.Debug("mirror: refresh (client event)")
+			m.refreshAll()
 		case <-ticker.C:
 			m.log.Debug("mirror: refresh (fallback)")
-			m.refresh()
+			m.refreshAll()
 		case <-healthTicker.C:
-			if s == nil {
-				continue
+			for winID := range groups {
+				s := m.disc.SessionForID(winID)
+				if s == nil {
+					continue
+				}
+				hStart := time.Now()
+				h, err := cdp.Health(s, m.selectors)
+				if err != nil {
+					m.log.Debug("page health probe failed", "window", winID, "err", err)
+					continue
+				}
+				heapMB := 0.0
+				if h.Heap != nil {
+					heapMB = h.Heap.Used / 1024 / 1024
+				}
+				paneNodes := 0
+				if h.PaneNodes != nil {
+					paneNodes = *h.PaneNodes
+				}
+				m.log.Debug("page health", "window", winID, "ms", time.Since(hStart).Milliseconds(),
+					"nodes", h.Nodes, "paneNodes", paneNodes, "sheets", h.Sheets,
+					"heapMB", float64(int(heapMB*10))/10)
 			}
-			hStart := time.Now()
-			h, err := cdp.Health(s, m.selectors)
-			if err != nil {
-				m.log.Debug("page health probe failed", "err", err)
-				continue
-			}
-			heapMB := 0.0
-			if h.Heap != nil {
-				heapMB = h.Heap.Used / 1024 / 1024
-			}
-			paneNodes := 0
-			if h.PaneNodes != nil {
-				paneNodes = *h.PaneNodes
-			}
-			m.log.Debug("page health", "ms", time.Since(hStart).Milliseconds(),
-				"nodes", h.Nodes, "paneNodes", paneNodes, "sheets", h.Sheets,
-				"heapMB", float64(int(heapMB*10))/10)
 		}
 	}
 }
 
-// pickSession resolves which window to mirror. Priority:
-//  1. the user's explicit status-bar picker selection (selectedID);
-//  2. the -window title filter (startup flag);
-//  3. the first window in stable title-sorted order.
-//
-// The stable default (instead of SessionFor's arbitrary map order) is what
-// stops the mirror flickering between windows when several are open.
-func (m *Mirror) pickSession(wins []cdp.Window) (*cdp.Session, string) {
+// defaultWinID is the window a client follows when it has no picker
+// selection of its own: the -window title filter (startup flag), else the
+// first window in stable title-sorted order. The stable default (instead of
+// SessionFor's arbitrary map order) is what stops the mirror flickering
+// between windows when several are open.
+func (m *Mirror) defaultWinID(wins []cdp.Window) string {
 	if len(wins) == 0 {
-		return nil, ""
-	}
-	if p := m.selectedID.Load(); p != nil {
-		sel := *p
-		for _, w := range wins {
-			if w.ID == sel {
-				return m.disc.SessionForID(sel), w.ID
-			}
-		}
+		return ""
 	}
 	if m.window != "" {
 		for _, w := range wins {
 			if strings.Contains(w.Title, m.window) {
-				return m.disc.SessionForID(w.ID), w.ID
+				return w.ID
 			}
 		}
 	}
-	return m.disc.SessionForID(wins[0].ID), wins[0].ID
+	return wins[0].ID
 }
 
-// refresh probes the pane (cheap fingerprint) and, when something changed,
-// does a full extract and broadcasts a state message.
-func (m *Mirror) refresh() {
-	totalStart := time.Now()
+// clientWinID resolves the window this client currently mirrors: its own
+// status-bar picker selection (if that window still exists), else the
+// default.
+func (m *Mirror) clientWinID(c *client, wins []cdp.Window) string {
+	if p := c.selID.Load(); p != nil {
+		for _, w := range wins {
+			if w.ID == *p {
+				return *p
+			}
+		}
+	}
+	return m.defaultWinID(wins)
+}
+
+// groupClients maps each connected client to the window it currently
+// mirrors, keyed by window ID. The default window is always present (even
+// with no clients) so a freshly connected tab has a fresh snapshot to
+// render.
+func (m *Mirror) groupClients(wins []cdp.Window) map[string][]*client {
+	groups := make(map[string][]*client)
+	if id := m.defaultWinID(wins); id != "" {
+		groups[id] = nil
+	}
+	m.clients.All()(func(c *client, _ struct{}) bool {
+		id := m.clientWinID(c, wins)
+		groups[id] = append(groups[id], c)
+		return true
+	})
+	return groups
+}
+
+// pickSessionFor resolves which window this client mirrors (its own
+// status-bar picker selection, falling back to the default).
+func (m *Mirror) pickSessionFor(c *client, wins []cdp.Window) (*cdp.Session, string) {
+	if len(wins) == 0 {
+		return nil, ""
+	}
+	id := m.clientWinID(c, wins)
+	return m.disc.SessionForID(id), id
+}
+
+// refreshAll refreshes every watched window once and sends each client the
+// state of the window it is mirroring. The groups are resolved fresh here:
+// a client may have connected or changed its picker selection while the
+// publish loop was waiting.
+func (m *Mirror) refreshAll() {
 	wins := m.disc.Windows()
-	s, winID := m.pickSession(wins)
+	groups := m.groupClients(wins)
+	// Drop snapshots of windows that closed since the last cycle so the
+	// map cannot grow unbounded.
+	if len(wins) > 0 {
+		m.snapMu.Lock()
+		for id := range m.snaps {
+			if !windowIn(wins, id) {
+				delete(m.snaps, id)
+			}
+		}
+		m.snapMu.Unlock()
+	}
+	for winID, group := range groups {
+		m.refreshWindow(winID, wins, group)
+	}
+}
+
+// refreshWindow probes one window's pane (cheap fingerprint) and, when
+// something changed, does a full extract and sends a state message to the
+// clients watching that window.
+func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client) {
+	totalStart := time.Now()
+	s := m.disc.SessionForID(winID)
 	if s == nil {
-		m.publishError("waiting for VS Code window (is it running with the CDP port open?)")
+		m.sendErrToGroup(group, "waiting for VS Code window (is it running with the CDP port open?)")
 		return
 	}
 	fpStart := time.Now()
 	fpst, err := cdp.Fingerprint(s, m.selectors)
 	fpMs := time.Since(fpStart).Milliseconds()
 	if err != nil {
-		m.publishError(err.Error())
+		m.sendErrToGroup(group, err.Error())
 		return
 	}
 	if fpst.Err != "" {
-		m.publishError(fpst.Err)
+		m.sendErrToGroup(group, fpst.Err)
 		return
 	}
 
 	m.snapMu.Lock()
-	prev := m.snap
+	prev := m.snaps[winID]
 	rectChanged := prev == nil || prev.rect != fpst.Rect
 	scrollChanged := prev == nil || prev.scroll != fpst.Scroll || !equalInts(prev.scrollPath, fpst.ScrollPath) ||
 		!equalFloats(prev.scrollRows, fpst.ScrollRows)
@@ -627,8 +796,21 @@ func (m *Mirror) refresh() {
 	}
 	m.snapMu.Unlock()
 
-	if !(rectChanged || scrollChanged || fpChanged || cssFPChanged || nestedChanged) {
-		m.log.Debug("mirror: refresh", "totalMs", time.Since(totalStart).Milliseconds(), "fpMs", fpMs, "changed", "-")
+	// A client that has not yet rendered this window (just connected, or
+	// just switched to it via the picker) needs a full HTML/CSS send even
+	// when nothing changed in this window since the last refresh —
+	// otherwise its pane would keep showing the previous window until the
+	// new one happens to change.
+	anyNeedsFull := false
+	for _, c := range group {
+		if p := c.lastWin.Load(); p == nil || *p != winID {
+			anyNeedsFull = true
+			break
+		}
+	}
+
+	if !(rectChanged || scrollChanged || fpChanged || cssFPChanged || nestedChanged || anyNeedsFull) {
+		m.log.Debug("mirror: refresh", "window", winID, "totalMs", time.Since(totalStart).Milliseconds(), "fpMs", fpMs, "changed", "-")
 		return
 	}
 	var changedParts []string
@@ -647,6 +829,9 @@ func (m *Mirror) refresh() {
 	if nestedChanged {
 		changedParts = append(changedParts, "nested")
 	}
+	if anyNeedsFull {
+		changedParts = append(changedParts, "full")
+	}
 
 	// Full HTML extract only when the content fingerprint changed.
 	var html, rootStyle, themeVars, themeBg string
@@ -656,11 +841,11 @@ func (m *Mirror) refresh() {
 		exStart := time.Now()
 		hs, err := cdp.ExtractHTML(s, m.selectors)
 		if err != nil {
-			m.publishError(err.Error())
+			m.sendErrToGroup(group, err.Error())
 			return
 		}
 		if hs.Err != "" {
-			m.publishError(hs.Err)
+			m.sendErrToGroup(group, hs.Err)
 			return
 		}
 		html, rootStyle, themeVars, themeBg = hs.HTML, hs.RootStyle, hs.ThemeVars, hs.ThemeBg
@@ -704,84 +889,103 @@ func (m *Mirror) refresh() {
 		ns.popupW = newPopup.Width
 		ns.popupH = newPopup.Height
 	}
-	// Resolve the popup's anchor (the last clicked control) to a live rect
-	// on every refresh while a popup is open: one cheap eval, only while
-	// visible. The mirror applies the live (popup - anchor) offset to its
-	// own copy of the control, which is size-independent.
-	var anchorMs int64
-	if ns.popupFP != "" {
-		if p := m.lastAnchor.Load(); p != nil {
-			anStart := time.Now()
-			ap := *p
-			if ar, ok := cdp.EvalRect(s, m.selectors, ap); ok {
-				ns.popupAnchor = &cdp.PaneRect{
-					Left: ar.Left - fpst.Rect.Left, Top: ar.Top - fpst.Rect.Top,
-					Width: ar.Width, Height: ar.Height,
-				}
-			}
-			anchorMs = time.Since(anStart).Milliseconds()
-		}
-	}
 	m.snapMu.Lock()
-	m.snap = ns
+	m.snaps[winID] = ns
 	m.snapMu.Unlock()
 
-	msg := stateMsg{
+	base := stateMsg{
 		Type: "state", CSSVer: cssVer, RootStyle: rootStyle, ThemeVer: themeVer,
 		NestedScrolls: fpst.NestedScrolls,
 		Rect:          fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
 		Window: s.Title(), WindowID: winID, Windows: wins,
 	}
 	if fpChanged {
-		msg.HTML = html
+		base.HTML = html
 	}
 	// The popup is part of the content fingerprint, so it only changes when
 	// fpChanged. Always advertise its position while it is open (the browser
 	// keeps its DOM and just re-positions); re-send the HTML only when it
 	// actually changed.
 	if ns.popupFP != "" {
-		msg.Popup = &cdp.PopupState{Left: ns.popupLeft, Top: ns.popupTop, Width: ns.popupW, Height: ns.popupH, Anchor: ns.popupAnchor}
+		base.Popup = &cdp.PopupState{Left: ns.popupLeft, Top: ns.popupTop, Width: ns.popupW, Height: ns.popupH}
 		if prev == nil || prev.popupFP != ns.popupFP {
-			msg.Popup.HTML = ns.popupHTML
+			base.Popup.HTML = ns.popupHTML
 		}
 	}
 	if sendCSS {
-		msg.CSS = css
+		base.CSS = css
 	}
 	if sendTheme {
-		msg.ThemeVars = themeVars
-		msg.ThemeBg = themeBg
+		base.ThemeVars = themeVars
+		base.ThemeBg = themeBg
 	}
+	// The popup's anchor depends on each client's OWN last-clicked control
+	// (several tabs can mirror this window at once), so resolve it per
+	// client on every refresh while a popup is open: one cheap eval per
+	// client, only while visible. The mirror applies the live
+	// (popup - anchor) offset to its own copy of the control, which is
+	// size-independent. Marshal a copy of the message per client — never
+	// mutate the shared Popup pointer.
 	marshalStart := time.Now()
-	var broadcastMs int64
-	if b, e := json.Marshal(msg); e == nil {
-		brStart := time.Now()
-		m.broadcast(b)
-		broadcastMs = time.Since(brStart).Milliseconds()
+	for _, c := range group {
+		msg := base
+		if p := c.lastWin.Load(); p == nil || *p != winID {
+			// First state of this window for this client: force a full send
+			// (HTML + CSS + theme) so the pane re-renders even though the
+			// window has not changed since the last refresh.
+			msg.HTML = html
+			msg.CSS = css
+			msg.ThemeVars = themeVars
+			msg.ThemeBg = themeBg
+			c.lastWin.Store(&winID)
+		}
+		if ns.popupFP != "" && msg.Popup != nil {
+			if ap := c.lastAnchor.Load(); ap != nil {
+				if ar, ok := cdp.EvalRect(s, m.selectors, *ap); ok {
+					p := *msg.Popup
+					p.Anchor = &cdp.PaneRect{
+						Left: ar.Left - fpst.Rect.Left, Top: ar.Top - fpst.Rect.Top,
+						Width: ar.Width, Height: ar.Height,
+					}
+					msg.Popup = &p
+				}
+			}
+		}
+		if b, e := json.Marshal(msg); e == nil {
+			m.sendTo(c, b)
+		}
 	}
 	m.log.Debug("mirror: refresh",
+		"window", winID,
 		"totalMs", time.Since(totalStart).Milliseconds(),
-		"fpMs", fpMs, "htmlMs", htmlMs, "cssMs", cssMs, "anchorMs", anchorMs,
-		"marshalMs", time.Since(marshalStart).Milliseconds(), "broadcastMs", broadcastMs,
-		"changed", strings.Join(changedParts, ","), "clients", m.countClients(),
+		"fpMs", fpMs, "htmlMs", htmlMs, "cssMs", cssMs,
+		"marshalMs", time.Since(marshalStart).Milliseconds(),
+		"changed", strings.Join(changedParts, ","), "clients", len(group),
 		"htmlBytes", len(html), "cssBytes", len(css))
 }
 
-func (m *Mirror) publishError(err string) {
-	m.snapMu.Lock()
-	if m.snap == nil {
-		m.snap = &snapState{err: err}
-	} else {
-		m.snap.err = err
+// windowIn reports whether id is in the (title-sorted) window set.
+func windowIn(wins []cdp.Window, id string) bool {
+	for _, w := range wins {
+		if w.ID == id {
+			return true
+		}
 	}
-	m.snapMu.Unlock()
+	return false
+}
+
+// sendErrToGroup sends an error state message to one group of clients.
+func (m *Mirror) sendErrToGroup(group []*client, err string) {
 	if b, e := json.Marshal(stateMsg{Type: "state", Err: err}); e == nil {
-		m.broadcast(b)
+		for _, c := range group {
+			m.sendTo(c, b)
+		}
 	}
 }
 
-// handleInput dispatches one browser input frame to the live page.
-func (m *Mirror) handleInput(raw []byte) {
+// handleInput dispatches one browser input frame to the live page the
+// sending client is currently mirroring.
+func (m *Mirror) handleInput(c *client, raw []byte) {
 	var head struct {
 		Type string `json:"type"`
 	}
@@ -794,11 +998,13 @@ func (m *Mirror) handleInput(raw []byte) {
 		if err := json.Unmarshal(raw, &e); err != nil {
 			return
 		}
-		m.selectedID.Store(&e.ID)
+		c.selID.Store(&e.ID)
 		m.log.Info("mirror: window selected", "id", e.ID)
+		m.signalRefresh()
 		return
 	}
-	s, _ := m.pickSession(m.disc.Windows())
+	wins := m.disc.Windows()
+	s, winID := m.pickSessionFor(c, wins)
 	if s == nil {
 		m.log.Debug("mirror input: no session")
 		return
@@ -813,9 +1019,9 @@ func (m *Mirror) handleInput(raw []byte) {
 		// anchored to it. Only pressed events carry a meaningful anchor;
 		// nil (e.g. clicks inside the popup itself) leaves the previous one.
 		if e.Kind == "pressed" && e.AnchorPath != nil {
-			m.lastAnchor.Store(&e.AnchorPath)
+			c.lastAnchor.Store(&e.AnchorPath)
 		}
-		m.forwardMouse(s, e)
+		m.forwardMouse(s, winID, e)
 	case "key":
 		var e keyMsg
 		if err := json.Unmarshal(raw, &e); err != nil {
@@ -831,11 +1037,11 @@ func (m *Mirror) handleInput(raw []byte) {
 // correct live element even when the mirror's rendering is not pixel-identical
 // (the responsive layout is a different size than the live pane); events
 // without one fall back to the pane-relative offset.
-func (m *Mirror) forwardMouse(s *cdp.Session, e mouseMsg) {
+func (m *Mirror) forwardMouse(s *cdp.Session, winID string, e mouseMsg) {
 	m.snapMu.Lock()
 	var rect cdp.PaneRect
-	if m.snap != nil {
-		rect = m.snap.rect
+	if sn := m.snaps[winID]; sn != nil {
+		rect = sn.rect
 	}
 	selectors := m.selectors
 	m.snapMu.Unlock()
