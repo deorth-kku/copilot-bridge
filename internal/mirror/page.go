@@ -138,6 +138,24 @@ const pageHTML = `<!doctype html>
      by a rule scoped to .monaco-workbench. The #pane.monaco-workbench class below
      normally makes that rule apply, but keep an explicit hide in case it is not. */
   #pane .simple-find-part-wrapper, #pane .monaco-findInput, #pane .simple-find-part { display: none !important; }
+  /* The reasoning-trace spinner label (the "Thinking/Considering/Analyzing"
+     row that tails the streaming list) and the collapsed active-title shimmer
+     render their text via an animated gradient: background-clip:text plus a
+     transparent text fill plus a background shorthand whose stops are theme
+     vars. The live cssText serializes that shorthand with an EMPTY
+     background-image (a browser quirk for shorthand+var gradients), so the
+     extracted mirror CSS carries no gradient and the clipped text paints
+     nothing — only the leading dot glyph is visible. Re-apply the gradient
+     from the same theme vars the workbench rule uses. */
+  #pane .chat-thinking-spinner-item .chat-thinking-spinner-label,
+  #pane .chat-thinking-title-shimmer {
+    background-image: linear-gradient(90deg,
+      var(--vscode-descriptionForeground) 0%,
+      var(--vscode-descriptionForeground) 30%,
+      var(--vscode-chat-thinkingShimmer) 50%,
+      var(--vscode-descriptionForeground) 70%,
+      var(--vscode-descriptionForeground) 100%) !important;
+  }
 </style>
 </head>
 <body>
