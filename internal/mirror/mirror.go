@@ -152,15 +152,15 @@ type Mirror struct {
 	snap   *snapState
 
 	// selectedID is the CDP target id the user picked in the status-bar
-	// window picker ("" = follow the default). Written by the WS handler,
-	// read by the publish loop — an atomic value keeps it lock-free.
-	selectedID atomic.Value
+	// window picker (nil = follow the default). Written by the WS handler,
+	// read by the publish loop — an atomic pointer keeps it lock-free.
+	selectedID atomic.Pointer[string]
 
 	// lastAnchor is the DOM path (from the pane root) of the control the
 	// user last clicked (a pressed mouse event carrying an anchorPath). The
 	// publish loop resolves it to a live rect to anchor the open popup's
 	// position. Written by the WS handler, read by the publish loop.
-	lastAnchor atomic.Value
+	lastAnchor atomic.Pointer[[]int]
 }
 
 // snapState is one extracted pane snapshot.
@@ -494,7 +494,8 @@ func (m *Mirror) pickSession(wins []cdp.Window) (*cdp.Session, string) {
 	if len(wins) == 0 {
 		return nil, ""
 	}
-	if sel, _ := m.selectedID.Load().(string); sel != "" {
+	if p := m.selectedID.Load(); p != nil {
+		sel := *p
 		for _, w := range wins {
 			if w.ID == sel {
 				return m.disc.SessionForID(sel), w.ID
@@ -601,7 +602,8 @@ func (m *Mirror) refresh() {
 	// visible. The mirror applies the live (popup - anchor) offset to its
 	// own copy of the control, which is size-independent.
 	if ns.popupFP != "" {
-		if ap, _ := m.lastAnchor.Load().([]int); ap != nil {
+		if p := m.lastAnchor.Load(); p != nil {
+			ap := *p
 			if ar, ok := cdp.EvalRect(s, m.selectors, ap); ok {
 				ns.popupAnchor = &cdp.PaneRect{
 					Left: ar.Left - fpst.Rect.Left, Top: ar.Top - fpst.Rect.Top,
@@ -671,7 +673,7 @@ func (m *Mirror) handleInput(raw []byte) {
 		if err := json.Unmarshal(raw, &e); err != nil {
 			return
 		}
-		m.selectedID.Store(e.ID)
+		m.selectedID.Store(&e.ID)
 		m.log.Info("mirror: window selected", "id", e.ID)
 		return
 	}
@@ -690,7 +692,7 @@ func (m *Mirror) handleInput(raw []byte) {
 		// anchored to it. Only pressed events carry a meaningful anchor;
 		// nil (e.g. clicks inside the popup itself) leaves the previous one.
 		if e.Kind == "pressed" && e.AnchorPath != nil {
-			m.lastAnchor.Store(e.AnchorPath)
+			m.lastAnchor.Store(&e.AnchorPath)
 		}
 		m.forwardMouse(s, e)
 	case "key":
