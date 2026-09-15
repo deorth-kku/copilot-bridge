@@ -386,6 +386,43 @@ const fpExpr = `(selectors) => {
   };
 }`
 
+// healthExpr samples the live page's size and memory: total/pane DOM node
+// counts, stylesheet count, and the JS heap (when the Chromium build exposes
+// performance.memory). The mirror evaluates it once a minute so the log can
+// correlate refresh latency with renderer pressure over long sessions.
+const healthExpr = `(selectors) => {
+  let heap = null;
+  try { if (performance.memory) heap = { used: performance.memory.usedJSHeapSize, total: performance.memory.totalJSHeapSize }; } catch (e) {}
+  let el = null;
+  for (const sel of selectors) { try { el = document.querySelector(sel); } catch (e) {} if (el) break; }
+  return {
+    nodes: document.getElementsByTagName('*').length,
+    paneNodes: el ? el.getElementsByTagName('*').length : null,
+    sheets: document.styleSheets.length,
+    heap: heap,
+  };
+}`
+
+// PageHealth is one live-page size/memory sample.
+type PageHealth struct {
+	Nodes     int  `json:"nodes"`
+	PaneNodes *int `json:"paneNodes"`
+	Sheets    int  `json:"sheets"`
+	Heap      *struct {
+		Used  float64 `json:"used"`
+		Total float64 `json:"total"`
+	} `json:"heap"`
+}
+
+// Health returns a DOM/JS-heap sample of the live page.
+func Health(s *Session, selectors []string) (*PageHealth, error) {
+	raw, err := callExpr(s, healthExpr, selectorsJSON(selectors))
+	if err != nil {
+		return nil, err
+	}
+	return decodeEval[PageHealth](raw)
+}
+
 // cssExpr dumps every accessible stylesheet and rewrites each @font-face
 // font URL into an inlined base64 data URI, so the returned CSS is fully
 // self-contained (no external font requests). It is async because it fetches
@@ -444,13 +481,34 @@ const cssExpr = `async () => {
 // passing argsJSON (a JS array literal, or "" for none) as the argument.
 // Runtime.evaluate does NOT invoke a bare function expression with "args",
 // so the IIFE form is required.
+//
+// The wrapper is an async IIFE that stamps the result object with
+// __cdp_ms, the page-side execution time (performance.now delta). It splits
+// the total round-trip logged by Session.Call into two parts: __cdp_ms =
+// probe cost on the page (DOM size / JS heap pressure), the remainder =
+// CDP transport + browser main-thread queue latency.
 func callExpr(s *Session, expr, argsJSON string) (jsontext.Value, error) {
-	full := "(" + expr + ")(" + argsJSON + ")"
+	full := "(async () => { const __t0 = performance.now(); const __r = await (" + expr + ")(" + argsJSON + ");" +
+		" if (__r && typeof __r === 'object') __r.__cdp_ms = Math.round((performance.now() - __t0) * 100) / 100;" +
+		" return __r; })()"
 	return s.Call("Runtime.evaluate", map[string]any{
 		"expression":    full,
 		"awaitPromise":  true,
 		"returnByValue": true,
 	})
+}
+
+// evalMs extracts the page-side execution time (__cdp_ms, in ms) stamped by
+// callExpr into the evaluate result. Returns -1 when the field is absent
+// (null result or a failed eval).
+func evalMs(raw jsontext.Value) float64 {
+	var v struct {
+		CdpMs float64 `json:"__cdp_ms"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return -1
+	}
+	return v.CdpMs
 }
 
 // selectorsJSON marshals the candidate selectors as a JS array literal.
@@ -466,6 +524,7 @@ func ExtractHTML(s *Session, selectors []string) (*HTMLState, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.log.Debug("extractHTML", "pageMs", evalMs(raw))
 	return decodeEval[HTMLState](raw)
 }
 
@@ -476,6 +535,7 @@ func Fingerprint(s *Session, selectors []string) (*FingerprintState, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.log.Debug("fingerprint", "pageMs", evalMs(raw))
 	return decodeEval[FingerprintState](raw)
 }
 
@@ -486,6 +546,7 @@ func ExtractCSS(s *Session) (*CSSState, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.log.Debug("extractCSS", "pageMs", evalMs(raw))
 	return decodeEval[CSSState](raw)
 }
 

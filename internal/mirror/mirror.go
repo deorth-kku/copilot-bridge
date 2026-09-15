@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -270,6 +271,7 @@ func (m *Mirror) Run(ctx context.Context) error {
 		}
 	}()
 	go m.publishLoop(ctx)
+	go m.memReporter(ctx)
 
 	select {
 	case <-ctx.Done():
@@ -322,6 +324,7 @@ func (m *Mirror) rewriteImages(s *cdp.Session, html string) string {
 		key := hashStr(u)
 		if _, ok := m.imgs.Load(key); !ok {
 			m.log.Debug("image: fetch attempt", "url", u, "key", key)
+			fStart := time.Now()
 			data, ctype, via, err := cdp.FetchImage(s, u)
 			if err != nil {
 				m.log.Warn("image fetch failed", "url", u, "err", err)
@@ -330,7 +333,7 @@ func (m *Mirror) rewriteImages(s *cdp.Session, html string) string {
 			if ctype == "" {
 				ctype = guessImageType(data)
 			}
-			m.log.Debug("image: fetched", "key", key, "via", via, "bytes", len(data), "type", ctype)
+			m.log.Debug("image: fetched", "key", key, "via", via, "bytes", len(data), "type", ctype, "ms", time.Since(fStart).Milliseconds())
 			m.imgs.Store(key, imgEntry{data: data, contentType: ctype})
 		}
 		html = strings.ReplaceAll(html, `src="`+u+`"`, `src="/img/`+key+`"`)
@@ -384,8 +387,15 @@ func (m *Mirror) writePump(c *client) {
 		case <-c.done:
 			return
 		case b := <-c.send:
+			wStart := time.Now()
 			if err := c.conn.WriteMessage(websocket.TextMessage, b); err != nil {
 				return
+			}
+			if ms := time.Since(wStart).Milliseconds(); ms >= 100 {
+				// A slow write means the browser tab is not draining the
+				// WebSocket (heavy DOM patching on its side, or a throttled
+				// background tab); the frame queue backs up behind it.
+				m.log.Debug("writePump: slow write", "ms", ms, "bytes", len(b))
 			}
 		}
 	}
@@ -416,14 +426,54 @@ func (m *Mirror) closeClients() {
 }
 
 func (m *Mirror) broadcast(b []byte) {
+	start := time.Now()
+	dropped := 0
 	m.clients.All()(func(c *client, _ struct{}) bool {
 		select {
 		case c.send <- b:
 		default:
 			// Slow client: drop the frame rather than stall the publisher.
+			dropped++
 		}
 		return true
 	})
+	if dropped > 0 {
+		m.log.Warn("broadcast: frame dropped (slow client)", "dropped", dropped, "ms", time.Since(start).Milliseconds(), "bytes", len(b))
+	} else {
+		m.log.Debug("broadcast", "ms", time.Since(start).Milliseconds(), "bytes", len(b))
+	}
+}
+
+// countClients returns the number of connected browser tabs.
+func (m *Mirror) countClients() int {
+	n := 0
+	m.clients.All()(func(_ *client, _ struct{}) bool { n++; return true })
+	return n
+}
+
+// imgCount returns the number of cached image resources.
+func (m *Mirror) imgCount() int {
+	n := 0
+	m.imgs.All()(func(_ string, _ imgEntry) bool { n++; return true })
+	return n
+}
+
+// memReporter logs process memory and the image-cache size every 30s.
+// Unbounded growth (e.g. the blob-URL image cache) shows up as a steady
+// climb in heapMB / imgs.
+func (m *Mirror) memReporter(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			m.log.Debug("mem", "heapMB", ms.HeapAlloc/1024/1024, "sysMB", ms.Sys/1024/1024, "numGC", ms.NumGC, "imgs", m.imgCount())
+		}
+	}
 }
 
 func (m *Mirror) sendFullState(c *client) {
@@ -463,6 +513,11 @@ func (m *Mirror) sendFullState(c *client) {
 func (m *Mirror) publishLoop(ctx context.Context) {
 	ticker := time.NewTicker(m.fallback)
 	defer ticker.Stop()
+	// pageHealth samples the live page's DOM/JS-heap size once a minute so
+	// the log can correlate refresh latency with renderer growth over long
+	// sessions (the suspected cause of the slow-mirror-over-time symptom).
+	healthTicker := time.NewTicker(60 * time.Second)
+	defer healthTicker.Stop()
 	for {
 		s, _ := m.pickSession(m.disc.Windows())
 		var wake <-chan struct{}
@@ -478,6 +533,27 @@ func (m *Mirror) publishLoop(ctx context.Context) {
 		case <-ticker.C:
 			m.log.Debug("mirror: refresh (fallback)")
 			m.refresh()
+		case <-healthTicker.C:
+			if s == nil {
+				continue
+			}
+			hStart := time.Now()
+			h, err := cdp.Health(s, m.selectors)
+			if err != nil {
+				m.log.Debug("page health probe failed", "err", err)
+				continue
+			}
+			heapMB := 0.0
+			if h.Heap != nil {
+				heapMB = h.Heap.Used / 1024 / 1024
+			}
+			paneNodes := 0
+			if h.PaneNodes != nil {
+				paneNodes = *h.PaneNodes
+			}
+			m.log.Debug("page health", "ms", time.Since(hStart).Milliseconds(),
+				"nodes", h.Nodes, "paneNodes", paneNodes, "sheets", h.Sheets,
+				"heapMB", float64(int(heapMB*10))/10)
 		}
 	}
 }
@@ -514,13 +590,16 @@ func (m *Mirror) pickSession(wins []cdp.Window) (*cdp.Session, string) {
 // refresh probes the pane (cheap fingerprint) and, when something changed,
 // does a full extract and broadcasts a state message.
 func (m *Mirror) refresh() {
+	totalStart := time.Now()
 	wins := m.disc.Windows()
 	s, winID := m.pickSession(wins)
 	if s == nil {
 		m.publishError("waiting for VS Code window (is it running with the CDP port open?)")
 		return
 	}
+	fpStart := time.Now()
 	fpst, err := cdp.Fingerprint(s, m.selectors)
+	fpMs := time.Since(fpStart).Milliseconds()
 	if err != nil {
 		m.publishError(err.Error())
 		return
@@ -549,13 +628,32 @@ func (m *Mirror) refresh() {
 	m.snapMu.Unlock()
 
 	if !(rectChanged || scrollChanged || fpChanged || cssFPChanged || nestedChanged) {
+		m.log.Debug("mirror: refresh", "totalMs", time.Since(totalStart).Milliseconds(), "fpMs", fpMs, "changed", "-")
 		return
+	}
+	var changedParts []string
+	if rectChanged {
+		changedParts = append(changedParts, "rect")
+	}
+	if scrollChanged {
+		changedParts = append(changedParts, "scroll")
+	}
+	if fpChanged {
+		changedParts = append(changedParts, "fp")
+	}
+	if cssFPChanged {
+		changedParts = append(changedParts, "css")
+	}
+	if nestedChanged {
+		changedParts = append(changedParts, "nested")
 	}
 
 	// Full HTML extract only when the content fingerprint changed.
 	var html, rootStyle, themeVars, themeBg string
 	var newPopup *cdp.PopupState
+	var htmlMs int64
 	if fpChanged {
+		exStart := time.Now()
 		hs, err := cdp.ExtractHTML(s, m.selectors)
 		if err != nil {
 			m.publishError(err.Error())
@@ -570,6 +668,7 @@ func (m *Mirror) refresh() {
 			newPopup = hs.Popup
 		}
 		html = m.rewriteImages(s, html)
+		htmlMs = time.Since(exStart).Milliseconds()
 	} else if prev != nil {
 		html, rootStyle, themeVars, themeBg = prev.html, prev.rootStyle, prev.themeVars, prev.themeBg
 	}
@@ -579,12 +678,15 @@ func (m *Mirror) refresh() {
 	// Full CSS extract (with inlined fonts) only when the CSS fingerprint
 	// changed; otherwise reuse the cached copy.
 	css, cssVer, sendCSS := prevCSS, prevCSSVer, false
+	var cssMs int64
 	if cssFPChanged {
+		csStart := time.Now()
 		if cs, err := cdp.ExtractCSS(s); err == nil {
 			css, cssVer, sendCSS = cs.CSS, hashStr(cs.CSS), true
 		} else {
 			m.log.Debug("css extract failed", "err", err)
 		}
+		cssMs = time.Since(csStart).Milliseconds()
 	}
 
 	ns := &snapState{
@@ -606,8 +708,10 @@ func (m *Mirror) refresh() {
 	// on every refresh while a popup is open: one cheap eval, only while
 	// visible. The mirror applies the live (popup - anchor) offset to its
 	// own copy of the control, which is size-independent.
+	var anchorMs int64
 	if ns.popupFP != "" {
 		if p := m.lastAnchor.Load(); p != nil {
+			anStart := time.Now()
 			ap := *p
 			if ar, ok := cdp.EvalRect(s, m.selectors, ap); ok {
 				ns.popupAnchor = &cdp.PaneRect{
@@ -615,6 +719,7 @@ func (m *Mirror) refresh() {
 					Width: ar.Width, Height: ar.Height,
 				}
 			}
+			anchorMs = time.Since(anStart).Milliseconds()
 		}
 	}
 	m.snapMu.Lock()
@@ -647,9 +752,19 @@ func (m *Mirror) refresh() {
 		msg.ThemeVars = themeVars
 		msg.ThemeBg = themeBg
 	}
+	marshalStart := time.Now()
+	var broadcastMs int64
 	if b, e := json.Marshal(msg); e == nil {
+		brStart := time.Now()
 		m.broadcast(b)
+		broadcastMs = time.Since(brStart).Milliseconds()
 	}
+	m.log.Debug("mirror: refresh",
+		"totalMs", time.Since(totalStart).Milliseconds(),
+		"fpMs", fpMs, "htmlMs", htmlMs, "cssMs", cssMs, "anchorMs", anchorMs,
+		"marshalMs", time.Since(marshalStart).Milliseconds(), "broadcastMs", broadcastMs,
+		"changed", strings.Join(changedParts, ","), "clients", m.countClients(),
+		"htmlBytes", len(html), "cssBytes", len(css))
 }
 
 func (m *Mirror) publishError(err string) {
@@ -727,9 +842,11 @@ func (m *Mirror) forwardMouse(s *cdp.Session, e mouseMsg) {
 
 	x, y := rect.Left+e.X, rect.Top+e.Y
 	if e.Path != nil {
+		ecStart := time.Now()
 		if px, py, ok := cdp.EvalClickPoint(s, selectors, e.Path, e.RelX, e.RelY); ok {
 			x, y = px, py
 		}
+		m.log.Debug("forwardMouse: evalClickPoint", "ms", time.Since(ecStart).Milliseconds())
 	}
 	// Wheels only need to land somewhere inside the pane (the exact element
 	// under the cursor is irrelevant); clicks need the precise spot. A wheel

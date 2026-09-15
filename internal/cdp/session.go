@@ -92,6 +92,13 @@ type Session struct {
 
 	done atomic.Bool
 	last string // dedupe: last payload JSON already emitted
+
+	// CDP traffic accounting for the per-5s summary in noteMsg: a sudden
+	// rise in message rate (binding floods, console spam, event storms)
+	// shows up in the log next to the slow refreshes it contends with.
+	msgCount  atomic.Int64
+	lastRate  atomic.Int64
+	lastRateT atomic.Int64
 }
 
 func NewSession(id, title, wsURL string, events chan Event, log *slog.Logger) *Session {
@@ -249,6 +256,7 @@ func (s *Session) handle(raw []byte) {
 		}
 		msgs = []cdpMessage{m}
 	}
+	s.noteMsg(len(msgs))
 	for _, m := range msgs {
 		if m.ID != nil {
 			s.routeResponse(*m.ID, m.Result, m.Error)
@@ -347,6 +355,7 @@ func (s *Session) Call(method string, params any) (jsontext.Value, error) {
 		s.mu.Unlock()
 		return nil, err
 	}
+	start := time.Now()
 	werr := s.conn.WriteMessage(websocket.TextMessage, b)
 	s.mu.Unlock()
 	if werr != nil {
@@ -354,13 +363,35 @@ func (s *Session) Call(method string, params any) (jsontext.Value, error) {
 	}
 	select {
 	case r := <-ch:
+		// Total round-trip = socket write + CDP transport + browser
+		// main-thread queue + page-side execution. The page-side share is
+		// logged separately by the callers (evalMs / __cdp_ms).
+		s.log.Debug("cdp call", "method", method, "ms", time.Since(start).Milliseconds())
 		return r.result, r.err
 	case <-time.After(callTimeout):
 		s.mu.Lock()
 		delete(s.pending, id)
 		s.mu.Unlock()
+		s.log.Warn("cdp call timeout", "method", method, "ms", time.Since(start).Milliseconds())
 		return nil, fmt.Errorf("CDP call timeout: %s", method)
 	}
+}
+
+// noteMsg counts received CDP messages and logs a per-5s rate summary, so
+// an event flood (binding calls, console spam) is visible alongside the
+// refresh timings it contends with for the browser main thread.
+func (s *Session) noteMsg(n int) {
+	total := s.msgCount.Add(int64(n))
+	now := time.Now().UnixNano()
+	lastT := s.lastRateT.Load()
+	if now-lastT < 5_000_000_000 {
+		return
+	}
+	if !s.lastRateT.CompareAndSwap(lastT, now) {
+		return
+	}
+	s.log.Debug("cdp traffic", "msgs/5s", total-s.lastRate.Load(), "total", total)
+	s.lastRate.Store(total)
 }
 
 // routeResponse delivers a command response to the pending Call, if any.
