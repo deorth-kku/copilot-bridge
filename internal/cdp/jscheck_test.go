@@ -3,7 +3,7 @@ package cdp
 import (
 	"testing"
 
-	"vscode-load-llama/internal/jscheck"
+	"copilot-bridge/internal/jscheck"
 )
 
 // TestInjectedJSCompiles syntax-checks every JavaScript constant that is

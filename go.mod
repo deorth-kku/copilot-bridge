@@ -1,4 +1,4 @@
-module vscode-load-llama
+module copilot-bridge
 
 go 1.27.0
 

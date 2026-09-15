@@ -26,7 +26,7 @@ import (
 	"github.com/go4org/hashtriemap"
 	"github.com/gorilla/websocket"
 
-	"vscode-load-llama/internal/cdp"
+	"copilot-bridge/internal/cdp"
 )
 
 // stateMsg is the server -> browser message carrying a pane snapshot.

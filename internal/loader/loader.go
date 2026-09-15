@@ -14,7 +14,7 @@ import (
 	"github.com/go4org/hashtriemap"
 	"golang.org/x/sync/singleflight"
 
-	"vscode-load-llama/internal/config"
+	"copilot-bridge/internal/config"
 )
 
 // Loader deduplicates load requests per (server, model) pair.

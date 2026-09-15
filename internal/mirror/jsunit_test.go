@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/net/html"
 
-	"vscode-load-llama/internal/jscheck"
+	"copilot-bridge/internal/jscheck"
 )
 
 // pageScripts returns the bodies of all inline <script> elements in

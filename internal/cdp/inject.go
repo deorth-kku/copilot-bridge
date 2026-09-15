@@ -6,7 +6,7 @@ package cdp
 // Python POC's binding so the two tools can coexist, but only ONE
 // instance of this tool should run at a time (bindings are page globals;
 // a second instance would override the first one's binding).
-const BindingName = "vscodeLoadLlama"
+const BindingName = "copilotBridge"
 
 // extractFn is an arrow function (NOT invoked) that reads the current
 // chat input state. It must stay a function: InjectJS assigns it to a
@@ -59,23 +59,23 @@ const InjectJS = `(() => {
 
   // versioned install: replaces any stale observer from older versions
   const VERSION = 1;
-  if (window.__loadLlamaVersion !== VERSION) {
-    if (window.__loadLlamaMO) { try { window.__loadLlamaMO.disconnect(); } catch (e) {} }
-    window.__loadLlamaVersion = VERSION;
+  if (window.__copilotBridgeVersion !== VERSION) {
+    if (window.__copilotBridgeMO) { try { window.__copilotBridgeMO.disconnect(); } catch (e) {} }
+    window.__copilotBridgeVersion = VERSION;
     let timer = null;
-    window.__loadLlamaSchedule = () => {
+    window.__copilotBridgeSchedule = () => {
       if (timer) return;
       timer = setTimeout(() => { timer = null; push(); }, 50);
     };
-    window.__loadLlamaMO = new MutationObserver(window.__loadLlamaSchedule);
-    window.__loadLlamaMO.observe(document.documentElement, {
+    window.__copilotBridgeMO = new MutationObserver(window.__copilotBridgeSchedule);
+    window.__copilotBridgeMO.observe(document.documentElement, {
       subtree: true, childList: true, characterData: true,
       attributes: true, attributeFilter: ['aria-label']
     });
   }
 
   // always emit current state (re-attach / re-inject after reload)
-  (window.__loadLlamaSchedule || push)();
+  (window.__copilotBridgeSchedule || push)();
   return 'ok';
 })()`
 
@@ -84,7 +84,7 @@ const InjectJS = `(() => {
 // BindingName) keeps the two pipelines independent: the chat-state push is
 // deduped by payload in the session, which would swallow DOM changes that
 // don't alter the chat state.
-const MirrorBindingName = "vscodeLoadLlamaMirror"
+const MirrorBindingName = "copilotBridgeMirror"
 
 // MirrorInjectJS installs a versioned observer that wakes the mirror
 // (via window.<MirrorBindingName>) whenever the page changes in a way the

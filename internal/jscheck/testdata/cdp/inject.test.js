@@ -1,5 +1,5 @@
 // Unit tests for InjectJS (internal/cdp/inject.go): the versioned
-// MutationObserver IIFE that pushes chat state through window.vscodeLoadLlama.
+// MutationObserver IIFE that pushes chat state through window.copilotBridge.
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -21,7 +21,7 @@ async function setup() {
   const doc = makeDocument(root);
   const win = makeWindow(doc);
   const calls = [];
-  win.vscodeLoadLlama = p => calls.push(p);
+  win.copilotBridge = p => calls.push(p);
   installGlobals(doc, win);
   await sleep(80);
   calls.length = 0;

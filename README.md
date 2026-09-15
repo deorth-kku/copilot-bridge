@@ -1,4 +1,4 @@
-# vscode-load-llama
+# copilot-bridge
 
 Watches VS Code Copilot chat inputs via CDP (port 9222) and pre-loads the selected model on the local llama.cpp server.
 
@@ -30,13 +30,13 @@ Watches VS Code Copilot chat inputs via CDP (port 9222) and pre-loads the select
 ## Build
 | platform | command | output |
 |---|---|---|
-| Windows | `.\build.ps1` | `vscode-load-llama.exe` |
-| Linux / macOS | `go build -trimpath -o vscode-load-llama .` | `vscode-load-llama` |
+| Windows | `.\build.ps1` | `copilot-bridge.exe` |
+| Linux / macOS | `go build -trimpath -o copilot-bridge .` | `copilot-bridge` |
 
 On Windows the exe is a console-free GUI process (`-H windowsgui`); on
 Linux/macOS it's a normal binary you run in the background
-(e.g. `nohup ./vscode-load-llama &`). `build.ps1` runs
-`go build -trimpath -ldflags "-H windowsgui" -o vscode-load-llama.exe .`.
+(e.g. `nohup ./copilot-bridge &`). `build.ps1` runs
+`go build -trimpath -ldflags "-H windowsgui" -o copilot-bridge.exe .`.
 
 ## Setup
 Enable the CDP debugging port in VS Code (one-time):
@@ -53,7 +53,7 @@ Enable the CDP debugging port in VS Code (one-time):
 | `-cdp` | `127.0.0.1:9222` | CDP HTTP address |
 | `-settings` | VS Code user `settings.json` (see below) | settings file (hot-reloaded on change) |
 | `-cooldown` | `30s` | per-model load cooldown |
-| `-log` | `<tempdir>/vscode-load-llama/app.log` | log file |
+| `-log` | `<tempdir>/copilot-bridge/app.log` | log file |
 | `-verbose` | `false` | debug-level logging |
 
 Default `settings.json` location per platform:

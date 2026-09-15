@@ -1,5 +1,5 @@
 // Unit tests for MirrorInjectJS (internal/cdp/inject.go): the versioned
-// observer that wakes the mirror through window.vscodeLoadLlamaMirror on
+// observer that wakes the mirror through window.copilotBridgeMirror on
 // DOM mutations, descendant scrolls (capture), and window resize.
 'use strict';
 const test = require('node:test');
@@ -18,7 +18,7 @@ async function setup() {
   const doc = makeDocument(root);
   const win = makeWindow(doc);
   const wakes = [];
-  win.vscodeLoadLlamaMirror = p => wakes.push(p);
+  win.copilotBridgeMirror = p => wakes.push(p);
   installGlobals(doc, win);
   await sleep(80);
   wakes.length = 0;

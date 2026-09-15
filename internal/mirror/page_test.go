@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"vscode-load-llama/internal/jscheck"
+	"copilot-bridge/internal/jscheck"
 )
 
 // TestPageHTMLInlineScriptsCompiles syntax-checks the body of every inline

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"vscode-load-llama/internal/jscheck"
+	"copilot-bridge/internal/jscheck"
 )
 
 // The JS under test and the committed node:test suites that pin its

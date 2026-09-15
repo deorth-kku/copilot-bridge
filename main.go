@@ -1,4 +1,4 @@
-// vscode-load-llama: background GUI process that watches VS Code Copilot
+// copilot-bridge: background GUI process that watches VS Code Copilot
 // chat inputs via CDP and pre-loads the selected model on the local
 // llama.cpp server.
 package main
@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"vscode-load-llama/internal/cdp"
-	"vscode-load-llama/internal/config"
-	"vscode-load-llama/internal/loader"
-	"vscode-load-llama/internal/mirror"
+	"copilot-bridge/internal/cdp"
+	"copilot-bridge/internal/config"
+	"copilot-bridge/internal/loader"
+	"copilot-bridge/internal/mirror"
 )
 
 func main() {
@@ -153,10 +153,10 @@ func defaultSettingsPath() string {
 }
 
 // defaultLogPath returns the log file location in the platform temp dir,
-// e.g. %TEMP%\vscode-load-llama\app.log on Windows, /tmp/... on Linux,
+// e.g. %TEMP%\copilot-bridge\app.log on Windows, /tmp/... on Linux,
 // $TMPDIR/... on macOS.
 func defaultLogPath() string {
-	return filepath.Join(os.TempDir(), "vscode-load-llama", "app.log")
+	return filepath.Join(os.TempDir(), "copilot-bridge", "app.log")
 }
 
 // defaultPaneSelectors are the candidate Copilot pane root selectors, tried

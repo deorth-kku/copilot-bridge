@@ -35,27 +35,27 @@
   }
   ;
   const push = () => {
-    try { window.vscodeLoadLlama(JSON.stringify(extract())); } catch (e) {}
+    try { window.copilotBridge(JSON.stringify(extract())); } catch (e) {}
   };
 
   // versioned install: replaces any stale observer from older versions
   const VERSION = 1;
-  if (window.__loadLlamaVersion !== VERSION) {
-    if (window.__loadLlamaMO) { try { window.__loadLlamaMO.disconnect(); } catch (e) {} }
-    window.__loadLlamaVersion = VERSION;
+  if (window.__copilotBridgeVersion !== VERSION) {
+    if (window.__copilotBridgeMO) { try { window.__copilotBridgeMO.disconnect(); } catch (e) {} }
+    window.__copilotBridgeVersion = VERSION;
     let timer = null;
-    window.__loadLlamaSchedule = () => {
+    window.__copilotBridgeSchedule = () => {
       if (timer) return;
       timer = setTimeout(() => { timer = null; push(); }, 50);
     };
-    window.__loadLlamaMO = new MutationObserver(window.__loadLlamaSchedule);
-    window.__loadLlamaMO.observe(document.documentElement, {
+    window.__copilotBridgeMO = new MutationObserver(window.__copilotBridgeSchedule);
+    window.__copilotBridgeMO.observe(document.documentElement, {
       subtree: true, childList: true, characterData: true,
       attributes: true, attributeFilter: ['aria-label']
     });
   }
 
   // always emit current state (re-attach / re-inject after reload)
-  (window.__loadLlamaSchedule || push)();
+  (window.__copilotBridgeSchedule || push)();
   return 'ok';
 })()

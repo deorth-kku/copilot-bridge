@@ -1,6 +1,6 @@
 (() => {
   const VERSION = 1;
-  const wake = () => { try { window.vscodeLoadLlamaMirror('1'); } catch (e) {} };
+  const wake = () => { try { window.copilotBridgeMirror('1'); } catch (e) {} };
   if (window.__mirrorVersion !== VERSION) {
     if (window.__mirrorMO) { try { window.__mirrorMO.disconnect(); } catch (e) {} }
     // Drop the previous install's scroll/resize listeners as well, so a

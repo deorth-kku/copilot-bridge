@@ -1,6 +1,6 @@
 package main
 
-// Mock servers for smoke-testing vscode-load-llama.exe without a real
+// Mock servers for smoke-testing copilot-bridge.exe without a real
 // VS Code / llama.cpp instance.
 //
 //	:9333  CDP endpoint  (/json/version, /json/list, /devtools/page/t1 WS)
@@ -22,7 +22,7 @@ import (
 
 const (
 	cdpPort   = "9333"
-	binding   = "vscodeLoadLlama"
+	binding   = "copilotBridge"
 	modelName = "Qwen3.8 27B"
 	modelID   = "Qwen3.8-27B"
 )

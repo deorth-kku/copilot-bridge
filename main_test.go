@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"vscode-load-llama/internal/cdp"
-	"vscode-load-llama/internal/config"
-	"vscode-load-llama/internal/loader"
+	"copilot-bridge/internal/cdp"
+	"copilot-bridge/internal/config"
+	"copilot-bridge/internal/loader"
 )
 
 var discardLog = slog.New(slog.NewTextHandler(io.Discard, nil))
