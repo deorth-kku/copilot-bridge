@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go4org/hashtriemap"
 	"github.com/gorilla/websocket"
 
 	"vscode-load-llama/internal/cdp"
@@ -139,11 +140,14 @@ type Mirror struct {
 
 	upgrader websocket.Upgrader
 
-	clientsMu sync.Mutex
-	clients   map[*client]struct{}
+	// clients is the set of connected browser tabs. It is a lock-free
+	// hash-trie map, so add/remove/broadcast never take a shared lock.
+	clients hashtriemap.HashTrieMap[*client, struct{}]
 
-	imgMu sync.Mutex
-	imgs  map[string]imgEntry
+	// imgs caches fetched image resources by the hash of their source URL.
+	// A lock-free hash-trie map: reads from the HTTP handlers and writes
+	// from the single publish-loop goroutine never block.
+	imgs hashtriemap.HashTrieMap[string, imgEntry]
 
 	// snap is the latest extracted pane snapshot. The pointer is swapped
 	// under snapMu; the (potentially large) html/css strings are shared by
@@ -232,8 +236,6 @@ func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string,
 			// Local-only tool; accept any origin (127.0.0.1 / localhost).
 			CheckOrigin: func(*http.Request) bool { return true },
 		},
-		clients: make(map[*client]struct{}),
-		imgs:    make(map[string]imgEntry),
 	}
 }
 
@@ -290,9 +292,7 @@ func (m *Mirror) handleImage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	m.imgMu.Lock()
-	e, ok := m.imgs[key]
-	m.imgMu.Unlock()
+	e, ok := m.imgs.Load(key)
 	if !ok {
 		m.log.Debug("image: serve miss", "key", key)
 		http.NotFound(w, r)
@@ -312,10 +312,7 @@ func (m *Mirror) rewriteImages(s *cdp.Session, html string) string {
 	for _, mth := range imgSrcRe.FindAllStringSubmatch(html, -1) {
 		u := mth[1]
 		key := hashStr(u)
-		m.imgMu.Lock()
-		_, ok := m.imgs[key]
-		m.imgMu.Unlock()
-		if !ok {
+		if _, ok := m.imgs.Load(key); !ok {
 			m.log.Debug("image: fetch attempt", "url", u, "key", key)
 			data, ctype, via, err := cdp.FetchImage(s, u)
 			if err != nil {
@@ -326,9 +323,7 @@ func (m *Mirror) rewriteImages(s *cdp.Session, html string) string {
 				ctype = guessImageType(data)
 			}
 			m.log.Debug("image: fetched", "key", key, "via", via, "bytes", len(data), "type", ctype)
-			m.imgMu.Lock()
-			m.imgs[key] = imgEntry{data: data, contentType: ctype}
-			m.imgMu.Unlock()
+			m.imgs.Store(key, imgEntry{data: data, contentType: ctype})
 		}
 		html = strings.ReplaceAll(html, `src="`+u+`"`, `src="/img/`+key+`"`)
 	}
@@ -389,43 +384,38 @@ func (m *Mirror) writePump(c *client) {
 }
 
 func (m *Mirror) addClient(c *client) {
-	m.clientsMu.Lock()
-	m.clients[c] = struct{}{}
-	m.clientsMu.Unlock()
+	m.clients.Store(c, struct{}{})
 }
 
 func (m *Mirror) removeClient(c *client) {
-	m.clientsMu.Lock()
-	if _, ok := m.clients[c]; ok {
-		delete(m.clients, c)
+	// LoadAndDelete is atomic: only the first remover wins, so c.done is
+	// closed exactly once even if two callers race.
+	if _, ok := m.clients.LoadAndDelete(c); ok {
 		close(c.done)
 	}
-	m.clientsMu.Unlock()
 	c.conn.Close()
 }
 
 func (m *Mirror) closeClients() {
-	m.clientsMu.Lock()
-	cs := make([]*client, 0, len(m.clients))
-	for c := range m.clients {
+	var cs []*client
+	m.clients.All()(func(c *client, _ struct{}) bool {
 		cs = append(cs, c)
-	}
-	m.clientsMu.Unlock()
+		return true
+	})
 	for _, c := range cs {
 		m.removeClient(c)
 	}
 }
 
 func (m *Mirror) broadcast(b []byte) {
-	m.clientsMu.Lock()
-	defer m.clientsMu.Unlock()
-	for c := range m.clients {
+	m.clients.All()(func(c *client, _ struct{}) bool {
 		select {
 		case c.send <- b:
 		default:
 			// Slow client: drop the frame rather than stall the publisher.
 		}
-	}
+		return true
+	})
 }
 
 func (m *Mirror) sendFullState(c *client) {

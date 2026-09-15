@@ -9,26 +9,29 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
+	"github.com/go4org/hashtriemap"
 	"golang.org/x/sync/singleflight"
 
 	"vscode-load-llama/internal/config"
 )
 
-// Loader deduplicates load requests per model id.
+// Loader deduplicates load requests per (server, model) pair.
 type Loader struct {
 	cooldown time.Duration
 	client   *http.Client
 	log      *slog.Logger
 
-	mu   sync.Mutex
-	last map[string]time.Time
+	// last records when each (server, model) load last succeeded, keyed by
+	// the same composite key used for the in-flight dedup. It is a lock-free
+	// hash-trie map, so its Load/Store never block and are never held across
+	// the (up to 10s) HTTP request.
+	last hashtriemap.HashTrieMap[string, time.Time]
 
-	// sf dedups concurrent load requests for the same model id: only one
-	// HTTP request runs at a time per model; a caller that arrives while
-	// one is in flight waits for it and shares the outcome instead of
+	// sf dedups concurrent load requests for the same (server, model) pair:
+	// only one HTTP request runs at a time per pair; a caller that arrives
+	// while one is in flight waits for it and shares the outcome instead of
 	// firing a duplicate request.
 	sf singleflight.Group
 }
@@ -51,7 +54,6 @@ func New(cooldown time.Duration, log *slog.Logger, proxyFunc func(*http.Request)
 		cooldown: cooldown,
 		client:   client,
 		log:      log,
-		last:     make(map[string]time.Time),
 	}
 }
 
@@ -65,12 +67,12 @@ func New(cooldown time.Duration, log *slog.Logger, proxyFunc func(*http.Request)
 // The (server root, model id) pair is what identifies a distinct load,
 // so both the cooldown and the in-flight dedup are keyed by it.
 //
-// The mutex guards only the `last` bookkeeping, never the HTTP request:
-// holding it across the (up to 10s) request would serialize every model's
-// loads behind one dead server. Concurrent requests for the same
-// (server, model) pair are deduped by singleflight: the first caller runs
-// the request, and any caller that arrives while it is in flight waits for
-// it and shares the outcome rather than firing a duplicate request.
+// The cooldown bookkeeping lives in the lock-free `last` hash-trie map, so
+// its Load/Store never block and are never held across the (up to 10s)
+// request. Concurrent requests for the same (server, model) pair are
+// deduped by singleflight: the first caller runs the request, and any
+// caller that arrives while it is in flight waits for it and shares the
+// outcome rather than firing a duplicate request.
 func (l *Loader) Load(m config.Model) {
 	// The load endpoint is relative to the server ROOT, not to baseUrl:
 	// baseUrl http://abc.com/v1 -> POST http://abc.com/models/load
@@ -85,13 +87,10 @@ func (l *Loader) Load(m config.Model) {
 	// id can repeat across servers, so it must be combined with the root.
 	key := root + "\x00" + m.ID
 
-	l.mu.Lock()
-	if last, ok := l.last[key]; ok && time.Since(last) < l.cooldown {
-		l.mu.Unlock()
+	if last, ok := l.last.Load(key); ok && time.Since(last) < l.cooldown {
 		l.log.Debug("cooldown active, skip", "model", m.ID)
 		return
 	}
-	l.mu.Unlock()
 
 	// Dedup concurrent loads for this (server, model) pair. The closure
 	// runs at most once per in-flight window; its return value is ignored
@@ -114,9 +113,7 @@ func (l *Loader) Load(m config.Model) {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		loaded := l.classify(m, loadURL, resp.StatusCode, b)
 		if loaded {
-			l.mu.Lock()
-			l.last[key] = time.Now()
-			l.mu.Unlock()
+			l.last.Store(key, time.Now())
 		}
 		return nil, nil
 	})
