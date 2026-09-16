@@ -484,3 +484,60 @@ test('mirror: reasoning-trace list follows the live bottom-pinned scroll', () =>
     assert.equal(vslider.style.top, '90px'); // 0.5 * (240 - 60)
   } finally { uninstallGlobals(); }
 });
+
+// Pane HTML with the chat-input cursor: root > chat-input-container >
+// interactive-input-editor > monaco-editor > cursors-layer > cursor.
+const CURSOR_HTML =
+  '<div class="root"><div class="chat-input-container">' +
+  '<div class="interactive-input-editor"><div class="monaco-editor">' +
+  '<div class="cursors-layer"><div class="cursor"></div></div>' +
+  '</div></div></div></div>';
+
+function hasBlink(el) {
+  return (el.getAttribute('class') || '').split(/\s+/).includes('mirror-cursor-blink');
+}
+
+test('mirror: focused chat input shows a blinking cursor', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, { html: CURSOR_HTML, inputFocused: true });
+    const cur = pane.querySelector('.cursor');
+    assert.equal(cur.style.visibility, 'inherit');
+    assert.ok(hasBlink(cur));
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: unfocusing the chat input drops the blink class', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, { html: CURSOR_HTML, inputFocused: true });
+    const cur = pane.querySelector('.cursor');
+    assert.ok(hasBlink(cur));
+    state(ws, { html: CURSOR_HTML, inputFocused: false });
+    assert.equal(cur, pane.querySelector('.cursor'), 'cursor node keeps identity');
+    assert.ok(!hasBlink(cur));
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: scroll-only state keeps the cursor blink in sync', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, { html: CURSOR_HTML, inputFocused: true });
+    const cur = pane.querySelector('.cursor');
+    assert.ok(hasBlink(cur));
+    // No html in the message: the scroll-only path must still sync the cursor.
+    state(ws, { inputFocused: false });
+    assert.ok(!hasBlink(cur));
+    state(ws, { inputFocused: true });
+    assert.ok(hasBlink(cur));
+    assert.equal(cur.style.visibility, 'inherit');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: syncCursor is a no-op without a chat input editor', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, { html: '<div class="root"></div>', inputFocused: true });
+    assert.equal(pane.querySelector('.cursor'), null);
+  } finally { uninstallGlobals(); }
+});

@@ -97,6 +97,7 @@
         syncDrawnScrollbars();
       }
       updatePopup(m);
+      syncCursor(m);
     };
   }
 
@@ -227,6 +228,34 @@
     restoreNestedScrolls(m);
     restoreScroll(m);
     syncDrawnScrollbars();
+  }
+
+  // The live chat-input cursor blinks via a 500ms JS timer that toggles the
+  // cursor element's inline visibility (Monaco ViewCursors, default 'blink'
+  // style) — a static HTML snapshot cannot reproduce that, and it may even
+  // capture the hidden phase (the cursor vanishes until the next extract).
+  // When the state message reports the live input as focused, force the
+  // cursor visible and blink it with the CSS animation; otherwise leave the
+  // snapshot's visibility alone (hidden when unfocused, exactly like live).
+  // Runs on BOTH update paths: the cursor element survives DOM patches in
+  // place, and scroll-only updates must not drop the blink.
+  function syncCursor(m) {
+    var box = pane.querySelector('.chat-input-container');
+    if (!box) return;
+    var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+    var cur = ed ? ed.querySelector('.cursor') : null;
+    if (!cur) return;
+    var cls = (cur.getAttribute('class') || '').split(/\s+/).filter(function (c) { return c !== ''; });
+    var has = cls.indexOf('mirror-cursor-blink') >= 0;
+    if (m.inputFocused) {
+      if (cur.style.visibility !== 'inherit') cur.style.visibility = 'inherit';
+      if (!has) cls.push('mirror-cursor-blink');
+    } else if (has) {
+      cls = cls.filter(function (c) { return c !== 'mirror-cursor-blink'; });
+    } else {
+      return; // nothing to change
+    }
+    cur.setAttribute('class', cls.join(' '));
   }
 
   // ---- Popup (context view) rendering ---------------------------------

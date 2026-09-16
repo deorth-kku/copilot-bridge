@@ -44,9 +44,13 @@ type stateMsg struct {
 	// ThemeBg is the pane root's effective background color; the browser
 	// pins it on html/body (--mirror-bg) so the page frame matches the live
 	// theme.
-	ThemeBg string         `json:"themeBg,omitempty"`
-	Rect    cdp.PaneRect   `json:"rect"`
-	Scroll  cdp.PaneScroll `json:"scroll"`
+	ThemeBg string `json:"themeBg,omitempty"`
+	// InputFocused reports whether the live chat input holds the page focus.
+	// The mirror shows (and blinks) the input cursor only then: live keeps
+	// the cursor hidden whenever the input is not focused.
+	InputFocused bool           `json:"inputFocused,omitempty"`
+	Rect         cdp.PaneRect   `json:"rect"`
+	Scroll       cdp.PaneScroll `json:"scroll"`
 	// ScrollPath identifies the measured scroll container as a DOM path from
 	// the pane root (no omitempty: an empty path means "the root itself").
 	ScrollPath []int `json:"scrollPath"`
@@ -194,6 +198,9 @@ type snapState struct {
 	// nestedScrolls: scroll state of nested scrollers (reasoning-trace
 	// lists) the main scroller does not cover.
 	nestedScrolls []cdp.NestedScroll
+	// inputFocused: whether the live chat input holds the page focus (the
+	// mirror shows/blinks the input cursor only then).
+	inputFocused bool
 	// popupHTML/popupFP capture the visible context view (popup menu) that
 	// renders outside the pane root; popupFP == "" means no popup is open.
 	popupHTML string
@@ -574,8 +581,8 @@ func (m *Mirror) sendFullState(c *client) {
 		msg = stateMsg{
 			Type: "state", HTML: s.html, CSS: s.css, CSSVer: s.cssVer,
 			RootStyle: s.rootStyle, ThemeVars: s.themeVars, ThemeVer: s.themeVer,
-			ThemeBg: s.themeBg,
-			Rect:    s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
+			ThemeBg: s.themeBg, InputFocused: s.inputFocused,
+			Rect: s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
 			NestedScrolls: s.nestedScrolls,
 			Window:        s.window, WindowID: s.windowID,
 		}
@@ -897,7 +904,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		rootStyle: rootStyle, themeVars: themeVars, themeVer: themeVer, themeBg: themeBg,
 		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath, scrollRows: fpst.ScrollRows,
 		nestedScrolls: fpst.NestedScrolls,
-		window:        s.Title(), windowID: winID, fp: fpst.FP,
+		window:        s.Title(), windowID: winID, fp: fpst.FP, inputFocused: fpst.InputFocused,
 	}
 	if newPopup != nil {
 		ns.popupHTML = newPopup.HTML
@@ -913,8 +920,8 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 
 	base := stateMsg{
 		Type: "state", CSSVer: cssVer, RootStyle: rootStyle, ThemeVer: themeVer,
-		NestedScrolls: fpst.NestedScrolls,
-		Rect:          fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
+		NestedScrolls: fpst.NestedScrolls, InputFocused: fpst.InputFocused,
+		Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
 		Window: s.Title(), WindowID: winID, Windows: wins,
 	}
 	if fpChanged {

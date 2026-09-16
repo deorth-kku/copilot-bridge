@@ -195,3 +195,41 @@ test('htmlExpr: nestedScrolls captures the reasoning-trace list scroll state', (
     ]);
   } finally { uninstallGlobals(); }
 });
+
+// Append the live chat-input editor subtree (chat-input-container >
+// interactive-input-editor > monaco-editor > cursors-layer > cursor) to the
+// pane and return the cursor element.
+function addInputEditor(pane) {
+  const container = new El('div', { attrs: { class: 'chat-input-container' } });
+  const editor = new El('div', { attrs: { class: 'interactive-input-editor' } });
+  const monaco = new El('div', { attrs: { class: 'monaco-editor' } });
+  const layer = new El('div', { attrs: { class: 'cursors-layer' } });
+  const cursor = new El('div', { attrs: { class: 'cursor' } });
+  layer.appendChild(cursor);
+  monaco.appendChild(layer);
+  editor.appendChild(monaco);
+  container.appendChild(editor);
+  pane.appendChild(container);
+  return cursor;
+}
+
+test('htmlExpr: inputFocused tracks the chat-input editor focus', () => {
+  const { root, doc } = buildPane();
+  const cursor = addInputEditor(root.querySelector('.chat-viewpane-container'));
+  try {
+    assert.equal(htmlExpr(['.chat-viewpane-container']).inputFocused, false);
+    cursor.focus(); // activeElement inside the input editor
+    assert.equal(htmlExpr(['.chat-viewpane-container']).inputFocused, true);
+    doc.activeElement = root; // focus elsewhere
+    assert.equal(htmlExpr(['.chat-viewpane-container']).inputFocused, false);
+    doc.activeElement = null;
+    assert.equal(htmlExpr(['.chat-viewpane-container']).inputFocused, false);
+  } finally { doc.activeElement = null; uninstallGlobals(); }
+});
+
+test('htmlExpr: no chat input editor -> inputFocused false', () => {
+  buildPane();
+  try {
+    assert.equal(htmlExpr(['.chat-viewpane-container']).inputFocused, false);
+  } finally { uninstallGlobals(); }
+});

@@ -94,6 +94,17 @@ module.exports = (selectors) => {
     }
   } catch (e) { nestedScrolls = null; }
 
+  let inputEditor = null, inputFocused = false;
+  try {
+    inputEditor = el.querySelector('.chat-input-container .interactive-input-editor .monaco-editor')
+                 || el.querySelector('.interactive-input-editor .monaco-editor');
+    if (inputEditor) {
+      // Walk up from the active element (contains() is not spliced in).
+      let n = document.activeElement;
+      while (n) { if (n === inputEditor) { inputFocused = true; break; } n = n.parentElement; }
+    }
+  } catch (e) {}
+
   let cssFP = '';
   try {
     cssFP = document.styleSheets.length + ':' +
@@ -123,10 +134,26 @@ module.exports = (selectors) => {
         Math.round(cr.left) + ':' + Math.round(cr.top);
     }
   } catch (e) {}
-  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP;
+  // Chat-input cursor state, folded into the fp so caret moves and focus
+  // changes trigger a full re-extract: neither alters innerText or the
+  // child count (the cursor's position is an inline style, and focus is a
+  // class + activeElement). The cursor's visibility is deliberately NOT
+  // included: live toggles it every 500ms (the JS-driven blink), and it
+  // would force a full extract twice a second.
+  let curFP = '';
+  try {
+    if (inputEditor) {
+      const cur = inputEditor.querySelector('.cursor');
+      curFP = (cur ? (cur.style.top || '') + '|' + (cur.style.left || '') + '|' + (cur.style.height || '') : 'x') +
+        '|' + inputEditor.querySelectorAll('.cursor').length +
+        '|' + (inputFocused ? 1 : 0);
+    }
+  } catch (e) {}
+  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP + ':' + curFP;
   return {
     fp: fp,
     cssFP: cssFP,
+    inputFocused: inputFocused,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
     scrollPath: scrollPath,

@@ -94,6 +94,17 @@ module.exports = (selectors) => {
     }
   } catch (e) { nestedScrolls = null; }
 
+  let inputEditor = null, inputFocused = false;
+  try {
+    inputEditor = el.querySelector('.chat-input-container .interactive-input-editor .monaco-editor')
+                 || el.querySelector('.interactive-input-editor .monaco-editor');
+    if (inputEditor) {
+      // Walk up from the active element (contains() is not spliced in).
+      let n = document.activeElement;
+      while (n) { if (n === inputEditor) { inputFocused = true; break; } n = n.parentElement; }
+    }
+  } catch (e) {}
+
   let cssFP = '';
   try {
     cssFP = document.styleSheets.length + ':' +
@@ -172,6 +183,7 @@ module.exports = (selectors) => {
     rootStyle: rootStyle,
     themeVars: themeVars,
     themeBg: themeBg,
+    inputFocused: inputFocused,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
     scrollPath: scrollPath,

@@ -54,6 +54,11 @@ type HTMLState struct {
 	HTML      string `json:"html"`
 	RootStyle string `json:"rootStyle"`
 	ThemeVars string `json:"themeVars"`
+	// InputFocused reports whether the chat input's Monaco editor holds the
+	// page focus. The mirror uses it to decide whether to show (and blink)
+	// the input cursor: live keeps the cursor hidden when the input is not
+	// focused.
+	InputFocused bool `json:"inputFocused"`
 	// ThemeBg is the pane root's effective background color (the nearest
 	// non-transparent ancestor's computed value); the mirror pins it on its
 	// own root and page body.
@@ -100,13 +105,38 @@ type PopupState struct {
 	Anchor *PaneRect `json:"anchor,omitempty"`
 }
 
+// inputEditorJS is spliced into both fpExpr and htmlExpr (they are
+// evaluated as separate programs, so the helper must be inlined). It
+// locates the chat input's Monaco editor and reports whether it holds
+// the page focus (document.activeElement inside it — with the native edit
+// context that is a .native-edit-context div, not the old textarea). The
+// mirror needs the focus state because live keeps the input cursor hidden
+// whenever the input is not focused, and a static HTML snapshot cannot
+// tell the two apart (the cursor element exists in both states).
+const inputEditorJS = `
+  let inputEditor = null, inputFocused = false;
+  try {
+    inputEditor = el.querySelector('.chat-input-container .interactive-input-editor .monaco-editor')
+                 || el.querySelector('.interactive-input-editor .monaco-editor');
+    if (inputEditor) {
+      // Walk up from the active element (contains() is not spliced in).
+      let n = document.activeElement;
+      while (n) { if (n === inputEditor) { inputFocused = true; break; } n = n.parentElement; }
+    }
+  } catch (e) {}
+`
+
 // FingerprintState is the result of Fingerprint: a cheap probe run every
 // poll that avoids the costly outerHTML dump until something actually
 // changed.
 type FingerprintState struct {
-	Err           string         `json:"err"`
-	FP            string         `json:"fp"`
-	CSSFP         string         `json:"cssFP"`
+	Err   string `json:"err"`
+	FP    string `json:"fp"`
+	CSSFP string `json:"cssFP"`
+	// InputFocused is part of the fp (focus changes must trigger a
+	// re-extract) and is reported here so the cheap probe can carry it to
+	// the state message even when only focus changed.
+	InputFocused  bool           `json:"inputFocused"`
 	Rect          PaneRect       `json:"rect"`
 	Scroll        PaneScroll     `json:"scroll"`
 	ScrollPath    []int          `json:"scrollPath"`
@@ -126,7 +156,7 @@ const htmlExpr = `(selectors) => {
   }
   if (!el) return { err: 'pane not found' };
   const r = el.getBoundingClientRect();
-` + scrollContainerJS + `
+` + scrollContainerJS + inputEditorJS + `
   let cssFP = '';
   try {
     cssFP = document.styleSheets.length + ':' +
@@ -205,6 +235,7 @@ const htmlExpr = `(selectors) => {
     rootStyle: rootStyle,
     themeVars: themeVars,
     themeBg: themeBg,
+    inputFocused: inputFocused,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
     scrollPath: scrollPath,
@@ -344,7 +375,7 @@ const fpExpr = `(selectors) => {
   }
   if (!el) return { err: 'pane not found' };
   const r = el.getBoundingClientRect();
-` + scrollContainerJS + `
+` + scrollContainerJS + inputEditorJS + `
   let cssFP = '';
   try {
     cssFP = document.styleSheets.length + ':' +
@@ -374,10 +405,26 @@ const fpExpr = `(selectors) => {
         Math.round(cr.left) + ':' + Math.round(cr.top);
     }
   } catch (e) {}
-  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP;
+  // Chat-input cursor state, folded into the fp so caret moves and focus
+  // changes trigger a full re-extract: neither alters innerText or the
+  // child count (the cursor's position is an inline style, and focus is a
+  // class + activeElement). The cursor's visibility is deliberately NOT
+  // included: live toggles it every 500ms (the JS-driven blink), and it
+  // would force a full extract twice a second.
+  let curFP = '';
+  try {
+    if (inputEditor) {
+      const cur = inputEditor.querySelector('.cursor');
+      curFP = (cur ? (cur.style.top || '') + '|' + (cur.style.left || '') + '|' + (cur.style.height || '') : 'x') +
+        '|' + inputEditor.querySelectorAll('.cursor').length +
+        '|' + (inputFocused ? 1 : 0);
+    }
+  } catch (e) {}
+  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP + ':' + curFP;
   return {
     fp: fp,
     cssFP: cssFP,
+    inputFocused: inputFocused,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
     scrollPath: scrollPath,
