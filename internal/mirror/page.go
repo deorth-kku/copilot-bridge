@@ -178,6 +178,30 @@ const pageHTML = `<!doctype html>
      500ms/500ms toggle, matching ViewCursors.BLINK_INTERVAL. */
   #pane .mirror-cursor-blink { animation: mirror-cursor-blink 1s step-end infinite; }
   @keyframes mirror-cursor-blink { 0% { visibility: visible; } 50% { visibility: hidden; } }
+  /* Dropdown popup open/close animation. Live scopes these rules to the
+     workbench root's .modern-ui.monaco-enable-motion classes, which the
+     extracted subtree (and #pane) do not carry, so the rules in the
+     extracted CSS never match in the mirror even though the @keyframes are
+     present in it. Re-scope the SAME animations (same keyframes, timings,
+     easing, transform origins) onto the mirror's popup: the .context-view
+     sibling of the pane root holds the .action-widget.action-widget-dropdown
+     element. The open animation plays when the widget element enters the
+     DOM (fresh insert, or a re-insert after close); updatePopup restarts it
+     explicitly when a reopen patches an existing widget in place. */
+  #pane .context-view .action-widget.action-widget-dropdown {
+    animation: action-widget-dropdown-open .25s cubic-bezier(.22, 1, .36, 1) both;
+    transform-origin: bottom left;
+    will-change: transform, opacity;
+  }
+  /* Popup opened ABOVE its anchor (the .context-view.bottom class marks
+     that alignment in live): scale from the top edge, flush with the anchor. */
+  #pane .context-view.bottom .action-widget.action-widget-dropdown {
+    transform-origin: top left;
+  }
+  #pane .context-view .action-widget.action-widget-dropdown.action-widget-dropdown-closing {
+    animation: action-widget-dropdown-close .15s cubic-bezier(.22, 1, .36, 1) both;
+    pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -571,24 +595,74 @@ const pageHTML = `<!doctype html>
     popupEl.style.left = left + 'px';
     popupEl.style.top = top + 'px';
   }
+  // Live closes a dropdown with a 150ms CSS animation (actionWidget.ts):
+  // it stamps the widget's CURRENT opacity/transform as the close keyframes'
+  // start values (so a close interrupted mid-open animates from where it
+  // was), adds the -closing class (close keyframes + pointer-events: none),
+  // and removes the element after the animation duration. Reproduce that
+  // here so the mirror's close matches live. Non-dropdown popups (hover
+  // widgets, tooltips) have no live close animation: remove them at once.
+  var popupCloseTimer = null;
+  function ensureCloseRemoval() {
+    // The close state persists across many state messages (m.popup stays
+    // null), so the removal timer must be armed exactly once.
+    if (popupCloseTimer != null) return;
+    popupCloseTimer = setTimeout(function () {
+      popupCloseTimer = null;
+      if (popupEl) { popupEl.remove(); popupEl = null; }
+    }, 150);
+  }
+  function closePopup() {
+    if (!popupEl) return;
+    var w = popupEl.querySelector('.action-widget.action-widget-dropdown');
+    if (!w) { popupEl.remove(); popupEl = null; return; }
+    if (w.classList.contains('action-widget-dropdown-closing')) {
+      ensureCloseRemoval();
+      return;
+    }
+    var cs = getComputedStyle(w);
+    w.style.setProperty('--action-widget-close-start-opacity', cs.opacity);
+    w.style.setProperty('--action-widget-close-start-transform', cs.transform);
+    w.classList.add('action-widget-dropdown-closing');
+    ensureCloseRemoval();
+  }
+  // Restart the open animation on a widget that was patched IN PLACE instead
+  // of inserted fresh (a reopen landing while the close animation is still
+  // running): the reflow trick resets the CSS animation to its first frame.
+  function restartOpenAnimation() {
+    var w = popupEl ? popupEl.querySelector('.action-widget.action-widget-dropdown') : null;
+    if (!w) return;
+    w.style.animation = 'none';
+    void w.offsetWidth;
+    w.style.animation = '';
+  }
   function updatePopup(m) {
     // A defensive pane.innerHTML rebuild in applyState detaches the popup;
     // drop the stale reference so it is re-appended on the next HTML update.
-    if (popupEl && !popupEl.isConnected) popupEl = null;
+    if (popupEl && !popupEl.isConnected) {
+      popupEl = null;
+      if (popupCloseTimer != null) { clearTimeout(popupCloseTimer); popupCloseTimer = null; }
+    }
     if (!m.popup) {
-      if (popupEl) { popupEl.remove(); popupEl = null; }
+      if (popupEl) closePopup();
       lastPopup = null;
       return;
     }
+    // A new popup on top of a still-closing one: the widget below is patched
+    // in place (not re-inserted), so the open animation must be restarted
+    // by hand after the patch.
+    var reopening = lastPopup === null && popupEl != null;
     lastPopup = m.popup;
     if (m.popup.html != null) {
       var want = parseFragment(m.popup.html);
       if (popupEl) {
+        if (popupCloseTimer != null) { clearTimeout(popupCloseTimer); popupCloseTimer = null; }
         patchNode(popupEl, want);
       } else {
         pane.appendChild(want);
         popupEl = want;
       }
+      if (reopening) restartOpenAnimation();
     }
     positionPopup();
   }
