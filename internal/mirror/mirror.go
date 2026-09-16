@@ -206,9 +206,10 @@ type snapState struct {
 
 // client is one connected browser tab.
 type client struct {
-	conn *websocket.Conn
-	send chan []byte
-	done chan struct{}
+	logger *slog.Logger
+	conn   *websocket.Conn
+	send   chan stateMsg
+	done   chan struct{}
 	// selID is this tab's status-bar window picker selection (nil = follow
 	// the default: -window flag, else first window). Per-client, so several
 	// browsers can mirror different VS Code windows at once. Written by the
@@ -431,7 +432,7 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	c := &client{conn: conn, send: make(chan []byte, 64), done: make(chan struct{})}
+	c := &client{conn: conn, send: make(chan stateMsg, 64), done: make(chan struct{}), logger: m.log.With("remote", r.RemoteAddr)}
 	m.addClient(c)
 	defer m.removeClient(c)
 
@@ -441,7 +442,7 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 	// stale.
 	m.sendFullState(c)
 	m.signalRefresh()
-	go m.writePump(c)
+	go c.writePump()
 
 	conn.SetReadLimit(1 << 20)
 	for {
@@ -463,21 +464,40 @@ func (m *Mirror) signalRefresh() {
 	}
 }
 
-func (m *Mirror) writePump(c *client) {
+func (c *client) writeMsg(msg stateMsg) error {
+	wStart := time.Now()
+	wt, err := c.conn.NextWriter(websocket.TextMessage)
+	if err != nil {
+		c.logger.Warn("failed to get writer", "err", err)
+		return err
+	}
+	defer wt.Close()
+
+	err = json.MarshalWrite(wt, msg)
+
+	if err != nil {
+		c.logger.Warn("failed to write message", "err", err)
+		return err
+	}
+
+	if ms := time.Since(wStart).Milliseconds(); ms >= 100 {
+		// A slow write means the browser tab is not draining the
+		// WebSocket (heavy DOM patching on its side, or a throttled
+		// background tab); the frame queue backs up behind it.
+		c.logger.Debug("writePump: slow write", "ms", ms)
+	}
+	return nil
+}
+
+func (c *client) writePump() {
 	for {
 		select {
 		case <-c.done:
 			return
-		case b := <-c.send:
-			wStart := time.Now()
-			if err := c.conn.WriteMessage(websocket.TextMessage, b); err != nil {
+		case msg := <-c.send:
+			err := c.writeMsg(msg)
+			if err != nil {
 				return
-			}
-			if ms := time.Since(wStart).Milliseconds(); ms >= 100 {
-				// A slow write means the browser tab is not draining the
-				// WebSocket (heavy DOM patching on its side, or a throttled
-				// background tab); the frame queue backs up behind it.
-				m.log.Debug("writePump: slow write", "ms", ms, "bytes", len(b))
 			}
 		}
 	}
@@ -509,11 +529,11 @@ func (m *Mirror) closeClients() {
 
 // sendTo queues one frame for a single client. Non-blocking: a slow client
 // drops the frame rather than stalling the publisher.
-func (m *Mirror) sendTo(c *client, b []byte) {
+func (c *client) sendTo(msg stateMsg) {
 	select {
-	case c.send <- b:
+	case c.send <- msg:
 	default:
-		m.log.Warn("send: frame dropped (slow client)", "bytes", len(b))
+		c.logger.Warn("send: frame dropped (slow client)")
 	}
 }
 
@@ -569,9 +589,7 @@ func (m *Mirror) sendFullState(c *client) {
 	}
 	m.snapMu.Unlock()
 	msg.Windows = wins
-	if b, err := json.Marshal(msg); err == nil {
-		m.sendTo(c, b)
-	}
+	c.sendTo(msg)
 	// Only a successful full state counts as "rendered" for this client:
 	// the browser ignores states carrying an error, so an error (or a
 	// missing snapshot) must not suppress the next full send.
@@ -951,9 +969,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 				}
 			}
 		}
-		if b, e := json.Marshal(msg); e == nil {
-			m.sendTo(c, b)
-		}
+		c.sendTo(msg)
 	}
 	m.log.Debug("mirror: refresh",
 		"window", winID,
@@ -976,10 +992,8 @@ func windowIn(wins []cdp.Window, id string) bool {
 
 // sendErrToGroup sends an error state message to one group of clients.
 func (m *Mirror) sendErrToGroup(group []*client, err string) {
-	if b, e := json.Marshal(stateMsg{Type: "state", Err: err}); e == nil {
-		for _, c := range group {
-			m.sendTo(c, b)
-		}
+	for _, c := range group {
+		c.sendTo(stateMsg{Type: "state", Err: err})
 	}
 }
 
