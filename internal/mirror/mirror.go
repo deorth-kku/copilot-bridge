@@ -782,8 +782,12 @@ func (m *Mirror) refreshAll() {
 }
 
 // refreshWindow probes one window's pane (cheap fingerprint) and, when
-// something changed, does a full extract and sends a state message to the
-// clients watching that window.
+// something changed, does a full extract and sends state messages to the
+// clients watching that window in two phases: phase 1 carries the pane HTML
+// and the popup (styled by the cached CSS) so a popup becomes visible
+// without waiting for a CSS re-extract; phase 2 follows with the re-extracted
+// CSS when its fingerprint changed (opening a context view makes VS Code add
+// an inline <style>, which flips the fingerprint on the same refresh).
 func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client) {
 	totalStart := time.Now()
 	s := m.disc.SessionForID(winID)
@@ -885,19 +889,15 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 	themeVer := hashStr(themeVars)
 	sendTheme := themeVars != "" && themeVer != prevThemeVer
 
-	// Full CSS extract (with inlined fonts) only when the CSS fingerprint
-	// changed; otherwise reuse the cached copy.
-	css, cssVer, sendCSS := prevCSS, prevCSSVer, false
+	// The CSS re-extract (with inlined fonts) is deferred to a follow-up
+	// phase (phase 2, below) when the CSS fingerprint changed: opening a
+	// context view makes VS Code add an inline <style> element, which flips
+	// the CSS fingerprint on exactly the refresh that opens the popup.
+	// Extracting (and re-sending ~4MB of) CSS before the popup would make
+	// the mirror show the menu only after the live open animation has
+	// finished. Until phase 2 lands, the cached copy is authoritative.
+	css, cssVer := prevCSS, prevCSSVer
 	var cssMs int64
-	if cssFPChanged {
-		csStart := time.Now()
-		if cs, err := cdp.ExtractCSS(s); err == nil {
-			css, cssVer, sendCSS = cs.CSS, hashStr(cs.CSS), true
-		} else {
-			m.log.Debug("css extract failed", "err", err)
-		}
-		cssMs = time.Since(csStart).Milliseconds()
-	}
 
 	ns := &snapState{
 		html: html, css: css, cssVer: cssVer, cssFP: fpst.CSSFP,
@@ -937,9 +937,6 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 			base.Popup.HTML = ns.popupHTML
 		}
 	}
-	if sendCSS {
-		base.CSS = css
-	}
 	if sendTheme {
 		base.ThemeVars = themeVars
 		base.ThemeBg = themeBg
@@ -952,36 +949,92 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 	// size-independent. Marshal a copy of the message per client — never
 	// mutate the shared Popup pointer.
 	marshalStart := time.Now()
-	for _, c := range group {
-		msg := base
-		if p := c.lastWin.Load(); p == nil || *p != winID {
-			// First state of this window for this client: force a full send
-			// (HTML + CSS + theme) so the pane re-renders even though the
-			// window has not changed since the last refresh.
-			msg.HTML = html
-			msg.CSS = css
-			msg.ThemeVars = themeVars
-			msg.ThemeBg = themeBg
-			c.lastWin.Store(&winID)
-		}
-		if ns.popupFP != "" && msg.Popup != nil {
-			if ap := c.lastAnchor.Load(); ap != nil {
-				if ar, ok := cdp.EvalRect(s, m.selectors, *ap); ok {
-					p := *msg.Popup
-					p.Anchor = &cdp.PaneRect{
-						Left: ar.Left - fpst.Rect.Left, Top: ar.Top - fpst.Rect.Top,
-						Width: ar.Width, Height: ar.Height,
+	// Phase 1: the pane HTML and the popup, styled by the CACHED css. This is
+	// what makes the popup visible in the mirror, so it must not wait for a
+	// CSS re-extract. A client that has not rendered this window yet (just
+	// connected, or just switched via the picker) gets the cached CSS here
+	// and the fresh extract in phase 2.
+	phase1Ms := int64(0)
+	if fpChanged || rectChanged || scrollChanged || nestedChanged || anyNeedsFull {
+		for _, c := range group {
+			msg := base
+			if p := c.lastWin.Load(); p == nil || *p != winID {
+				// First state of this window for this client: force a full
+				// send (HTML + cached CSS + theme) so the pane re-renders
+				// even though the window has not changed since the last
+				// refresh.
+				msg.HTML = html
+				msg.CSS = prevCSS
+				msg.ThemeVars = themeVars
+				msg.ThemeBg = themeBg
+				c.lastWin.Store(&winID)
+			}
+			if ns.popupFP != "" && msg.Popup != nil {
+				if ap := c.lastAnchor.Load(); ap != nil {
+					if ar, ok := cdp.EvalRect(s, m.selectors, *ap); ok {
+						p := *msg.Popup
+						p.Anchor = &cdp.PaneRect{
+							Left: ar.Left - fpst.Rect.Left, Top: ar.Top - fpst.Rect.Top,
+							Width: ar.Width, Height: ar.Height,
+						}
+						msg.Popup = &p
 					}
-					msg.Popup = &p
 				}
 			}
+			c.sendTo(msg)
 		}
-		c.sendTo(msg)
+		phase1Ms = time.Since(totalStart).Milliseconds()
+	}
+
+	// Phase 2: the CSS re-extract (only when the fingerprint changed), sent
+	// as a follow-up so phase 1 was not delayed. The follow-up carries the
+	// popup position WITHOUT html: a null popup would make the browser drop
+	// the menu that phase 1 just rendered. The group is re-resolved because
+	// a client may have connected during the extract.
+	if cssFPChanged {
+		csStart := time.Now()
+		if cs, err := cdp.ExtractCSS(s); err == nil {
+			css, cssVer = cs.CSS, hashStr(cs.CSS)
+			m.snapMu.Lock()
+			if cur := m.snaps[winID]; cur == ns {
+				ns.css = css
+				ns.cssVer = cssVer
+			}
+			m.snapMu.Unlock()
+			follow := stateMsg{
+				Type: "state", CSS: css, CSSVer: cssVer,
+				Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
+				Window: s.Title(), WindowID: winID, Windows: wins,
+			}
+			if ns.popupFP != "" {
+				follow.Popup = &cdp.PopupState{Left: ns.popupLeft, Top: ns.popupTop, Width: ns.popupW, Height: ns.popupH}
+			}
+			for _, c := range m.groupClients(m.disc.Windows())[winID] {
+				fm := follow
+				if fm.Popup != nil {
+					if ap := c.lastAnchor.Load(); ap != nil {
+						if ar, ok := cdp.EvalRect(s, m.selectors, *ap); ok {
+							p := *fm.Popup
+							p.Anchor = &cdp.PaneRect{
+								Left: ar.Left - fpst.Rect.Left, Top: ar.Top - fpst.Rect.Top,
+								Width: ar.Width, Height: ar.Height,
+							}
+							fm.Popup = &p
+						}
+					}
+				}
+				c.sendTo(fm)
+			}
+		} else {
+			m.log.Debug("css extract failed", "err", err)
+		}
+		cssMs = time.Since(csStart).Milliseconds()
 	}
 	m.log.Debug("mirror: refresh",
 		"window", winID,
 		"totalMs", time.Since(totalStart).Milliseconds(),
 		"fpMs", fpMs, "htmlMs", htmlMs, "cssMs", cssMs,
+		"phase1Ms", phase1Ms,
 		"marshalMs", time.Since(marshalStart).Milliseconds(),
 		"changed", strings.Join(changedParts, ","), "clients", len(group),
 		"htmlBytes", len(html), "cssBytes", len(css))
