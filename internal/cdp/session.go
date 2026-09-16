@@ -99,14 +99,19 @@ type Session struct {
 	msgCount  atomic.Int64
 	lastRate  atomic.Int64
 	lastRateT atomic.Int64
+
+	// debounceMs is the page-side DOM-change debounce spliced into the
+	// injected observers (InjectJS / MirrorInjectJS).
+	debounceMs int
 }
 
-func NewSession(id, title, wsURL string, events chan Event, log *slog.Logger) *Session {
+func NewSession(id, title, wsURL string, events chan Event, log *slog.Logger, debounceMs int) *Session {
 	s := &Session{
 		ID:         id,
 		WSURL:      wsURL,
 		events:     events,
 		log:        log,
+		debounceMs: clampDebounceMs(debounceMs),
 		mirrorWake: make(chan struct{}, 1),
 		nav:        make(chan struct{}, 1),
 		pending:    make(map[int]chan callResult),
@@ -196,8 +201,8 @@ func (s *Session) Run(ctx context.Context) {
 		s.Stop()
 	}()
 
-	s.inject(BindingName, InjectJS)
-	s.inject(MirrorBindingName, MirrorInjectJS)
+	s.inject(BindingName, InjectJS(s.debounceMs))
+	s.inject(MirrorBindingName, MirrorInjectJS(s.debounceMs))
 
 	// Serve re-injection requests until the connection drops.
 	for {
@@ -205,8 +210,8 @@ func (s *Session) Run(ctx context.Context) {
 		case <-readDone:
 			return
 		case <-s.nav:
-			s.inject(BindingName, InjectJS)
-			s.inject(MirrorBindingName, MirrorInjectJS)
+			s.inject(BindingName, InjectJS(s.debounceMs))
+			s.inject(MirrorBindingName, MirrorInjectJS(s.debounceMs))
 		}
 	}
 }

@@ -17,8 +17,8 @@ func TestInjectedJSCompiles(t *testing.T) {
 	}{
 		// inject.go
 		{"extractFn", extractFn},
-		{"InjectJS", InjectJS},
-		{"MirrorInjectJS", MirrorInjectJS},
+		{"InjectJS", InjectJS(defaultDebounceMs)},
+		{"MirrorInjectJS", MirrorInjectJS(defaultDebounceMs)},
 		// extract.go
 		{"htmlExpr", htmlExpr},
 		{"scrollContainerJS", scrollContainerJS},

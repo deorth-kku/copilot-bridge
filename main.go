@@ -24,6 +24,7 @@ func main() {
 	cdpAddr := flag.String("cdp", "127.0.0.1:9222", "CDP HTTP address")
 	settingsPath := flag.String("settings", defaultSettingsPath(), "path to VS Code settings.json")
 	cooldown := flag.Duration("cooldown", 30*time.Second, "per-model load cooldown")
+	debounce := flag.Duration("debounce", cdp.DefaultDebounce, "page-side DOM-change debounce for the injected observers")
 	logPath := flag.String("log", defaultLogPath(), "log file path")
 	verbose := flag.Bool("verbose", false, "enable debug logging")
 	web := flag.String("web", "0.0.0.0:9527", "mirror web address (empty to disable)")
@@ -31,14 +32,14 @@ func main() {
 	window := flag.String("window", "", "mirror this window (title substring; empty = first window)")
 	flag.Parse()
 
-	if err := run(*cdpAddr, *settingsPath, *cooldown, *logPath, *verbose, *web, *pane, *window); err != nil {
+	if err := run(*cdpAddr, *settingsPath, *cooldown, *debounce, *logPath, *verbose, *web, *pane, *window); err != nil {
 		// GUI builds have no console; the error is also in the log file
 		// (if it could be opened).
 		fmt.Fprintln(os.Stderr, err)
 	}
 }
 
-func run(cdpAddr, settingsPath string, cooldown time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter string) error {
+func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter string) error {
 	if dir := filepath.Dir(logPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create log dir: %w", err)
@@ -77,7 +78,7 @@ func run(cdpAddr, settingsPath string, cooldown time.Duration, logPath string, v
 	// snapshot, so http.proxy / http.noProxy changes hot-reload too.
 	ld := loader.New(cooldown, log, store.ProxyFunc)
 	events := make(chan cdp.Event, 256)
-	disc := cdp.NewDiscovery(cdpAddr, events, log)
+	disc := cdp.NewDiscovery(cdpAddr, events, log, int(debounce.Milliseconds()))
 	go disc.Run(ctx)
 
 	// Optional: forward the Copilot pane to a browser page.
@@ -90,7 +91,7 @@ func run(cdpAddr, settingsPath string, cooldown time.Duration, logPath string, v
 		}()
 	}
 
-	log.Info("monitoring", "cdp", cdpAddr, "cooldown", cooldown.String())
+	log.Info("monitoring", "cdp", cdpAddr, "cooldown", cooldown.String(), "debounce", debounce.String())
 
 	for {
 		select {

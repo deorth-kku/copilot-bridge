@@ -39,25 +39,27 @@ type Window struct {
 // waiting. On reconnect, sessions are rebuilt from a fresh /json/list
 // (target ids change across VS Code restarts, so nothing is cached).
 type Discovery struct {
-	base   string
-	log    *slog.Logger
-	events chan Event
-	client *http.Client
-	Poll   time.Duration
+	base       string
+	log        *slog.Logger
+	events     chan Event
+	client     *http.Client
+	Poll       time.Duration
+	debounceMs int // page-side DOM-change debounce for injected observers
 
 	mu       sync.Mutex
 	sessions map[string]*Session
 	up       bool
 }
 
-func NewDiscovery(cdpAddr string, events chan Event, log *slog.Logger) *Discovery {
+func NewDiscovery(cdpAddr string, events chan Event, log *slog.Logger, debounceMs int) *Discovery {
 	return &Discovery{
-		base:     "http://" + cdpAddr,
-		log:      log,
-		events:   events,
-		client:   &http.Client{Timeout: 2 * time.Second},
-		sessions: make(map[string]*Session),
-		Poll:     2 * time.Second,
+		base:       "http://" + cdpAddr,
+		log:        log,
+		events:     events,
+		client:     &http.Client{Timeout: 2 * time.Second},
+		sessions:   make(map[string]*Session),
+		Poll:       2 * time.Second,
+		debounceMs: clampDebounceMs(debounceMs),
 	}
 }
 
@@ -109,7 +111,7 @@ func (d *Discovery) scan(ctx context.Context) {
 		if ok {
 			d.log.Info("reconnecting window", "title", t.Title)
 		}
-		s = NewSession(id, t.Title, t.WSURL, d.events, d.log)
+		s = NewSession(id, t.Title, t.WSURL, d.events, d.log, d.debounceMs)
 		d.sessions[id] = s
 		go s.Run(ctx)
 	}

@@ -2,6 +2,11 @@
 // discovery, per-window sessions, and the page-side JS injection.
 package cdp
 
+import (
+	"strconv"
+	"time"
+)
+
 // BindingName is the CDP runtime binding global. It must differ from the
 // Python POC's binding so the two tools can coexist, but only ONE
 // instance of this tool should run at a time (bindings are page globals;
@@ -46,11 +51,30 @@ const extractFn = `() => {
     };
   }`
 
-// InjectJS installs a versioned MutationObserver that debounces (50ms)
-// DOM changes in the whole document and pushes the state through
-// window.<BindingName>. It always emits the current state at the end,
-// so (re)connecting or reloading yields an immediate snapshot.
-const InjectJS = `(() => {
+// defaultDebounceMs is the page-side DOM-change debounce used when the
+// -debounce flag is not given.
+const defaultDebounceMs = 50
+
+// DefaultDebounce is the exported form of defaultDebounceMs for the CLI
+// flag default.
+const DefaultDebounce = time.Duration(defaultDebounceMs) * time.Millisecond
+
+// clampDebounceMs keeps the injected timer value a positive integer so a
+// nonsense flag value cannot produce invalid JS or a hot loop.
+func clampDebounceMs(ms int) int {
+	if ms < 1 {
+		return 1
+	}
+	return ms
+}
+
+// InjectJS returns the script that installs a versioned MutationObserver
+// debouncing (debounceMs) DOM changes in the whole document and pushing
+// the state through window.<BindingName>. It always emits the current
+// state at the end, so (re)connecting or reloading yields an immediate
+// snapshot.
+func InjectJS(debounceMs int) string {
+	return `(() => {
   const extract = ` + extractFn + `
   ;
   const push = () => {
@@ -65,7 +89,7 @@ const InjectJS = `(() => {
     let timer = null;
     window.__copilotBridgeSchedule = () => {
       if (timer) return;
-      timer = setTimeout(() => { timer = null; push(); }, 50);
+      timer = setTimeout(() => { timer = null; push(); }, ` + strconv.Itoa(clampDebounceMs(debounceMs)) + `);
     };
     window.__copilotBridgeMO = new MutationObserver(window.__copilotBridgeSchedule);
     window.__copilotBridgeMO.observe(document.documentElement, {
@@ -78,6 +102,7 @@ const InjectJS = `(() => {
   (window.__copilotBridgeSchedule || push)();
   return 'ok';
 })()`
+}
 
 // MirrorBindingName is the CDP runtime binding global the mirror's change
 // observer pushes through. A second binding (not an extended payload of
@@ -96,10 +121,11 @@ const MirrorBindingName = "copilotBridgeMirror"
 //     listener covers every container the mirror might measure;
 //   - window resize (changes the pane's bounding box).
 //
-// Changes are debounced (50ms) so a streaming chat produces at most ~20
-// wakes/second. It always emits once at the end, so (re)connecting yields
-// an immediate probe.
-const MirrorInjectJS = `(() => {
+// Changes are debounced (debounceMs) so a streaming chat produces at most
+// ~1000/debounceMs wakes/second. It always emits once at the end, so
+// (re)connecting yields an immediate probe.
+func MirrorInjectJS(debounceMs int) string {
+	return `(() => {
   const VERSION = 1;
   const wake = () => { try { window.` + MirrorBindingName + `('1'); } catch (e) {} };
   if (window.__mirrorVersion !== VERSION) {
@@ -112,7 +138,7 @@ const MirrorInjectJS = `(() => {
     let timer = null;
     const schedule = () => {
       if (timer) return;
-      timer = setTimeout(() => { timer = null; wake(); }, 50);
+      timer = setTimeout(() => { timer = null; wake(); }, ` + strconv.Itoa(clampDebounceMs(debounceMs)) + `);
     };
     window.__mirrorSchedule = schedule;
     window.__mirrorMO = new MutationObserver(schedule);
@@ -127,3 +153,4 @@ const MirrorInjectJS = `(() => {
   (window.__mirrorSchedule || wake)();
   return 'ok';
 })()`
+}

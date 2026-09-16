@@ -112,7 +112,7 @@ func TestDiscoveryLifecycle(t *testing.T) {
 	defer srv.Close()
 
 	events := make(chan Event, 16)
-	d := NewDiscovery(strings.TrimPrefix(srv.URL, "http://"), events, discardLog)
+	d := NewDiscovery(strings.TrimPrefix(srv.URL, "http://"), events, discardLog, defaultDebounceMs)
 	d.Poll = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -183,7 +183,7 @@ func TestDiscoveryWindowsSorted(t *testing.T) {
 	defer srv.Close()
 
 	events := make(chan Event, 16)
-	d := NewDiscovery(strings.TrimPrefix(srv.URL, "http://"), events, discardLog)
+	d := NewDiscovery(strings.TrimPrefix(srv.URL, "http://"), events, discardLog, defaultDebounceMs)
 	d.Poll = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

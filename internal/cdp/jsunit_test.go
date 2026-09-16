@@ -24,8 +24,8 @@ var jsUnitModules = map[string]string{
 }
 
 var jsUnitRaw = map[string]string{
-	"inject_js":        InjectJS,
-	"mirror_inject_js": MirrorInjectJS,
+	"inject_js":        InjectJS(defaultDebounceMs),
+	"mirror_inject_js": MirrorInjectJS(defaultDebounceMs),
 }
 
 var jsUnitTestFiles = []string{

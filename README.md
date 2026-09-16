@@ -53,6 +53,7 @@ Enable the CDP debugging port in VS Code (one-time):
 | `-cdp` | `127.0.0.1:9222` | CDP HTTP address |
 | `-settings` | VS Code user `settings.json` (see below) | settings file (hot-reloaded on change) |
 | `-cooldown` | `30s` | per-model load cooldown |
+| `-debounce` | `50ms` | page-side DOM-change debounce for the injected observers |
 | `-log` | `<tempdir>/copilot-bridge/app.log` | log file |
 | `-verbose` | `false` | debug-level logging |
 

@@ -90,7 +90,7 @@ func readEvent(t *testing.T, events chan Event) Event {
 func TestSessionHandshakeAndEvents(t *testing.T) {
 	wsURL, methods := startMockPage(t)
 	events := make(chan Event, 10)
-	s := NewSession("test-id", "Test Window", wsURL, events, discardLog)
+	s := NewSession("test-id", "Test Window", wsURL, events, discardLog, defaultDebounceMs)
 	go s.Run(context.Background())
 
 	// 1. handshake commands in the expected order (two bindings:
@@ -151,7 +151,7 @@ func TestSessionHandshakeAndEvents(t *testing.T) {
 
 func TestSessionDialFailureDoesNotPanic(t *testing.T) {
 	events := make(chan Event, 1)
-	s := NewSession("x", "X", "ws://127.0.0.1:1/devtools/page/x", events, discardLog)
+	s := NewSession("x", "X", "ws://127.0.0.1:1/devtools/page/x", events, discardLog, defaultDebounceMs)
 	done := make(chan struct{})
 	go func() {
 		s.Run(context.Background())
@@ -227,7 +227,7 @@ func startControlledPage(t *testing.T) (wsURL string, push chan string) {
 func TestSessionTitleUpdateVisibleInEvents(t *testing.T) {
 	wsURL, push := startControlledPage(t)
 	events := make(chan Event, 10)
-	s := NewSession("id", "Original", wsURL, events, discardLog)
+	s := NewSession("id", "Original", wsURL, events, discardLog, defaultDebounceMs)
 	go s.Run(context.Background())
 	defer s.Stop()
 
