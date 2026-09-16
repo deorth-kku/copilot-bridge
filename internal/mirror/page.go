@@ -35,6 +35,10 @@ const pageHTML = `<!doctype html>
     box-sizing: border-box !important; border: none !important;
     border-bottom: 1px solid #444 !important;
     cursor: pointer !important;
+    /* Clicking the picker focuses the native select and Chromium paints its
+       UA focus ring (orange on desktop) around the whole bar. The mirror
+       needs no visible focus indicator here, so suppress it (same as #pane). */
+    outline: none !important;
   }
   /* Responsive: the mirror fills the browser viewport (below the status bar)
      instead of the live pane's pixel size. The extracted subtree was laid out
