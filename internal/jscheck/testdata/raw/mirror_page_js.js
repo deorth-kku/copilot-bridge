@@ -18,6 +18,26 @@
   // (VS Code pins it to the bottom while streaming) and to redraw its
   // self-drawn slider, which arrives with live inline geometry.
   var lastNestedScrolls = null;
+  // The scroller element last anchored by restoreScroll, the window it
+  // belonged to, and the live viewport it was aligned to (v0/v1 in
+  // full-content coordinates). A state message that did NOT move the live
+  // viewport (streaming growth, nested-scroll changes) must not yank the
+  // user's local reading position back to the anchor: the current scrollTop
+  // is kept (the browser clamps it to the new content height). Re-anchoring
+  // happens when the live viewport moved (a pane resize changes v1 too), on
+  // the first state, on a window switch, or when the patch replaced the
+  // scroller node.
+  var lastAnchoredEl = null;
+  var lastAnchoredWin = null;
+  var lastV0 = null;
+  var lastV1 = null;
+  // Per-path record of the live nested-scroll state last applied by
+  // restoreNestedScrolls ({ el, top, scrollH, clientH }). A state message
+  // that did not change the live state of a nested container (the
+  // reasoning-trace list) must not re-apply it: the user may have scrolled
+  // that container locally, and updates elsewhere in the pane would yank
+  // the reading position away. Same preserve rule as restoreScroll.
+  var lastNestedApplied = null;
 
   // The status bar is a <select> (window picker). setStatus replaces its
   // options with a single placeholder (connecting / error states).
@@ -468,12 +488,30 @@
   // stays 0 and the position is the scroller's scrollTop. Both are mapped
   // onto the mirror's (static, top-anchored) layout by aligning the mirror's
   // viewport with the live viewport inside the rendered row window.
+  //
+  // Re-anchoring happens ONLY when the live viewport moved (v0/v1 changed),
+  // on the first state, on a window switch, or when the scroller node was
+  // replaced. Content-only updates (streaming tokens, nested scrolls) keep
+  // the user's local scroll position, so a reading position reached by
+  // wheeling the mirror up survives the constant html updates of a stream.
   function restoreScroll(m) {
     if (!m.scroll || !m.scrollPath) return;
     var el = pathEl(m.scrollPath);
     if (!el) return;
     el.scrollLeft = m.scroll.left;
     var max = el.scrollHeight - el.clientHeight;
+    var v0 = m.scroll.top - m.scroll.offset;
+    var v1 = v0 + m.scroll.h;
+    // The live viewport did not move since the last anchor (and it is the
+    // same scroller of the same window): this update only changed content
+    // (streaming tokens, nested scrolls). Keep the user's local scroll
+    // position instead of re-anchoring — re-anchoring here is what yanked
+    // the mirror back to the bottom on every streamed token, making the
+    // top unreachable while output streams.
+    if (el === lastAnchoredEl && m.windowId === lastAnchoredWin &&
+        v0 === lastV0 && v1 === lastV1) {
+      return;
+    }
     var target = m.scroll.top;
     var a = alignToLiveViewport(el, m.scroll, m.scrollRows);
     if (a != null) {
@@ -507,6 +545,10 @@
       target = distBottom <= 0 ? max : max - distBottom;
     }
     el.scrollTop = Math.max(0, Math.min(max, target));
+    lastAnchoredEl = el;
+    lastAnchoredWin = m.windowId;
+    lastV0 = v0;
+    lastV1 = v1;
   }
 
   // The reasoning-trace list (.chat-used-context-list inside a
@@ -522,6 +564,7 @@
     if (!m.nestedScrolls || !m.nestedScrolls.length) return;
     var root = pane.firstElementChild;
     if (!root) return;
+    if (!lastNestedApplied) lastNestedApplied = {};
     for (var i = 0; i < m.nestedScrolls.length; i++) {
       var ns = m.nestedScrolls[i];
       var el = root;
@@ -533,8 +576,19 @@
       var liveMax = ns.scrollH - ns.clientH;
       var max = el.scrollHeight - el.clientHeight;
       if (max <= 0) continue;
+      // The live state of this container did not change since the last
+      // apply (and it is the same element): keep the user's local scroll
+      // position instead of re-applying the live ratio. A replaced element
+      // (patch, window switch) or a moved live scroll re-applies.
+      var key = JSON.stringify(ns.path);
+      var prev = lastNestedApplied[key];
+      if (prev && prev.el === el && prev.top === ns.top &&
+          prev.scrollH === ns.scrollH && prev.clientH === ns.clientH) {
+        continue;
+      }
       var ratio = liveMax > 0 ? Math.max(0, Math.min(1, ns.top / liveMax)) : 0;
       el.scrollTop = ratio * max;
+      lastNestedApplied[key] = { el: el, top: ns.top, scrollH: ns.scrollH, clientH: ns.clientH };
     }
   }
 
@@ -897,6 +951,15 @@
   // when the mirror has no local scroll range: the movement is pure
   // forwarding.
   function localScrollEl(target) {
+    // A wheel inside a reasoning-trace list (.chat-thinking-box
+    // .chat-used-context-list) moves THAT list locally, never the main
+    // viewport: the trace's live state is synced separately
+    // (restoreNestedScrolls), and moving the main scroller here would yank
+    // the reading position while the user is only scrolling the trace.
+    var nested = (target && target.closest)
+      ? target.closest('.chat-thinking-box .chat-used-context-list')
+      : null;
+    if (nested && nested.scrollHeight - nested.clientHeight > 0) return nested;
     if (lastScrollPath != null) {
       var p = pathEl(lastScrollPath);
       if (p && p.scrollHeight - p.clientHeight > 0) return p;

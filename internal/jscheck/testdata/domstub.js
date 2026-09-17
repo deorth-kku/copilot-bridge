@@ -123,12 +123,38 @@ class El {
   querySelector(sel) { return qsa(this, sel)[0] || null; }
   querySelectorAll(sel) { return qsa(this, sel); }
   // closest(sel): self first, then ancestors; comma = any branch.
+  // Multi-part selectors match the candidate against the LAST part and walk
+  // the ancestor chain for the earlier parts (descendant ' ' or child '>'),
+  // as in the browser. ':scope' is the element closest() was called on.
   closest(sel) {
     const branches = sel.split(',').map(s => parseSel(s.trim()));
     for (let e = this; e; e = e.parentElement) {
       if (e.nodeType !== 1) continue;
       for (const parts of branches) {
-        if (parts.length === 1 && matchesSimple(e, parts[0].simple)) return e;
+        if (parts.length === 0) continue;
+        const last = parts[parts.length - 1];
+        if (last.simple !== null && !matchesSimple(e, last.simple)) continue;
+        let ok = true;
+        let a = e.parentElement;
+        for (let i = parts.length - 2; i >= 0; i--) {
+          const { comb, simple } = parts[i];
+          if (comb === '@') {
+            if (e !== this) { ok = false; break; }
+            continue;
+          }
+          if (comb === '>') {
+            if (!a || !matchesSimple(a, simple)) { ok = false; break; }
+            a = a.parentElement;
+          } else {
+            let found = null;
+            for (let x = a; x; x = x.parentElement) {
+              if (matchesSimple(x, simple)) { found = x; break; }
+            }
+            if (!found) { ok = false; break; }
+            a = found.parentElement;
+          }
+        }
+        if (ok) return e;
       }
     }
     return null;

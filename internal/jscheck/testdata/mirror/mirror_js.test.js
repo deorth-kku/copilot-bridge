@@ -457,6 +457,48 @@ test('mirror: bottom-anchored list at the top keeps the bottom anchor (no telepo
   } finally { uninstallGlobals(); }
 });
 
+test('mirror: html updates that do not move the live viewport keep the local scroll position', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row"></div><div class="monaco-list-row"></div></div></div></div></div>',
+      scrollPath: [0, 0],
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    const rows = pane.querySelectorAll('.monaco-list-row');
+    sc.scrollHeight = 700;
+    sc.clientHeight = 500; // max = 200
+    rows[0].offsetHeight = 350;
+    rows[1].offsetHeight = 350;
+    // Anchor with the live viewport stationary (v0 = 10, v1 = 710).
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 200, 'anchored to the bottom of the live viewport');
+    // The user reads above the anchor (a local wheel-up).
+    sc.scrollTop = 50;
+    // Streaming: an html update grows the content (scrollH 1100, a new row
+    // appended) but the live viewport did not move (v0/v1 unchanged) ->
+    // the local position must survive, not be yanked back to the anchor.
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row"></div><div class="monaco-list-row"></div><div class="monaco-list-row"></div></div></div></div></div>',
+      scroll: { left: 0, top: 0, scrollH: 1100, offset: -10, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 50, 'content-only html update keeps the local position');
+    // The live viewport moves (live scrolled down 100) -> re-anchor.
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1100, offset: -110, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 200, 'a moved live viewport re-anchors to the bottom');
+  } finally { uninstallGlobals(); }
+});
+
 test('mirror: wheel is still forwarded when the mirror list does not overflow', async () => {
   const { pane, ws } = setup();
   try {
@@ -630,6 +672,86 @@ test('mirror: reasoning-trace list follows the live bottom-pinned scroll', () =>
     });
     assert.equal(list.scrollTop, 180); // 0.5 * (480 - 120)
     assert.equal(vslider.style.top, '90px'); // 0.5 * (240 - 60)
+  } finally { uninstallGlobals(); }
+});
+
+// Shared setup helper for the reasoning-trace tests: the trace box lives in a
+// row of the main chat list (root > monaco-list > scroller > rows > row >
+// box > wrap > list). Returns { pane, ws, scroller, list }.
+function traceSetup() {
+  const { pane, ws } = setup();
+  state(ws, {
+    html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element">' +
+      '<div class="monaco-list-rows"><div class="monaco-list-row">' +
+      '<div class="chat-used-context chat-thinking-box"><div class="monaco-scrollable-element">' +
+      '<div class="chat-used-context-list chat-thinking-streaming"></div>' +
+      '<div class="scrollbar vertical"><div class="slider"></div></div>' +
+      '</div></div></div></div></div></div></div>',
+    scroll: { left: 0, top: 0, offset: -100, h: 300, scrollH: 1000 },
+    scrollPath: [0, 0],
+    // Live list pinned to the bottom: top = scrollH - clientH.
+    nestedScrolls: [{ path: [0, 0, 0, 0, 0, 0, 0], top: 360, scrollH: 480, clientH: 120 }],
+  });
+  const rootEl = pane.children[0];
+  const scroller = rootEl.children[0].children[0];
+  scroller.clientHeight = 300;
+  scroller.scrollHeight = 600; // main max = 300
+  const list = scroller.children[0].children[0].children[0].children[0].children[0];
+  list.scrollHeight = 480;
+  list.clientHeight = 120; // list max = 360
+  list.parentElement.clientHeight = 240;
+  // The stub has no layout, so the geometry is set after the first state;
+  // a scroll-only update re-runs the restores with the geometry in place.
+  state(ws, {
+    scroll: { left: 0, top: 0, offset: -100, h: 300, scrollH: 1000 },
+    scrollPath: [0, 0],
+    nestedScrolls: [{ path: [0, 0, 0, 0, 0, 0, 0], top: 360, scrollH: 480, clientH: 120 }],
+  });
+  return { pane, ws, scroller, list };
+}
+
+test('mirror: wheel on a reasoning-trace list scrolls the list, not the main viewport', () => {
+  const { pane, ws, scroller, list } = traceSetup();
+  try {
+    assert.equal(list.scrollTop, 360, 'pinned to the live bottom ratio');
+    const mainTop = scroller.scrollTop;
+    // The user wheels up over the trace.
+    list.rect = { left: 10, top: 100, width: 300, height: 120 };
+    list.dispatchEvent({ type: 'wheel', target: list, clientX: 100, clientY: 140, deltaX: 0, deltaY: -250, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(list.scrollTop, 110, 'the trace list scrolls locally (360 - 250)');
+    assert.equal(scroller.scrollTop, mainTop, 'the main viewport does not move');
+    assert.equal(sent(ws).filter(m => m.kind === 'wheel').length, 2, 'still forwarded in 100px chunks');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: html updates that do not change the live trace state keep the local trace position', () => {
+  const { pane, ws, scroller, list } = traceSetup();
+  try {
+    assert.equal(list.scrollTop, 360, 'pinned to the live bottom ratio');
+    // The user reads above the pinned bottom (a local wheel-up).
+    list.scrollTop = 100;
+    // An html update elsewhere in the pane (a new row) with the live trace
+    // state unchanged must not yank the local trace position back to 360.
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element">' +
+        '<div class="monaco-list-rows"><div class="monaco-list-row">' +
+        '<div class="chat-used-context chat-thinking-box"><div class="monaco-scrollable-element">' +
+        '<div class="chat-used-context-list chat-thinking-streaming"></div>' +
+        '<div class="scrollbar vertical"><div class="slider"></div></div>' +
+        '</div></div></div><div class="monaco-list-row"></div></div></div></div></div>',
+      scroll: { left: 0, top: 0, offset: -100, h: 300, scrollH: 1000 },
+      scrollPath: [0, 0],
+      nestedScrolls: [{ path: [0, 0, 0, 0, 0, 0, 0], top: 360, scrollH: 480, clientH: 120 }],
+    });
+    assert.equal(list.scrollTop, 100, 'content-only update keeps the local trace position');
+    // The live trace moves (streaming grew it and re-pinned: new scrollH) ->
+    // the live ratio re-applies.
+    state(ws, {
+      scroll: { left: 0, top: 0, offset: -100, h: 300, scrollH: 1000 },
+      scrollPath: [0, 0],
+      nestedScrolls: [{ path: [0, 0, 0, 0, 0, 0, 0], top: 480, scrollH: 600, clientH: 120 }],
+    });
+    assert.equal(list.scrollTop, 360, 'a moved live trace re-applies the live ratio (1 * 360)');
   } finally { uninstallGlobals(); }
 });
 
