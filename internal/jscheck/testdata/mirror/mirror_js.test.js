@@ -457,11 +457,14 @@ test('mirror: bottom-anchored list at the top keeps the bottom anchor (no telepo
   } finally { uninstallGlobals(); }
 });
 
-test('mirror: html updates that do not move the live viewport keep the local scroll position', () => {
+test('mirror: html updates keep the viewport anchored to the message entry the user is reading', () => {
   const { pane, ws } = setup();
   try {
     state(ws, {
-      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row"></div><div class="monaco-list-row"></div></div></div></div></div>',
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="0"></div>' +
+        '<div class="monaco-list-row" data-index="1"></div>' +
+        '</div></div></div></div>',
       scrollPath: [0, 0],
     });
     const sc = pane.querySelector('.monaco-scrollable-element');
@@ -477,25 +480,274 @@ test('mirror: html updates that do not move the live viewport keep the local scr
       scrollRows: [0, 400, 400, 300],
     });
     assert.equal(sc.scrollTop, 200, 'anchored to the bottom of the live viewport');
-    // The user reads above the anchor (a local wheel-up).
-    sc.scrollTop = 50;
-    // Streaming: an html update grows the content (scrollH 1100, a new row
-    // appended) but the live viewport did not move (v0/v1 unchanged) ->
-    // the local position must survive, not be yanked back to the anchor.
+    // The user wheels up to read the first message (a local move + forward).
+    rows[0].rect = { left: 10, top: 100, width: 780, height: 350 };
+    rows[0].dispatchEvent({ type: 'wheel', target: rows[0], clientX: 100, clientY: 140, deltaX: 0, deltaY: -150, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(sc.scrollTop, 50, 'local wheel-up');
+    // Streaming: an html update grows the content (a new row appended) but
+    // the user is not at the bottom -> the viewport stays pinned to the
+    // entry being read (no re-anchor to live's pixel position).
     state(ws, {
-      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row"></div><div class="monaco-list-row"></div><div class="monaco-list-row"></div></div></div></div></div>',
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="0"></div>' +
+        '<div class="monaco-list-row" data-index="1"></div>' +
+        '<div class="monaco-list-row" data-index="2"></div>' +
+        '</div></div></div></div>',
       scroll: { left: 0, top: 0, scrollH: 1100, offset: -10, w: 800, h: 700 },
       scrollPath: [0, 0],
       scrollRows: [0, 400, 400, 300],
     });
-    assert.equal(sc.scrollTop, 50, 'content-only html update keeps the local position');
-    // The live viewport moves (live scrolled down 100) -> re-anchor.
+    assert.equal(sc.scrollTop, 50, 'content-only html update keeps the reading position');
+    // The live viewport moves (live scrolled down 100) while the user is
+    // still reading the first message -> the mirror keeps its entry, not
+    // live's new pixel position.
     state(ws, {
       scroll: { left: 0, top: 0, scrollH: 1100, offset: -110, w: 800, h: 700 },
       scrollPath: [0, 0],
       scrollRows: [0, 400, 400, 300],
     });
-    assert.equal(sc.scrollTop, 200, 'a moved live viewport re-anchors to the bottom');
+    assert.equal(sc.scrollTop, 50, 'a moved live viewport does not yank the reading position');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: pinned to the bottom, the viewport follows the stream across html updates', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="0"></div>' +
+        '<div class="monaco-list-row" data-index="1"></div>' +
+        '</div></div></div></div>',
+      scrollPath: [0, 0],
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    const rows = pane.querySelectorAll('.monaco-list-row');
+    sc.scrollHeight = 700;
+    sc.clientHeight = 500; // max = 200
+    rows[0].offsetHeight = 350;
+    rows[1].offsetHeight = 350;
+    // Live is AT its bottom: distBottom = (scrollH - h) + offset = 0
+    // (bottom-anchored, viewport [300, 1000] of a 1000px list).
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -300, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [300, 350, 650, 350],
+    });
+    assert.equal(sc.scrollTop, 200, 'anchored to the bottom (pinned)');
+    // Streaming: the mirror's content grows (a new row, scrollHeight 800)
+    // and live stays at the bottom -> the viewport follows the bottom.
+    sc.scrollHeight = 800; // max is now 300
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="0"></div>' +
+        '<div class="monaco-list-row" data-index="1"></div>' +
+        '<div class="monaco-list-row" data-index="2"></div>' +
+        '</div></div></div></div>',
+      scroll: { left: 0, top: 0, scrollH: 1200, offset: -500, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [300, 350, 650, 350],
+    });
+    assert.equal(sc.scrollTop, 300, 'pinned: follows the bottom of the mirror content');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: at the bottom of the rendered window but NOT live bottom, a new message does not teleport the viewport', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="0"></div>' +
+        '<div class="monaco-list-row" data-index="1"></div>' +
+        '</div></div></div></div>',
+      scrollPath: [0, 0],
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    const rows = pane.querySelectorAll('.monaco-list-row');
+    sc.scrollHeight = 700;
+    sc.clientHeight = 500; // max = 200
+    rows[0].offsetHeight = 350;
+    rows[1].offsetHeight = 350;
+    // Live is NOT at its bottom: distBottom = (1000 - 700) + (-10) = 290.
+    // The mirror's rendered window is the top of the list; there are
+    // unrendered messages below in live.
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 200, 'at the bottom of the rendered window');
+    // A new message appears below (live renders it): the mirror's content
+    // grows (a new row, scrollHeight 800) but live is still not at its
+    // bottom -> the viewport must STAY at the old position (200), not
+    // teleport to the bottom of the new message (300).
+    sc.scrollHeight = 800; // max is now 300
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="0"></div>' +
+        '<div class="monaco-list-row" data-index="1"></div>' +
+        '<div class="monaco-list-row" data-index="2"></div>' +
+        '</div></div></div></div>',
+      scroll: { left: 0, top: 0, scrollH: 1100, offset: -10, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 200, 'no teleport: stays at the old reading position');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: an anchor row that leaves the rendered window re-anchors the viewport to live', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="0"></div>' +
+        '<div class="monaco-list-row" data-index="1"></div>' +
+        '</div></div></div></div>',
+      scrollPath: [0, 0],
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    const rows = pane.querySelectorAll('.monaco-list-row');
+    sc.scrollHeight = 700;
+    sc.clientHeight = 500; // max = 200
+    rows[0].offsetHeight = 350;
+    rows[1].offsetHeight = 350;
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 200, 'anchored to the bottom');
+    // The user wheels up to read the first message (anchor row 0, offset 50).
+    rows[0].rect = { left: 10, top: 100, width: 780, height: 350 };
+    rows[0].dispatchEvent({ type: 'wheel', target: rows[0], clientX: 100, clientY: 140, deltaX: 0, deltaY: -150, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(sc.scrollTop, 50, 'local wheel-up');
+    // Live scrolls down past the first message: the html update no longer
+    // renders row 0, so the anchor is stale and the viewport re-anchors to
+    // live's viewport (v0 = 400, v1 = 1100; above 0, inside 700 -> 200).
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="1"></div>' +
+        '<div class="monaco-list-row" data-index="2"></div>' +
+        '</div></div></div></div>',
+    });
+    const rowsNow = pane.querySelectorAll('.monaco-list-row');
+    assert.equal(rowsNow[0].getAttribute('data-index'), '1', 'row 0 discarded');
+    rowsNow[1].offsetHeight = 350; // the entering row's mirror geometry
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1100, offset: -400, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [400, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 200, 're-anchored to the bottom of the live viewport');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: wheeling the trace list does not clobber the main scroller entry anchor', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="0"></div>' +
+        '<div class="monaco-list-row" data-index="1"></div>' +
+        '</div></div></div><div class="chat-thinking-box"><div class="chat-used-context-list">' +
+        '<div class="monaco-list-row" data-index="0">t0</div>' +
+        '<div class="monaco-list-row" data-index="1">t1</div>' +
+        '</div></div></div>',
+      scrollPath: [0, 0],
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    const rows = pane.querySelectorAll('.monaco-list-row');
+    sc.scrollHeight = 700;
+    sc.clientHeight = 500; // max = 200
+    rows[0].offsetHeight = 350;
+    rows[1].offsetHeight = 350;
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 200, 'anchored to the bottom');
+    // Wheel up on the MAIN list: anchor row 0, offset 50.
+    rows[0].rect = { left: 10, top: 100, width: 780, height: 350 };
+    rows[0].dispatchEvent({ type: 'wheel', target: rows[0], clientX: 100, clientY: 140, deltaX: 0, deltaY: -150, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(sc.scrollTop, 50, 'local wheel-up on the main list');
+    // Wheel the TRACE list: its rows also carry data-index 0/1, so a
+    // careless anchor update would overwrite the main anchor with a trace
+    // row. The main anchor must survive.
+    const trace = pane.querySelector('.chat-used-context-list');
+    trace.scrollHeight = 400;
+    trace.clientHeight = 200; // max = 200
+    const traceRows = trace.querySelectorAll('.monaco-list-row');
+    traceRows[0].offsetHeight = 200;
+    traceRows[1].offsetHeight = 200;
+    trace.scrollTop = 100;
+    traceRows[1].rect = { left: 10, top: 150, width: 780, height: 200 };
+    traceRows[1].dispatchEvent({ type: 'wheel', target: traceRows[1], clientX: 100, clientY: 160, deltaX: 0, deltaY: -100, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(trace.scrollTop, 0, 'the trace list scrolled locally');
+    // A state message: the main scroller keeps its entry anchor (row 0 at
+    // offset 50), not the trace row the user just scrolled.
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 50, 'main anchor not clobbered by the trace wheel');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: html updates diff the virtualized rows by data-index (staying reused, entering added, leaving discarded)', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="2">a</div>' +
+        '<div class="monaco-list-row" data-index="3">b</div>' +
+        '</div></div></div></div>',
+    });
+    const rowsEl = pane.querySelector('.monaco-list-rows');
+    const row2 = rowsEl.children[0];
+    const row3 = rowsEl.children[1];
+    row3._marker = 7;
+    // The rendered window shifts down by one row: 2 leaves, 4 enters, 3 stays.
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="3">b edited</div>' +
+        '<div class="monaco-list-row" data-index="4">c</div>' +
+        '</div></div></div></div>',
+    });
+    assert.equal(rowsEl.children.length, 2);
+    assert.equal(rowsEl.children[0], row3, 'staying row keeps its element');
+    assert.equal(row3._marker, 7);
+    assert.equal(row3.children[0].data, 'b edited', 'staying row patched in place');
+    assert.equal(rowsEl.children[1].getAttribute('data-index'), '4', 'entering row adopted');
+    assert.equal(row2.parentElement, null, 'leaving row discarded');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: rows entering at the top are inserted before the staying rows', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="3">b</div>' +
+        '<div class="monaco-list-row" data-index="4">c</div>' +
+        '</div></div></div></div>',
+    });
+    const rowsEl = pane.querySelector('.monaco-list-rows');
+    const row3 = rowsEl.children[0];
+    const row4 = rowsEl.children[1];
+    // The rendered window shifts up by one row: 2 enters at the top.
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+        '<div class="monaco-list-row" data-index="2">a</div>' +
+        '<div class="monaco-list-row" data-index="3">b</div>' +
+        '<div class="monaco-list-row" data-index="4">c</div>' +
+        '</div></div></div></div>',
+    });
+    assert.equal(rowsEl.children.length, 3);
+    assert.equal(rowsEl.children[0].getAttribute('data-index'), '2', 'entering row inserted first');
+    assert.equal(rowsEl.children[1], row3, 'staying row keeps its element');
+    assert.equal(rowsEl.children[2], row4, 'staying row keeps its element');
   } finally { uninstallGlobals(); }
 });
 

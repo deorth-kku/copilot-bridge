@@ -18,19 +18,39 @@
   // (VS Code pins it to the bottom while streaming) and to redraw its
   // self-drawn slider, which arrives with live inline geometry.
   var lastNestedScrolls = null;
-  // The scroller element last anchored by restoreScroll, the window it
-  // belonged to, and the live viewport it was aligned to (v0/v1 in
-  // full-content coordinates). A state message that did NOT move the live
-  // viewport (streaming growth, nested-scroll changes) must not yank the
-  // user's local reading position back to the anchor: the current scrollTop
-  // is kept (the browser clamps it to the new content height). Re-anchoring
-  // happens when the live viewport moved (a pane resize changes v1 too), on
-  // the first state, on a window switch, or when the patch replaced the
-  // scroller node.
+  // The scroller element last anchored by restoreScroll and the window it
+  // belonged to. A different element or window means the previous anchor is
+  // stale (the patch replaced the scroller node, or the user switched
+  // windows), so the viewport re-anchors to live.
   var lastAnchoredEl = null;
   var lastAnchoredWin = null;
-  var lastV0 = null;
-  var lastV1 = null;
+  // The mirror's viewport is anchored to a MESSAGE ENTRY, not to live's
+  // absolute scroll position. mirrorAnchor is the data-index of the row at
+  // the top of the mirror's viewport plus the pixel offset (mirror content
+  // coordinates) from that row's top to the viewport top. Anchoring to an
+  // entry (instead of a live pixel position) is what removes the jitter: an
+  // html update re-lays-out the rows and re-applies
+  // scrollTop = mirrorTop(anchorRow) + offset, so the viewport stays pinned
+  // to the same message even as rows above it grow/shrink or the rendered
+  // window shifts. The anchor is only valid while its row is inside live's
+  // rendered window (the mirror can only show rows live has rendered); when
+  // it leaves, the viewport re-anchors to live.
+  var mirrorAnchor = null; // { index: <data-index string>, offset: <px> } | null
+  // While the user sits at the bottom (watching a stream), the viewport
+  // follows live's bottom instead of pinning to an entry, so new tokens stay
+  // visible. This requires BOTH the mirror at its own max AND live at its
+  // content bottom (liveAtBottom): the mirror's content is only the rows
+  // live has RENDERED (a sliding window), so sitting at the mirror's max may
+  // mean "bottom of the rendered window" with unrendered messages still
+  // below in live — following the bottom there would teleport the viewport
+  // to the bottom of newly-rendered content. Cleared when the user wheels up
+  // away from the bottom, or whenever live is not at its bottom.
+  var pinnedToBottom = true;
+  var BOTTOM_EPS = 2;
+  // The live scroll state from the LAST state message (m.scroll), kept so
+  // liveAtBottom() works between state messages (e.g. inside the wheel
+  // handler, before the next sync lands).
+  var lastLiveScroll = null;
   // Per-path record of the live nested-scroll state last applied by
   // restoreNestedScrolls ({ el, top, scrollH, clientH }). A state message
   // that did not change the live state of a nested container (the
@@ -155,6 +175,17 @@
       return;
     }
     syncAttrs(oldEl, newEl);
+    // The virtualized rows container is diffed by row identity (data-index)
+    // instead of by position: when the rendered window shifts, rows enter at
+    // one edge and leave at the other, and positional matching would replace
+    // the whole window wholesale (flicker + churn). The render-distance diff
+    // reuses each row element in place and only adds/discards the rows at the
+    // edges.
+    if (String(oldEl.className).indexOf('monaco-list-rows') >= 0 &&
+        String(newEl.className).indexOf('monaco-list-rows') >= 0) {
+      rowDiff(oldEl, newEl);
+      return;
+    }
     patchChildren(oldEl, newEl);
   }
 
@@ -194,6 +225,66 @@
     for (i = oldKids.length; i < newKids.length; i++) {
       oldEl.appendChild(newKids[i]);
     }
+  }
+
+  // Render-distance diff for the virtualized rows container. Live rows carry
+  // a stable data-index (their index in the full list) that survives
+  // re-renders, so when the rendered window shifts, every row that is still
+  // rendered keeps its element in place, entering rows are adopted from the
+  // fresh template, and leaving rows are discarded. Rows without a
+  // data-index have no identity to match on, so fall back to the positional
+  // diff (the old behavior).
+  function rowDiff(oldRows, newRows) {
+    var oldMap = {};
+    var kids = oldRows.childNodes;
+    var i, d;
+    var anyIndexed = false;
+    for (i = 0; i < kids.length; i++) {
+      if (kids[i].nodeType !== 1) continue;
+      d = kids[i].getAttribute('data-index');
+      if (d !== null) {
+        anyIndexed = true;
+        if (oldMap[d] === undefined) oldMap[d] = kids[i];
+      }
+    }
+    if (!anyIndexed) { patchChildren(oldRows, newRows); return; }
+    var desired = [];
+    var nk = newRows.childNodes;
+    for (i = 0; i < nk.length; i++) {
+      var r = nk[i];
+      if (r.nodeType !== 1) { desired.push(r); continue; }
+      d = r.getAttribute('data-index');
+      var old = (d !== null) ? oldMap[d] : undefined;
+      if (old !== undefined) {
+        delete oldMap[d];
+        patchNode(old, r); // patch in place; the element keeps its identity
+        desired.push(old);
+      } else {
+        desired.push(r); // entering row: adopt the fresh element
+      }
+    }
+    setChildren(oldRows, desired);
+  }
+
+  // Replace parent's children with exactly the desired nodes, in order,
+  // moving them into place rather than cloning. Nodes already in place are
+  // never touched, so the DOM churn is limited to the entering rows.
+  function setChildren(parent, desired) {
+    var i, j;
+    for (i = 0; i < desired.length; i++) desired[i]._mirrorDesired = true;
+    for (i = parent.childNodes.length - 1; i >= 0; i--) {
+      if (!parent.childNodes[i]._mirrorDesired) parent.removeChild(parent.childNodes[i]);
+    }
+    for (i = 0; i < desired.length; i++) {
+      var el = desired[i];
+      if (el.parentNode === parent) continue;
+      var ref = null;
+      for (j = i + 1; j < desired.length; j++) {
+        if (desired[j].parentNode === parent) { ref = desired[j]; break; }
+      }
+      if (ref) parent.insertBefore(el, ref); else parent.appendChild(el);
+    }
+    for (i = 0; i < desired.length; i++) delete desired[i]._mirrorDesired;
   }
 
   function applyState(m) {
@@ -476,6 +567,73 @@
     }
     return el;
   }
+  // The mirror lays its rows out in normal (static) flow, so a row's content
+  // y (the scrollTop that puts the row's top at the viewport top) is the sum
+  // of the heights of the rows above it.
+  function mirrorTop(row) {
+    var top = 0;
+    var sib = row.previousElementSibling;
+    while (sib) {
+      if (sib.nodeType === 1) top += sib.offsetHeight;
+      sib = sib.previousElementSibling;
+    }
+    return top;
+  }
+  // The rendered row whose data-index matches the given index (null when the
+  // row is not in the current rendered window).
+  function rowByDataIndex(scroller, index) {
+    var rowsEl = scroller.querySelector('.monaco-list-rows');
+    if (!rowsEl) return null;
+    for (var i = 0; i < rowsEl.children.length; i++) {
+      var row = rowsEl.children[i];
+      if (row.nodeType !== 1) continue;
+      if (row.getAttribute('data-index') === index) return row;
+    }
+    return null;
+  }
+  // The entry anchor for a given scrollTop: the row containing that content
+  // y, plus the offset from the row's top to that y. This is how the mirror
+  // remembers its viewport position relative to a message entry.
+  function anchorAt(scroller, scrollTop) {
+    var rowsEl = scroller.querySelector('.monaco-list-rows');
+    if (!rowsEl || !rowsEl.children.length) return null;
+    var y = scrollTop;
+    var top = 0;
+    for (var i = 0; i < rowsEl.children.length; i++) {
+      var row = rowsEl.children[i];
+      if (row.nodeType !== 1) continue;
+      var h = row.offsetHeight;
+      if (y < top + h) {
+        var idx = row.getAttribute('data-index');
+        if (idx === null) idx = String(i);
+        return { index: idx, offset: Math.max(0, y - top) };
+      }
+      top += h;
+    }
+    // y is at/below the last row's bottom: anchor to the last row.
+    var last = null;
+    for (var j = rowsEl.children.length - 1; j >= 0; j--) {
+      if (rowsEl.children[j].nodeType === 1) { last = rowsEl.children[j]; break; }
+    }
+    if (!last) return null;
+    var li = last.getAttribute('data-index');
+    if (li === null) li = String(rowsEl.children.length - 1);
+    return { index: li, offset: Math.max(0, y - (top - last.offsetHeight)) };
+  }
+  // Whether live's scroller is at (or within BOTTOM_EPS of) its content
+  // bottom, per the LAST state message. This is the same condition that
+  // hides live's scroll-to-bottom button. Distance of live's viewport bottom
+  // from live's content bottom: works for bottom-anchored lists (top = 0,
+  // position in the negative offset) and top-anchored lists (offset = 0,
+  // position in scrollTop). The mirror may sit at the bottom of the rows
+  // live has rendered while live still has unrendered content below; only
+  // when live is truly at its bottom is "follow the bottom" safe.
+  function liveAtBottom() {
+    if (!lastLiveScroll) return false;
+    var s = lastLiveScroll;
+    var distBottom = (s.scrollH - s.h) - s.top + s.offset;
+    return distBottom <= BOTTOM_EPS;
+  }
   // Restore the live scroll position on the SAME element the server measured,
   // identified by its DOM path from the pane root (m.scrollPath). Path-based
   // resolution is size-independent, which the responsive layout requires:
@@ -489,66 +647,77 @@
   // onto the mirror's (static, top-anchored) layout by aligning the mirror's
   // viewport with the live viewport inside the rendered row window.
   //
-  // Re-anchoring happens ONLY when the live viewport moved (v0/v1 changed),
-  // on the first state, on a window switch, or when the scroller node was
-  // replaced. Content-only updates (streaming tokens, nested scrolls) keep
-  // the user's local scroll position, so a reading position reached by
-  // wheeling the mirror up survives the constant html updates of a stream.
+  // The mirror's viewport is anchored to a MESSAGE ENTRY (mirrorAnchor), not
+  // to live's absolute scroll position. On each state message:
+  //   - pinned to the bottom (watching a stream): follow live's bottom so
+  //     new tokens stay visible;
+  //   - otherwise, while the anchor row is still inside live's rendered
+  //     window: re-apply scrollTop = mirrorTop(anchorRow) + offset, keeping
+  //     the viewport pinned to the same message across html updates. This is
+  //     what removes the jitter — the viewport is never re-anchored to a live
+  //     pixel position while the user is reading;
+  //   - otherwise (first state, window switch, scroller node replaced, or the
+  //     anchor row left the rendered window): re-anchor to live's viewport
+  //     (bottom-anchored, as before) and derive a fresh anchor.
   function restoreScroll(m) {
     if (!m.scroll || !m.scrollPath) return;
+    lastLiveScroll = m.scroll;
     var el = pathEl(m.scrollPath);
     if (!el) return;
     el.scrollLeft = m.scroll.left;
     var max = el.scrollHeight - el.clientHeight;
-    var v0 = m.scroll.top - m.scroll.offset;
-    var v1 = v0 + m.scroll.h;
-    // The live viewport did not move since the last anchor (and it is the
-    // same scroller of the same window): this update only changed content
-    // (streaming tokens, nested scrolls). Keep the user's local scroll
-    // position instead of re-anchoring — re-anchoring here is what yanked
-    // the mirror back to the bottom on every streamed token, making the
-    // top unreachable while output streams.
-    if (el === lastAnchoredEl && m.windowId === lastAnchoredWin &&
-        v0 === lastV0 && v1 === lastV1) {
+    // A replaced scroller node or a window switch invalidates the anchor.
+    var isReset = (el !== lastAnchoredEl || m.windowId !== lastAnchoredWin);
+    if (isReset) mirrorAnchor = null;
+    lastAnchoredEl = el;
+    lastAnchoredWin = m.windowId;
+    // Pinned to the bottom (and not a fresh anchor): follow live's bottom so
+    // streamed tokens stay visible. Stay pinned only while live is still at
+    // its bottom; if live scrolled away, drop the pin and use the anchor.
+    if (pinnedToBottom && !isReset) {
+      el.scrollTop = max;
+      mirrorAnchor = anchorAt(el, max);
+      pinnedToBottom = liveAtBottom();
       return;
     }
+    // Anchor row still inside the rendered window: keep the viewport pinned
+    // to that entry (no re-anchor to a live pixel position -> no jitter).
+    if (mirrorAnchor) {
+      var row = rowByDataIndex(el, mirrorAnchor.index);
+      if (row) {
+        var keep = mirrorTop(row) + mirrorAnchor.offset;
+        el.scrollTop = Math.max(0, Math.min(max, keep));
+        pinnedToBottom = (el.scrollTop >= max - BOTTOM_EPS) && liveAtBottom();
+        return;
+      }
+      // The anchor row was discarded (it left the rendered window): fall
+      // through and re-anchor to live.
+      mirrorAnchor = null;
+    }
+    // No valid anchor: re-anchor to live's viewport (bottom-anchored).
     var target = m.scroll.top;
     var a = alignToLiveViewport(el, m.scroll, m.scrollRows);
     if (a != null) {
       // The mirror's content is only the live list's currently rendered
       // rows (a sliding window), not the full conversation, so align the
       // mirror's viewport with the live viewport inside the rendered
-      // window.
-      //
-      // a.above / a.inside are the mirror pixels of the rendered content
-      // that fall above / inside the live viewport. The live viewport's
-      // mirror height (a.inside) can exceed the mirror scroller's own
-      // height (the mirror is shorter than live, or its rows are taller),
-      // in which case the whole live viewport does not fit and one end
-      // must be cut.
-      //
-      // Always keep the BOTTOM of the live viewport on screen
-      // (scrollTop = above + max(0, inside - clientH)); the hidden sliver
-      // is the live viewport's top, reachable by scrolling up. The anchor
-      // must NEVER switch between ends: switching teleports the mirror's
-      // viewport — at the top of a bottom-anchored list (offset 0) the
-      // top-anchor target (above) differs from the bottom-anchor target by
-      // ~h - clientH, so the flip moved the mirror nearly a full screen in
-      // one state message. With a fixed bottom anchor the target moves
-      // continuously as live scrolls, and the cut sliver is always
-      // reachable because a wheel that live cannot absorb (content fits, or
-      // live is pinned at an end) still moves the mirror's own viewport
-      // locally (see the wheel handler).
+      // window. a.above / a.inside are the mirror pixels of the rendered
+      // content above / inside the live viewport. The live viewport's
+      // mirror height (a.inside) can exceed the mirror scroller's own height
+      // (the mirror is shorter than live, or its rows are taller), in which
+      // case one end must be cut. Always keep the BOTTOM of the live
+      // viewport on screen (scrollTop = above + max(0, inside - clientH));
+      // the hidden sliver is the live viewport's top, reachable by scrolling
+      // up. The anchor must NEVER switch between ends: switching teleports
+      // the mirror's viewport.
       target = a.above + Math.max(0, a.inside - el.clientHeight);
     } else {
       var distBottom = (m.scroll.scrollH - m.scroll.h) + m.scroll.offset;
       target = distBottom <= 0 ? max : max - distBottom;
     }
     el.scrollTop = Math.max(0, Math.min(max, target));
-    lastAnchoredEl = el;
-    lastAnchoredWin = m.windowId;
-    lastV0 = v0;
-    lastV1 = v1;
+    mirrorAnchor = anchorAt(el, el.scrollTop);
+    pinnedToBottom = (el.scrollTop >= max - BOTTOM_EPS) && liveAtBottom();
   }
 
   // The reasoning-trace list (.chat-used-context-list inside a
@@ -990,6 +1159,21 @@
     if (local) {
       var max = local.scrollHeight - local.clientHeight;
       local.scrollTop = Math.max(0, Math.min(max, local.scrollTop + dy));
+      // The local move is the user's intent: record the entry anchor and the
+      // pinned-to-bottom flag so the next state message maintains THIS
+      // position instead of re-anchoring to live's pixel position (the
+      // re-anchor is what caused the jitter). Only the main scroller has an
+      // anchor — restoreScroll re-anchors that element on every state message;
+      // other scrollers (the reasoning-trace list) are kept by
+      // restoreNestedScrolls, and their rows' data-indexes must not leak
+      // into the main anchor. Pinned requires live to be at ITS bottom too:
+      // the mirror's max may only be the bottom of the rendered window, with
+      // unrendered messages still below in live.
+      var main = (lastScrollPath != null) ? pathEl(lastScrollPath) : null;
+      if (local === main) {
+        mirrorAnchor = anchorAt(local, local.scrollTop);
+        pinnedToBottom = (local.scrollTop >= max - BOTTOM_EPS) && liveAtBottom();
+      }
     }
   }, { passive: false });
   // Touch scrolling: touch swipes do not produce wheel events, so forward the
@@ -1026,6 +1210,13 @@
     if (local) {
       var max = local.scrollHeight - local.clientHeight;
       local.scrollTop = Math.max(0, Math.min(max, local.scrollTop - dy));
+      // Same anchor maintenance as the wheel handler (main scroller only,
+      // and pinned requires live at its bottom, not just the mirror's max).
+      var main = (lastScrollPath != null) ? pathEl(lastScrollPath) : null;
+      if (local === main) {
+        mirrorAnchor = anchorAt(local, local.scrollTop);
+        pinnedToBottom = (local.scrollTop >= max - BOTTOM_EPS) && liveAtBottom();
+      }
     }
   }, { passive: false });
   function endTouch() {

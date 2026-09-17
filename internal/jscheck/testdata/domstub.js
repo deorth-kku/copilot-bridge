@@ -22,6 +22,7 @@ class Text {
     this.data = String(data);
     this.parentElement = null;
   }
+  get parentNode() { return this.parentElement; }
 }
 
 // --- element attributes: array of {name, value} with named shortcuts,
@@ -77,6 +78,7 @@ class El {
   get className() { return attrOf(this, 'class') || ''; }
   get childElementCount() { return this.children.filter(c => c.nodeType === 1).length; }
   get childNodes() { return this.children; }
+  get parentNode() { return this.parentElement; }
   get firstElementChild() { return this.children.find(c => c.nodeType === 1) || null; }
   // HTMLSelectElement.length: assigning 0 clears the options.
   get length() { return this.children.length; }
@@ -102,6 +104,13 @@ class El {
     delete this.attributes[n];
   }
   appendChild(c) { c.parentElement = this; this.children.push(c); return c; }
+  insertBefore(c, ref) {
+    const i = ref === null ? this.children.length : this.children.indexOf(ref);
+    if (i < 0) { c.parentElement = this; this.children.push(c); return c; }
+    c.parentElement = this;
+    this.children.splice(i, 0, c);
+    return c;
+  }
   removeChild(c) {
     const i = this.children.indexOf(c);
     if (i < 0) return null;
