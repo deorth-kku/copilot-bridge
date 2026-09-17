@@ -150,6 +150,67 @@ test('htmlExpr: no popup -> popup null', () => {
   } finally { uninstallGlobals(); }
 });
 
+test('htmlExpr: content fits (room 0) -> the visible scroller is still selected', () => {
+  const root = new El('div', { attrs: { class: 'monaco-workbench' } });
+  const pane = new El('div', {
+    attrs: { class: 'chat-viewpane-container' },
+    rect: { left: 0, top: 0, width: 400, height: 600 },
+    innerText: 'abc',
+  });
+  pane.outerHTML = '<div class="chat-viewpane-container">…</div>';
+  const chatList = new El('div', { attrs: { class: 'monaco-list' } });
+  const chatSc = new El('div', {
+    attrs: { class: 'monaco-scrollable-element' },
+    scrollHeight: 500,
+    clientHeight: 500, // fits exactly: room 0
+    clientWidth: 380,
+  });
+  const rows = new El('div', { attrs: { class: 'monaco-list-rows' }, offsetTop: 0 });
+  rows.appendChild(new El('div', { attrs: { class: 'monaco-list-row' }, offsetTop: 0, offsetHeight: 300 }));
+  rows.appendChild(new El('div', { attrs: { class: 'monaco-list-row' }, offsetTop: 300, offsetHeight: 200 }));
+  chatSc.appendChild(rows);
+  chatList.appendChild(chatSc);
+  pane.appendChild(chatList);
+  // A hidden sibling list (clientHeight 0) must not win the selection.
+  const sessList = new El('div', { attrs: { class: 'monaco-list' } });
+  sessList.appendChild(new El('div', { attrs: { class: 'monaco-scrollable-element' }, scrollHeight: 900, clientHeight: 0 }));
+  pane.appendChild(sessList);
+  root.appendChild(pane);
+  const doc = makeDocument(root);
+  installGlobals(doc, makeWindow(doc));
+  try {
+    const r = htmlExpr(['.chat-viewpane-container']);
+    assert.deepEqual(r.scrollPath, [0, 0], 'the fitting scroller is still reported');
+    assert.equal(r.scroll.scrollH, 500);
+    assert.equal(r.scroll.h, 500);
+    assert.equal(r.scroll.offset, 0);
+    assert.deepEqual(r.scrollRows, [0, 300, 300, 200]);
+  } finally { uninstallGlobals(); }
+});
+
+test('htmlExpr: no scroller and no overflow ancestor -> neutral state (null path, pane geometry)', () => {
+  const root = new El('div');
+  const pane = new El('div', {
+    attrs: { class: 'p' },
+    rect: { left: 0, top: 0, width: 100, height: 400 },
+    scrollHeight: 900,
+    clientHeight: 400,
+    clientWidth: 100,
+    innerText: 'x',
+  });
+  pane.outerHTML = '<div class="p">…</div>';
+  root.appendChild(pane);
+  const doc = makeDocument(root);
+  const win = makeWindow(doc);
+  installGlobals(doc, win);
+  try {
+    const r = htmlExpr(['.p']);
+    assert.equal(r.scrollPath, null, 'no scroller: null path, not the documentElement');
+    assert.deepEqual(r.scroll, { left: 0, top: 0, scrollH: 900, offset: 0, w: 100, h: 400 }, 'neutral pane geometry, not the window geometry');
+    assert.equal(r.scrollRows, null);
+  } finally { uninstallGlobals(); }
+});
+
 test('htmlExpr: ancestor-walk fallback when no monaco-list scroller exists', () => {
   const root = new El('div');
   const pane = new El('div', {

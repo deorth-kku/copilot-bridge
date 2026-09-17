@@ -349,6 +349,154 @@ test('mirror: line-based wheel deltas (deltaMode 1) normalize to 20px/line', asy
   } finally { uninstallGlobals(); }
 });
 
+test('mirror: wheel moves the mirror locally AND forwards when live measured no scroller', async () => {
+  const { pane, ws } = setup();
+  try {
+    // Live content fits (no live scrollbar): the server sends no scrollPath.
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row"></div></div></div></div></div>',
+      scrollPath: null,
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    sc.scrollHeight = 700;
+    sc.clientHeight = 500;
+    sc.scrollTop = 200; // pinned at the bottom (max = 200)
+    const row = pane.querySelector('.monaco-list-row');
+    row.rect = { left: 10, top: 100, width: 780, height: 40 };
+    row.dispatchEvent({ type: 'wheel', target: row, clientX: 100, clientY: 140, deltaX: 0, deltaY: -300, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(sc.scrollTop, 0, 'scrolled up locally, clamped at the top');
+    assert.equal(sent(ws).filter(m => m.kind === 'wheel').length, 3, 'still forwarded in 100px chunks (a no-op in live)');
+    row.dispatchEvent({ type: 'wheel', target: row, clientX: 100, clientY: 140, deltaX: 0, deltaY: 400, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(sc.scrollTop, 200, 'scrolled down locally, clamped at the bottom');
+    assert.equal(sent(ws).filter(m => m.kind === 'wheel').length, 7, 'forwarding continues');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: wheel is forwarded AND moves the mirror locally when live has a scroller', async () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row"></div></div></div></div></div>',
+      scrollPath: [0, 0],
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    sc.scrollHeight = 900;
+    sc.clientHeight = 500; // max = 400
+    sc.scrollTop = 100;
+    const row = pane.querySelector('.monaco-list-row');
+    row.rect = { left: 10, top: 100, width: 780, height: 40 };
+    row.dispatchEvent({ type: 'wheel', target: row, clientX: 100, clientY: 140, deltaX: 0, deltaY: 250, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(sc.scrollTop, 350, 'moved locally by the raw delta (the next sync re-anchors to live)');
+    const wheels = sent(ws).filter(m => m.kind === 'wheel');
+    assert.equal(wheels.length, 2, 'forwarded in 100px chunks');
+    assert.equal(wheels[0].deltaY, 100);
+    await sleep(200);
+    assert.equal(sent(ws).filter(m => m.kind === 'wheel').length, 3, 'remainder flushed on idle');
+    // A wheel past the bottom is clamped locally but still forwarded.
+    row.dispatchEvent({ type: 'wheel', target: row, clientX: 100, clientY: 140, deltaX: 0, deltaY: 500, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(sc.scrollTop, 400, 'clamped at the bottom (max = 400)');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: fitting scroller (room 0) pins the mirror to the bottom; local wheel-up reveals the top', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row"></div><div class="monaco-list-row"></div></div></div></div></div>',
+      scrollPath: [0, 0],
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    const rows = pane.querySelectorAll('.monaco-list-row');
+    sc.scrollHeight = 700;
+    sc.clientHeight = 500;
+    rows[0].offsetHeight = 350;
+    rows[1].offsetHeight = 350;
+    // Live content fits: scrollH == h, offset 0, every row rendered.
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 700, offset: 0, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 200, 'pinned to the bottom (inside 700 - clientH 500)');
+    rows[0].rect = { left: 10, top: 100, width: 780, height: 350 };
+    rows[0].dispatchEvent({ type: 'wheel', target: rows[0], clientX: 100, clientY: 140, deltaX: 0, deltaY: -250, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(sc.scrollTop, 0, 'local wheel-up reveals the top (live cannot scroll)');
+    assert.equal(sent(ws).filter(m => m.kind === 'wheel').length, 2, 'still forwarded (a no-op in live)');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: bottom-anchored list at the top keeps the bottom anchor (no teleport)', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row"></div><div class="monaco-list-row"></div></div></div></div></div>',
+      scrollPath: [0, 0],
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    const rows = pane.querySelectorAll('.monaco-list-row');
+    sc.scrollHeight = 700;
+    sc.clientHeight = 500; // max = 200
+    rows[0].offsetHeight = 350;
+    rows[1].offsetHeight = 350;
+    // Live list overflows (scrollH 1000 > h 700) and sits just below the
+    // top: bottom-anchored, position in the negative offset.
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 200, 'bottom anchor: above 8.75 + (inside 691.25 - 500), clamped to max 200');
+    // Live reaches the very top (offset 0). The anchor must stay bottom:
+    // the target stays 200 — a top anchor would flip it to 0 (a teleport).
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: 0, w: 800, h: 700 },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 200, 'no teleport at the top (a top anchor would give 0)');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: wheel is still forwarded when the mirror list does not overflow', async () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row"></div></div></div></div></div>',
+      scrollPath: null,
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    sc.scrollHeight = 500;
+    sc.clientHeight = 500; // fits in the mirror too: nothing local to scroll
+    const row = pane.querySelector('.monaco-list-row');
+    row.rect = { left: 10, top: 100, width: 780, height: 40 };
+    row.dispatchEvent({ type: 'wheel', target: row, clientX: 100, clientY: 140, deltaX: 0, deltaY: 250, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(sc.scrollTop, 0, 'no local scroll');
+    assert.equal(sent(ws).filter(m => m.kind === 'wheel').length, 2, 'forwarded in 100px chunks');
+    await sleep(200);
+    assert.equal(sent(ws).filter(m => m.kind === 'wheel').length, 3, 'remainder flushed on idle');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: a locally scrollable list shows its drawn scrollbar track', () => {
+  const { pane, ws } = setup();
+  try {
+    // The track arrives with the live .invisible class (opacity 0) because
+    // the live content fits; the mirror must reveal it when it overflows.
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="scrollbar invisible vertical"><div class="slider"></div></div><div class="monaco-list-rows"><div class="monaco-list-row"></div></div></div></div></div>',
+      scrollPath: null,
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    sc.scrollHeight = 700;
+    sc.clientHeight = 500;
+    // A scroll-only state re-runs syncDrawnScrollbars with the real geometry.
+    state(ws, { scroll: { left: 0, top: 0, scrollH: 700, offset: 0, w: 800, h: 500 }, scrollPath: null });
+    const track = pane.querySelector('.scrollbar');
+    assert.equal(track.style.opacity, '1', 'track visible when the mirror overflows');
+    assert.ok(parseFloat(track.querySelector('.slider').style.height) >= 20, 'slider sized from the mirror geometry');
+  } finally { uninstallGlobals(); }
+});
+
 test('mirror: changing the window picker sends a window message', () => {
   const { status, ws } = setup();
   try {

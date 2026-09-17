@@ -237,7 +237,11 @@ const htmlExpr = `(selectors) => {
     themeBg: themeBg,
     inputFocused: inputFocused,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
-    scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
+    // When no real scroller exists (sc is null), report the pane root's own
+    // geometry as a neutral state: the mirror early-returns on the null
+    // scrollPath, so these values are informational only.
+    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight }
+      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight },
     scrollPath: scrollPath,
     scrollRows: scrollRows,
     nestedScrolls: nestedScrolls,
@@ -271,8 +275,12 @@ const scrollContainerJS = `
     // - messages embed nested lists (file-review widgets, collapsed steps)
     //   whose scrollers are hidden (clientHeight 0) but still report large
     //   scrollHeights.
+    // best starts at -1 so a VISIBLE scroller with zero room (the content
+    // fits exactly) is still selected: the mirror needs its path and row
+    // geometry even when live cannot scroll it, otherwise the fallback
+    // below would report the documentElement's state instead.
     const cands = el.querySelectorAll('.monaco-list > .monaco-scrollable-element');
-    let best = 0;
+    let best = -1;
     for (const c of cands) {
       const room = (c.scrollHeight || 0) - (c.clientHeight || 0);
       if (c.clientHeight > 0 && room > best) { best = room; sc = c; }
@@ -285,6 +293,13 @@ const scrollContainerJS = `
       if ((ov === 'auto' || ov === 'scroll') && sc.scrollHeight > sc.clientHeight) break;
       sc = sc.parentElement;
     }
+    // The walk only ends AT documentElement when no real scroller exists
+    // (the content fits everywhere). documentElement is not a usable
+    // scroller: its geometry is the whole window's, and its
+    // .monaco-list-rows query would grab an unrelated list (e.g. the
+    // explorer's), polluting the mirror's offset/rows. Report "no scroller"
+    // instead (sc stays null: neutral scroll state, null path).
+    if (sc === document.documentElement) sc = null;
   }
 ` + scrollPathJS
 
@@ -299,7 +314,7 @@ const scrollPathJS = `
   try {
     if (sc === el) {
       scrollPath = [];
-    } else {
+    } else if (sc) {
       scrollPath = [];
       let n = sc;
       while (n && n !== el) {
@@ -314,18 +329,23 @@ const scrollPathJS = `
   let scrollOffset = 0;
   let scrollRows = null;
   try {
-    const rc = sc.querySelector('.monaco-list-rows');
-    if (rc) {
-      scrollOffset = rc.offsetTop;
-      // Each rendered row's [offsetTop, offsetHeight] in full-content
-      // coordinates. The rows container is full-content-sized and its own
-      // offsetTop encodes the scroll position, so a row's offsetTop within it
-      // is its position in the full conversation (0 = top). The mirror needs
-      // this because its content is only the currently rendered rows (a
-      // sliding window), not the full conversation.
-      if (rc.children.length) {
-        scrollRows = [];
-        for (const r of rc.children) scrollRows.push(r.offsetTop, r.offsetHeight);
+    // sc is null when no real scroller exists (content fits everywhere):
+    // keep the offset/rows neutral instead of querying the whole document
+    // (which would grab an unrelated list's rows, e.g. the explorer's).
+    if (sc) {
+      const rc = sc.querySelector('.monaco-list-rows');
+      if (rc) {
+        scrollOffset = rc.offsetTop;
+        // Each rendered row's [offsetTop, offsetHeight] in full-content
+        // coordinates. The rows container is full-content-sized and its own
+        // offsetTop encodes the scroll position, so a row's offsetTop within
+        // it is its position in the full conversation (0 = top). The mirror
+        // needs this because its content is only the currently rendered
+        // rows (a sliding window), not the full conversation.
+        if (rc.children.length) {
+          scrollRows = [];
+          for (const r of rc.children) scrollRows.push(r.offsetTop, r.offsetHeight);
+        }
       }
     }
   } catch (e) { scrollOffset = 0; }
@@ -426,7 +446,11 @@ const fpExpr = `(selectors) => {
     cssFP: cssFP,
     inputFocused: inputFocused,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
-    scroll: { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight },
+    // When no real scroller exists (sc is null), report the pane root's own
+    // geometry as a neutral state: the mirror early-returns on the null
+    // scrollPath, so these values are informational only.
+    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight }
+      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight },
     scrollPath: scrollPath,
     nestedScrolls: nestedScrolls,
     scrollRows: scrollRows,

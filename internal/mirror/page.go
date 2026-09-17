@@ -667,6 +667,17 @@ const pageHTML = `<!doctype html>
     positionPopup();
   }
 
+  // Resolve a DOM path from the pane root to the element it addresses
+  // (null when the path no longer matches the current DOM, e.g. after a
+  // restructure the mirror has not re-rendered yet).
+  function pathEl(path) {
+    var el = pane.firstElementChild || pane;
+    for (var i = 0; i < path.length; i++) {
+      el = el.children[path[i]];
+      if (!el) return null;
+    }
+    return el;
+  }
   // Restore the live scroll position on the SAME element the server measured,
   // identified by its DOM path from the pane root (m.scrollPath). Path-based
   // resolution is size-independent, which the responsive layout requires:
@@ -681,11 +692,8 @@ const pageHTML = `<!doctype html>
   // viewport with the live viewport inside the rendered row window.
   function restoreScroll(m) {
     if (!m.scroll || !m.scrollPath) return;
-    var el = pane.firstElementChild || pane;
-    for (var i = 0; i < m.scrollPath.length; i++) {
-      el = el.children[m.scrollPath[i]];
-      if (!el) return;
-    }
+    var el = pathEl(m.scrollPath);
+    if (!el) return;
     el.scrollLeft = m.scroll.left;
     var max = el.scrollHeight - el.clientHeight;
     var target = m.scroll.top;
@@ -701,30 +709,21 @@ const pageHTML = `<!doctype html>
       // mirror height (a.inside) can exceed the mirror scroller's own
       // height (the mirror is shorter than live, or its rows are taller),
       // in which case the whole live viewport does not fit and one end
-      // must be cut. Scrolling in the mirror is forwarded to live and the
-      // mirror re-anchors, so the cut end is only reachable if live can
-      // still scroll that direction.
+      // must be cut.
       //
-      // Bottom-anchored lists (chat messages, offset < 0) default to keeping
-      // the BOTTOM of the live viewport on screen (the latest messages) —
-      // scrollTop = above + (inside - clientH); the hidden sliver is the
-      // live viewport's top, reachable by scrolling up.
-      //
-      // Top-anchored lists (session picker, offset >= 0) default to keeping
-      // the TOP on screen (scrollTop = above); the hidden sliver is the
-      // live viewport's bottom, reachable by scrolling down.
-      //
-      // Special cases pin the opposite end when live cannot scroll away
-      // from it: a bottom-anchored list at the very top (v0 ~ 0) anchors
-      // the TOPS, and a top-anchored list at the very bottom (v1 ~ scrollH)
-      // anchors the BOTTOMS — otherwise the cut sliver would be
-      // permanently invisible.
-      var v0 = m.scroll.top - m.scroll.offset;
-      var v1 = v0 + m.scroll.h;
-      var atTop = v0 < 1;
-      var atBottom = v1 >= m.scroll.scrollH - 1;
-      var anchorBottom = m.scroll.offset < 0 ? !atTop : atBottom;
-      target = a.above + (anchorBottom ? Math.max(0, a.inside - el.clientHeight) : 0);
+      // Always keep the BOTTOM of the live viewport on screen
+      // (scrollTop = above + max(0, inside - clientH)); the hidden sliver
+      // is the live viewport's top, reachable by scrolling up. The anchor
+      // must NEVER switch between ends: switching teleports the mirror's
+      // viewport — at the top of a bottom-anchored list (offset 0) the
+      // top-anchor target (above) differs from the bottom-anchor target by
+      // ~h - clientH, so the flip moved the mirror nearly a full screen in
+      // one state message. With a fixed bottom anchor the target moves
+      // continuously as live scrolls, and the cut sliver is always
+      // reachable because a wheel that live cannot absorb (content fits, or
+      // live is pinned at an end) still moves the mirror's own viewport
+      // locally (see the wheel handler).
+      target = a.above + Math.max(0, a.inside - el.clientHeight);
     } else {
       var distBottom = (m.scroll.scrollH - m.scroll.h) + m.scroll.offset;
       target = distBottom <= 0 ? max : max - distBottom;
@@ -814,14 +813,7 @@ const pageHTML = `<!doctype html>
   function syncDrawnScrollbars() {
     var root = pane.firstElementChild;
     if (!root) return;
-    var target = null;
-    if (lastScrollPath && lastScrollPath.length) {
-      target = root;
-      for (var i = 0; i < lastScrollPath.length; i++) {
-        target = target.children[lastScrollPath[i]];
-        if (!target) break;
-      }
-    }
+    var target = lastScrollPath && lastScrollPath.length ? pathEl(lastScrollPath) : null;
     var scrollers = root.querySelectorAll('.monaco-list > .monaco-scrollable-element');
     for (var i = 0; i < scrollers.length; i++) {
       var el = scrollers[i];
@@ -839,6 +831,12 @@ const pageHTML = `<!doctype html>
       } else {
         var max = el.scrollHeight - clientH;
         if (el.scrollHeight <= 0) continue;
+        // Live is not scrolling this scroller (it is not the measured one),
+        // so the track arrived with its live class: when the live content
+        // FITS (no live scrollbar) the track is .invisible (opacity 0) even
+        // though the mirror's copy overflows and scrolls locally. Show it
+        // exactly when the mirror can scroll, hide it otherwise.
+        track.style.opacity = max > 0 ? '1' : '';
         ratio = max > 0 ? Math.max(0, Math.min(1, el.scrollTop / max)) : 1;
         sliderH = clientH * clientH / el.scrollHeight;
       }
@@ -1110,6 +1108,36 @@ const pageHTML = `<!doctype html>
     if (a.timer) clearTimeout(a.timer);
     a.timer = setTimeout(function () { flushWheelAcc(key); }, FLUSH_MS);
   }
+  // The element whose scrollTop the mirror moves locally on a wheel/touch.
+  // Prefer the element the server measured (lastScrollPath): restoreScroll
+  // re-anchors that same element on every state message, so the local
+  // movement and the periodic sync never fight over two different scrollers.
+  // When the server measured no scroller (content fits in live), fall back
+  // to the nearest visible monaco-list scroller that overflows its own box
+  // — the mirror's copy can still overflow even when live's does not (the
+  // mirror viewport is shorter, or wraps text differently). Returns null
+  // when the mirror has no local scroll range: the movement is pure
+  // forwarding.
+  function localScrollEl(target) {
+    if (lastScrollPath != null) {
+      var p = pathEl(lastScrollPath);
+      if (p && p.scrollHeight - p.clientHeight > 0) return p;
+    }
+    var sc = (target && target.closest) ? target.closest('.monaco-scrollable-element') : null;
+    if (!sc || !sc.parentElement) return null;
+    if (String(sc.parentElement.className).indexOf('monaco-list') < 0) return null;
+    if (sc.scrollHeight - sc.clientHeight <= 0) return null;
+    return sc;
+  }
+  // Every wheel/touch is forwarded to live (chunked) AND moves the mirror's
+  // own viewport by the same delta, simultaneously:
+  // - when live can absorb the wheel, the next state message re-anchors the
+  //   mirror to live's new position — the local move is a transient visual
+  //   placeholder until that sync lands;
+  // - when live cannot (the content fits, or live is pinned at an end it
+  //   cannot scroll away from), the local move persists, which is what makes
+  //   the mirror's extra sliver reachable without any top/bottom
+  //   special-casing.
   pane.addEventListener('wheel', function (e) {
     e.preventDefault();
     var c = paneCoords(e);
@@ -1117,6 +1145,11 @@ const pageHTML = `<!doctype html>
     var dx = normDelta(e.deltaX, e.deltaMode, pane.clientHeight);
     var dy = normDelta(e.deltaY, e.deltaMode, pane.clientHeight);
     accumulateWheel(wheelAccKey(e.target), c.x, c.y, p.path, p.relX, p.relY, e.buttons, dx, dy, WHEEL_CHUNK);
+    var local = localScrollEl(e.target);
+    if (local) {
+      var max = local.scrollHeight - local.clientHeight;
+      local.scrollTop = Math.max(0, Math.min(max, local.scrollTop + dy));
+    }
   }, { passive: false });
   // Touch scrolling: touch swipes do not produce wheel events, so forward the
   // finger movement as wheel deltas and let the live page's message history
@@ -1143,9 +1176,16 @@ const pageHTML = `<!doctype html>
     touchState.y = t.clientY;
     touchMoved += Math.abs(dx) + Math.abs(dy);
     if (touchMoved <= 4) return; // ignore micro-jitter
+    // Same forward + local-move design as the wheel handler (signs flipped:
+    // finger up scrolls the page down).
     var c = paneCoords(t);
     var p = wheelPoint(touchState.target, c);
     accumulateWheel(wheelAccKey(touchState.target), c.x, c.y, p.path, p.relX, p.relY, 0, -dx, -dy, TOUCH_CHUNK);
+    var local = localScrollEl(touchState.target);
+    if (local) {
+      var max = local.scrollHeight - local.clientHeight;
+      local.scrollTop = Math.max(0, Math.min(max, local.scrollTop - dy));
+    }
   }, { passive: false });
   function endTouch() {
     touchState = null;
