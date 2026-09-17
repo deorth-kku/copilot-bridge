@@ -390,9 +390,9 @@ func (m *Mirror) handleImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(e.data)
 }
 
-// rewriteImages replaces blob:/vscode-file: image srcs in the extracted pane
-// HTML with /img/<hash> URLs. Each source URL is fetched from the live page
-// once (via CDP) and cached; on fetch failure the original src is left
+// rewriteImages replaces blob:/vscode-file: image srcs in extracted pane or
+// popup HTML with /img/<hash> URLs. Each source URL is fetched from the live
+// page once (via CDP) and cached; on fetch failure the original src is left
 // untouched (the mirror shows a broken image for that one, as before).
 func (m *Mirror) rewriteImages(s *cdp.Session, html string) string {
 	for _, mth := range imgSrcRe.FindAllStringSubmatch(html, -1) {
@@ -880,6 +880,10 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		html, rootStyle, themeVars, themeBg = hs.HTML, hs.RootStyle, hs.ThemeVars, hs.ThemeBg
 		if hs.Popup != nil {
 			newPopup = hs.Popup
+			// Popups can carry images too (e.g. the attached-image hover
+			// preview renders its full-size blob img inside the hover's
+			// .context-view); rewrite them just like the pane's.
+			newPopup.HTML = m.rewriteImages(s, newPopup.HTML)
 		}
 		html = m.rewriteImages(s, html)
 		htmlMs = time.Since(exStart).Milliseconds()
