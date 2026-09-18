@@ -176,6 +176,13 @@ type Mirror struct {
 	// immediately instead of waiting for the next fallback tick. Buffered
 	// by 1: one pending signal coalesces.
 	refreshNow chan struct{}
+
+	// toggleTimes records the last auto Toggle-Chat click per window, so a
+	// missing pane does not re-click the button on every refresh (the pane
+	// takes a moment to render after a click, and a window without the
+	// button must not be re-probed constantly). Only the publish-loop
+	// goroutine touches it.
+	toggleTimes map[string]time.Time
 }
 
 // snapState is one extracted pane snapshot.
@@ -313,10 +320,11 @@ func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string,
 		addr:       addr,
 		selectors:  selectors,
 		window:     window,
-		fallback:   1 * time.Second,
-		snaps:      make(map[string]*snapState),
-		hub:        newWakeHub(),
-		refreshNow: make(chan struct{}, 1),
+		fallback:    1 * time.Second,
+		snaps:       make(map[string]*snapState),
+		hub:         newWakeHub(),
+		refreshNow:  make(chan struct{}, 1),
+		toggleTimes: make(map[string]time.Time),
 		upgrader: websocket.Upgrader{
 			// Local-only tool; accept any origin (127.0.0.1 / localhost).
 			CheckOrigin: func(*http.Request) bool { return true },
@@ -765,8 +773,8 @@ func (m *Mirror) pickSessionFor(c *client, wins []cdp.Window) (*cdp.Session, str
 func (m *Mirror) refreshAll() {
 	wins := m.disc.Windows()
 	groups := m.groupClients(wins)
-	// Drop snapshots of windows that closed since the last cycle so the
-	// map cannot grow unbounded.
+	// Drop snapshots (and auto-open bookkeeping) of windows that closed
+	// since the last cycle so the maps cannot grow unbounded.
 	if len(wins) > 0 {
 		m.snapMu.Lock()
 		for id := range m.snaps {
@@ -775,6 +783,11 @@ func (m *Mirror) refreshAll() {
 			}
 		}
 		m.snapMu.Unlock()
+		for id := range m.toggleTimes {
+			if !windowIn(wins, id) {
+				delete(m.toggleTimes, id)
+			}
+		}
 	}
 	for winID, group := range groups {
 		m.refreshWindow(winID, wins, group)
@@ -803,6 +816,11 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		return
 	}
 	if fpst.Err != "" {
+		// A missing pane is usually a closed chat view: click the window's
+		// title-bar "Toggle Chat" button to re-open it (throttled).
+		if fpst.Err == "pane not found" {
+			m.autoOpenChat(s, winID)
+		}
 		m.sendErrToGroup(group, fpst.Err)
 		return
 	}
@@ -1055,10 +1073,44 @@ func windowIn(wins []cdp.Window, id string) bool {
 }
 
 // sendErrToGroup sends an error state message to one group of clients.
+// The live window set travels with the error so the browser's picker
+// stays populated: a missing pane in the selected window must not hide
+// the other windows from the picker.
 func (m *Mirror) sendErrToGroup(group []*client, err string) {
+	wins := m.disc.Windows()
 	for _, c := range group {
-		c.sendTo(stateMsg{Type: "state", Err: err})
+		c.sendTo(stateMsg{Type: "state", Err: err, Windows: wins})
 	}
+}
+
+// chatToggleCooldown bounds how often the mirror clicks the title-bar
+// "Toggle Chat" button to re-open a missing chat pane. After a click the
+// pane takes a moment to render, and windows without the button (or with a
+// hidden title bar) must not be re-probed on every refresh.
+const chatToggleCooldown = 5 * time.Second
+
+// autoOpenChat re-opens a missing chat pane by clicking the window's
+// title-bar "Toggle Chat" button (a real CDP input event at the button's
+// center, like forwarded mirror clicks). Throttled per window.
+func (m *Mirror) autoOpenChat(s *cdp.Session, winID string) {
+	now := time.Now()
+	if since := now.Sub(m.toggleTimes[winID]); since < chatToggleCooldown {
+		return
+	}
+	x, y, ok := cdp.ToggleChatPoint(s)
+	if !ok {
+		m.toggleTimes[winID] = now
+		m.log.Debug("auto-open: Toggle Chat button not found", "window", winID)
+		return
+	}
+	m.toggleTimes[winID] = now
+	m.log.Info("auto-open: clicking Toggle Chat", "window", winID, "x", x, "y", y)
+	s.Send("Input.dispatchMouseEvent", map[string]any{
+		"type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1,
+	})
+	s.Send("Input.dispatchMouseEvent", map[string]any{
+		"type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1,
+	})
 }
 
 // handleInput dispatches one browser input frame to the live page the

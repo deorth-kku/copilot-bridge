@@ -27,6 +27,7 @@ func TestInjectedJSCompiles(t *testing.T) {
 		{"cssExpr", cssExpr},
 		{"clickPointExpr", clickPointExpr},
 		{"rectExpr", rectExpr},
+		{"toggleChatExpr", toggleChatExpr},
 		{"healthExpr", healthExpr},
 		// image.go
 		{"imageFetchExpr", imageFetchExpr},

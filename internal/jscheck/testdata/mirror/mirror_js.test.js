@@ -128,6 +128,41 @@ test('mirror: error state is surfaced in the picker', () => {
   } finally { uninstallGlobals(); }
 });
 
+test('mirror: error state WITH windows keeps the picker populated', () => {
+  const { status, ws } = setup();
+  try {
+    state(ws, {
+      err: 'pane not found',
+      windows: [
+        { id: 'win-1', title: 'A' },
+        { id: 'win-2', title: 'B' },
+      ],
+    });
+    // The error is the selected placeholder; the window options remain.
+    assert.equal(status.children.length, 3);
+    assert.equal(status.children[0].textContent, '! pane not found');
+    assert.equal(status.children[0].value, '');
+    assert.equal(status.children[1].value, 'win-1');
+    assert.equal(status.children[2].value, 'win-2');
+    assert.equal(status.value, '');
+    // A repeated identical error state does not rebuild the options.
+    const first = status.children[1];
+    state(ws, {
+      err: 'pane not found',
+      windows: [
+        { id: 'win-1', title: 'A' },
+        { id: 'win-2', title: 'B' },
+      ],
+    });
+    assert.equal(status.children[1], first, 'options not rebuilt');
+    // A recovered state drops the placeholder and re-selects the window.
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-2' });
+    assert.equal(status.children.length, 2);
+    assert.equal(status.children[0].textContent, 'A');
+    assert.equal(status.value, 'win-2');
+  } finally { uninstallGlobals(); }
+});
+
 test('mirror: CSS is applied only when cssVersion changes', () => {
   const { cssEl, ws } = setup();
   try {

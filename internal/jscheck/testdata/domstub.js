@@ -281,7 +281,29 @@ function matchesSimple(el, s) {
 }
 
 function parseSel(sel) {
-  const tokens = sel.trim().split(/\s*>\s*|\s+/).filter(t => t !== '');
+  // Tokenize on whitespace / '>' OUTSIDE [attr="..."] brackets: attribute
+  // values may contain spaces (e.g. [aria-label="Toggle Chat"]).
+  const tokens = [];
+  let cur = '';
+  let depth = 0;
+  for (const ch of sel.trim()) {
+    if (ch === '[') depth++;
+    else if (ch === ']') depth--;
+    if (depth > 0) { cur += ch; continue; }
+    if (ch === '>') {
+      if (cur.trim()) tokens.push(cur.trim());
+      cur = '';
+      tokens.push('>');
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (cur.trim()) tokens.push(cur.trim());
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) tokens.push(cur.trim());
   const parts = [];
   for (let i = 0; i < tokens.length; i++) {
     if (tokens[i] === ':scope') parts.push({ comb: '@', simple: null });

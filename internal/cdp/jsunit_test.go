@@ -19,6 +19,7 @@ var jsUnitModules = map[string]string{
 	"css_expr":     cssExpr,
 	"click_point":  clickPointExpr,
 	"rect":         rectExpr,
+	"toggle_chat":  toggleChatExpr,
 	"image_fetch":  imageFetchExpr,
 	"image_canvas": imageCanvasExpr,
 }
@@ -36,6 +37,7 @@ var jsUnitTestFiles = []string{
 	"cdp/fp_expr.test.js",
 	"cdp/css_expr.test.js",
 	"cdp/click_rect.test.js",
+	"cdp/toggle.test.js",
 	"cdp/image.test.js",
 }
 

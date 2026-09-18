@@ -295,13 +295,18 @@ const pageHTML = `<!doctype html>
     lastWinVer = '';
   }
 
-  // Rebuild the picker options only when the window set changes — state
-  // messages arrive on every poll while content streams, and rebuilding on
-  // each one would close an open dropdown mid-selection. Otherwise just keep
-  // the selection following the server's current window.
+  // Rebuild the picker options only when the window set (or the error
+  // text) changes — state messages arrive on every poll while content
+  // streams, and rebuilding on each one would close an open dropdown
+  // mid-selection. Otherwise just keep the selection following the
+  // server's current window. An error state (e.g. "pane not found")
+  // renders as a selected placeholder option ABOVE the window list, so
+  // the error stays visible while the user can still switch to a window
+  // whose pane exists.
   function syncWindows(m) {
     var wins = m.windows || [];
-    var ver = '';
+    var err = m.err || '';
+    var ver = err + '|';
     for (var i = 0; i < wins.length; i++) ver += wins[i].id + ':' + wins[i].title + ';';
     if (ver === lastWinVer) {
       if (m.windowId) status.value = m.windowId;
@@ -311,6 +316,12 @@ const pageHTML = `<!doctype html>
     var dup = {};
     for (var i = 0; i < wins.length; i++) dup[wins[i].title] = (dup[wins[i].title] || 0) + 1;
     status.length = 0;
+    if (err) {
+      var pe = document.createElement('option');
+      pe.value = '';
+      pe.textContent = '! ' + err;
+      status.appendChild(pe);
+    }
     for (var i = 0; i < wins.length; i++) {
       var o = document.createElement('option');
       o.value = wins[i].id;
@@ -318,7 +329,8 @@ const pageHTML = `<!doctype html>
       o.textContent = wins[i].title + (dup[wins[i].title] > 1 ? ' (' + String(wins[i].id).slice(-6) + ')' : '');
       status.appendChild(o);
     }
-    if (m.windowId) status.value = m.windowId;
+    if (err) status.value = '';
+    else if (m.windowId) status.value = m.windowId;
   }
 
   function connect() {
@@ -335,7 +347,14 @@ const pageHTML = `<!doctype html>
       // the buffered (uncommitted) text. Defer updates until the composition
       // ends; the next state message will catch up.
       if (composing) return;
-      if (m.err) { setStatus('! ' + m.err); return; }
+      if (m.err) {
+        // An error state still carries the live window set: keep the
+        // picker in sync (error as the selected placeholder) so a missing
+        // pane in one window does not hide the other windows.
+        if (m.windows && m.windows.length) syncWindows(m);
+        else setStatus('! ' + m.err);
+        return;
+      }
       if (m.scroll) lastScroll = m.scroll;
       lastScrollPath = m.scrollPath || null;
       lastNestedScrolls = m.nestedScrolls || null;
