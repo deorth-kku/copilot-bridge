@@ -23,6 +23,9 @@ function buildPane({ popup = false } = {}) {
   });
   pane.outerHTML = '<div class="chat-viewpane-container">…</div>';
 
+  // The chat message list sits inside .interactive-list (bottom-anchored in
+  // live); the sessions list below is a plain monaco-list (top-anchored).
+  const chatWrap = new El('div', { attrs: { class: 'interactive-list' } });
   const chatList = new El('div', { attrs: { class: 'monaco-list' } });
   const chatSc = new El('div', {
     attrs: { class: 'monaco-scrollable-element' },
@@ -37,7 +40,8 @@ function buildPane({ popup = false } = {}) {
   rows.appendChild(new El('div', { attrs: { class: 'monaco-list-row' }, offsetTop: 80, offsetHeight: 60 }));
   chatSc.appendChild(rows);
   chatList.appendChild(chatSc);
-  pane.appendChild(chatList);
+  chatWrap.appendChild(chatList);
+  pane.appendChild(chatWrap);
 
   const sessList = new El('div', { attrs: { class: 'monaco-list' } });
   sessList.appendChild(new El('div', { attrs: { class: 'monaco-scrollable-element' }, scrollHeight: 500, clientHeight: 500 }));
@@ -107,6 +111,7 @@ test('htmlExpr: active scroller = direct-child monaco scroller with most room', 
     assert.equal(r.scroll.w, 380);
     assert.equal(r.scroll.h, 500);
     assert.equal(r.scroll.offset, -1500); // .monaco-list-rows offsetTop
+    assert.equal(r.scroll.anchorKind, 'bottom'); // chat list is .interactive-list
     assert.deepEqual(r.scrollRows, [0, 80, 80, 60]);
   } finally { uninstallGlobals(); }
 });
@@ -114,8 +119,8 @@ test('htmlExpr: active scroller = direct-child monaco scroller with most room', 
 test('htmlExpr: scrollPath is the child-index path from the pane root', () => {
   buildPane();
   try {
-    // pane > chatList(child 0) > chatSc(child 0)
-    assert.deepEqual(htmlExpr(['.chat-viewpane-container']).scrollPath, [0, 0]);
+    // pane > interactiveList(child 0) > chatList(child 0) > chatSc(child 0)
+    assert.deepEqual(htmlExpr(['.chat-viewpane-container']).scrollPath, [0, 0, 0]);
   } finally { uninstallGlobals(); }
 });
 
@@ -158,6 +163,7 @@ test('htmlExpr: content fits (room 0) -> the visible scroller is still selected'
     innerText: 'abc',
   });
   pane.outerHTML = '<div class="chat-viewpane-container">…</div>';
+  const chatWrap = new El('div', { attrs: { class: 'interactive-list' } });
   const chatList = new El('div', { attrs: { class: 'monaco-list' } });
   const chatSc = new El('div', {
     attrs: { class: 'monaco-scrollable-element' },
@@ -170,7 +176,8 @@ test('htmlExpr: content fits (room 0) -> the visible scroller is still selected'
   rows.appendChild(new El('div', { attrs: { class: 'monaco-list-row' }, offsetTop: 300, offsetHeight: 200 }));
   chatSc.appendChild(rows);
   chatList.appendChild(chatSc);
-  pane.appendChild(chatList);
+  chatWrap.appendChild(chatList);
+  pane.appendChild(chatWrap);
   // A hidden sibling list (clientHeight 0) must not win the selection.
   const sessList = new El('div', { attrs: { class: 'monaco-list' } });
   sessList.appendChild(new El('div', { attrs: { class: 'monaco-scrollable-element' }, scrollHeight: 900, clientHeight: 0 }));
@@ -180,7 +187,7 @@ test('htmlExpr: content fits (room 0) -> the visible scroller is still selected'
   installGlobals(doc, makeWindow(doc));
   try {
     const r = htmlExpr(['.chat-viewpane-container']);
-    assert.deepEqual(r.scrollPath, [0, 0], 'the fitting scroller is still reported');
+    assert.deepEqual(r.scrollPath, [0, 0, 0], 'the fitting scroller is still reported');
     assert.equal(r.scroll.scrollH, 500);
     assert.equal(r.scroll.h, 500);
     assert.equal(r.scroll.offset, 0);
@@ -206,7 +213,7 @@ test('htmlExpr: no scroller and no overflow ancestor -> neutral state (null path
   try {
     const r = htmlExpr(['.p']);
     assert.equal(r.scrollPath, null, 'no scroller: null path, not the documentElement');
-    assert.deepEqual(r.scroll, { left: 0, top: 0, scrollH: 900, offset: 0, w: 100, h: 400 }, 'neutral pane geometry, not the window geometry');
+    assert.deepEqual(r.scroll, { left: 0, top: 0, scrollH: 900, offset: 0, w: 100, h: 400, anchorKind: 'top' }, 'neutral pane geometry, not the window geometry');
     assert.equal(r.scrollRows, null);
   } finally { uninstallGlobals(); }
 });
@@ -238,7 +245,7 @@ test('htmlExpr: ancestor-walk fallback when no monaco-list scroller exists', () 
 test('htmlExpr: nestedScrolls captures the reasoning-trace list scroll state', () => {
   const { root } = buildPane();
   const pane = root.querySelector('.chat-viewpane-container');
-  const row = pane.children[0].children[0].children[0].children[0]; // rows > row
+  const row = pane.children[0].children[0].children[0].children[0].children[0]; // rows > row
   const box = new El('div', { attrs: { class: 'chat-used-context chat-thinking-box' } });
   const list = new El('div', {
     attrs: { class: 'chat-used-context-list chat-thinking-streaming' },
@@ -250,10 +257,54 @@ test('htmlExpr: nestedScrolls captures the reasoning-trace list scroll state', (
   row.appendChild(box);
   try {
     const r = htmlExpr(['.chat-viewpane-container']);
-    // pane > chatList(0) > chatSc(0) > rows(0) > row(0) > box(0) > list(0)
+    // pane > interactiveList(0) > chatList(0) > chatSc(0) > rows(0) > row(0) > box(0) > list(0)
     assert.deepEqual(r.nestedScrolls, [
-      { path: [0, 0, 0, 0, 0, 0], top: 500, scrollH: 800, clientH: 200 },
+      { path: [0, 0, 0, 0, 0, 0, 0], top: 500, scrollH: 800, clientH: 200 },
     ]);
+  } finally { uninstallGlobals(); }
+});
+
+test('htmlExpr: anchorKind is "top" when the active scroller is the sessions list', () => {
+  // The sessions view is expanded (its scroller has the most room) and the
+  // chat list is collapsed: the active scroller is the plain
+  // .agent-sessions-viewer monaco-list — NOT inside .interactive-list.
+  const root = new El('div');
+  const pane = new El('div', {
+    attrs: { class: 'chat-viewpane-container' },
+    rect: { left: 0, top: 0, width: 400, height: 600 },
+    innerText: 'abc',
+  });
+  pane.outerHTML = '<div class="chat-viewpane-container">…</div>';
+  const chatWrap = new El('div', { attrs: { class: 'interactive-list' } });
+  const chatList = new El('div', { attrs: { class: 'monaco-list' } });
+  chatList.appendChild(new El('div', { attrs: { class: 'monaco-scrollable-element' }, scrollHeight: 500, clientHeight: 500 }));
+  chatWrap.appendChild(chatList);
+  pane.appendChild(chatWrap);
+  const sessWrap = new El('div', { attrs: { class: 'agent-sessions-viewer' } });
+  const sessList = new El('div', { attrs: { class: 'monaco-list' } });
+  const sessSc = new El('div', {
+    attrs: { class: 'monaco-scrollable-element' },
+    scrollHeight: 2000,
+    clientHeight: 500,
+    clientWidth: 380,
+    scrollTop: 0,
+    scrollLeft: 0,
+  });
+  const rows = new El('div', { attrs: { class: 'monaco-list-rows' }, offsetTop: 0 });
+  rows.appendChild(new El('div', { attrs: { class: 'monaco-list-row' }, offsetTop: 0, offsetHeight: 80 }));
+  sessSc.appendChild(rows);
+  sessList.appendChild(sessSc);
+  sessWrap.appendChild(sessList);
+  pane.appendChild(sessWrap);
+  root.appendChild(pane);
+  const doc = makeDocument(root);
+  installGlobals(doc, makeWindow(doc));
+  try {
+    const r = htmlExpr(['.chat-viewpane-container']);
+    assert.equal(r.scroll.scrollH, 2000, 'the expanded sessions scroller is active');
+    assert.equal(r.scroll.top, 0, 'top-anchored: position in scrollTop');
+    assert.equal(r.scroll.offset, 0, 'top-anchored: rows offsetTop stays 0');
+    assert.equal(r.scroll.anchorKind, 'top');
   } finally { uninstallGlobals(); }
 });
 

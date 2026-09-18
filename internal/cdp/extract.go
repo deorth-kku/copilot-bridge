@@ -30,6 +30,16 @@ type PaneScroll struct {
 	// mirror needs it to map the live scroll state onto its own (static,
 	// top-anchored) layout.
 	Offset float64 `json:"offset"`
+	// AnchorKind reports how the live list encodes its scroll position:
+	// "bottom" for bottom-anchored monaco-lists (the chat message list,
+	// .interactive-list — scrollTop stays 0, position in the rows' negative
+	// offsetTop) and "top" for ordinary top-anchored lists (the
+	// agent-sessions picker — position in scrollTop, offsetTop stays 0).
+	// The mirror uses it to choose which end of the live viewport to keep
+	// when the live viewport's mirror height exceeds the mirror scroller's
+	// own height. The end is a STATIC property of the list: switching ends
+	// between state messages would teleport the mirror's viewport.
+	AnchorKind string `json:"anchorKind,omitempty"`
 }
 
 // NestedScroll is the scroll state of a nested scroll container inside the
@@ -240,8 +250,8 @@ const htmlExpr = `(selectors) => {
     // When no real scroller exists (sc is null), report the pane root's own
     // geometry as a neutral state: the mirror early-returns on the null
     // scrollPath, so these values are informational only.
-    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight }
-      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight },
+    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight, anchorKind: anchorKind }
+      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight, anchorKind: anchorKind },
     scrollPath: scrollPath,
     scrollRows: scrollRows,
     nestedScrolls: nestedScrolls,
@@ -301,6 +311,18 @@ const scrollContainerJS = `
     // instead (sc stays null: neutral scroll state, null path).
     if (sc === document.documentElement) sc = null;
   }
+  // anchorKind: how the live list encodes its scroll position. The chat
+  // message list (.interactive-list) is bottom-anchored (scrollTop stays 0,
+  // position in the rows' negative offsetTop); the agent-sessions picker is
+  // a plain top-anchored monaco-list (position in scrollTop). The mirror
+  // uses it to choose which end of the live viewport to keep when its own
+  // content is shorter than the live viewport — a static property of the
+  // list, so the end never flips between state messages (a flip would
+  // teleport the viewport).
+  let anchorKind = 'top';
+  try {
+    if (sc && sc.closest('.interactive-list')) anchorKind = 'bottom';
+  } catch (e) {}
 ` + scrollPathJS
 
 // scrollPathJS is spliced right after scrollContainerJS (same inlining
@@ -449,8 +471,8 @@ const fpExpr = `(selectors) => {
     // When no real scroller exists (sc is null), report the pane root's own
     // geometry as a neutral state: the mirror early-returns on the null
     // scrollPath, so these values are informational only.
-    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight }
-      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight },
+    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight, anchorKind: anchorKind }
+      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight, anchorKind: anchorKind },
     scrollPath: scrollPath,
     nestedScrolls: nestedScrolls,
     scrollRows: scrollRows,

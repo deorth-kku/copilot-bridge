@@ -47,6 +47,18 @@ module.exports = (selectors) => {
     // instead (sc stays null: neutral scroll state, null path).
     if (sc === document.documentElement) sc = null;
   }
+  // anchorKind: how the live list encodes its scroll position. The chat
+  // message list (.interactive-list) is bottom-anchored (scrollTop stays 0,
+  // position in the rows' negative offsetTop); the agent-sessions picker is
+  // a plain top-anchored monaco-list (position in scrollTop). The mirror
+  // uses it to choose which end of the live viewport to keep when its own
+  // content is shorter than the live viewport — a static property of the
+  // list, so the end never flips between state messages (a flip would
+  // teleport the viewport).
+  let anchorKind = 'top';
+  try {
+    if (sc && sc.closest('.interactive-list')) anchorKind = 'bottom';
+  } catch (e) {}
 
   let scrollPath = null;
   try {
@@ -204,8 +216,8 @@ module.exports = (selectors) => {
     // When no real scroller exists (sc is null), report the pane root's own
     // geometry as a neutral state: the mirror early-returns on the null
     // scrollPath, so these values are informational only.
-    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight }
-      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight },
+    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight, anchorKind: anchorKind }
+      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight, anchorKind: anchorKind },
     scrollPath: scrollPath,
     scrollRows: scrollRows,
     nestedScrolls: nestedScrolls,

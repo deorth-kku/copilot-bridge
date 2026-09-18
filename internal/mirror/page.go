@@ -879,8 +879,10 @@ const pageHTML = `<!doctype html>
   //     what removes the jitter — the viewport is never re-anchored to a live
   //     pixel position while the user is reading;
   //   - otherwise (first state, window switch, scroller node replaced, or the
-  //     anchor row left the rendered window): re-anchor to live's viewport
-  //     (bottom-anchored, as before) and derive a fresh anchor.
+  //     anchor row left the rendered window): re-anchor to live's viewport,
+  //     keeping the end of the live viewport the list's anchoring dictates
+  //     (bottom for the chat list, top for the session picker), and derive
+  //     a fresh anchor.
   function restoreScroll(m) {
     if (!m.scroll || !m.scrollPath) return;
     lastLiveScroll = m.scroll;
@@ -916,24 +918,26 @@ const pageHTML = `<!doctype html>
       // through and re-anchor to live.
       mirrorAnchor = null;
     }
-    // No valid anchor: re-anchor to live's viewport (bottom-anchored).
+    // No valid anchor: re-anchor to live's viewport. The mirror's content is
+    // only the live list's currently rendered rows (a sliding window), not
+    // the full conversation, so align the mirror's viewport with the live
+    // viewport inside the rendered window. a.above / a.inside are the mirror
+    // pixels of the rendered content above / inside the live viewport. The
+    // live viewport's mirror height (a.inside) can exceed the mirror
+    // scroller's own height (the mirror is shorter than live, or its rows
+    // are taller), in which case one end of the live viewport must be cut.
+    // WHICH end is a static property of the live list (m.scroll.anchorKind),
+    // so it never flips between state messages (a flip would teleport the
+    // viewport): bottom-anchored lists (the chat list) keep the BOTTOM of
+    // the live viewport — the hidden sliver is its top, reachable by
+    // scrolling up; top-anchored lists (the agent-sessions picker) keep the
+    // TOP, so returning to the list at its top shows the first row.
+    var keepTop = m.scroll.anchorKind === 'top';
     var target = m.scroll.top;
     var a = alignToLiveViewport(el, m.scroll, m.scrollRows);
     if (a != null) {
-      // The mirror's content is only the live list's currently rendered
-      // rows (a sliding window), not the full conversation, so align the
-      // mirror's viewport with the live viewport inside the rendered
-      // window. a.above / a.inside are the mirror pixels of the rendered
-      // content above / inside the live viewport. The live viewport's
-      // mirror height (a.inside) can exceed the mirror scroller's own height
-      // (the mirror is shorter than live, or its rows are taller), in which
-      // case one end must be cut. Always keep the BOTTOM of the live
-      // viewport on screen (scrollTop = above + max(0, inside - clientH));
-      // the hidden sliver is the live viewport's top, reachable by scrolling
-      // up. The anchor must NEVER switch between ends: switching teleports
-      // the mirror's viewport.
-      target = a.above + Math.max(0, a.inside - el.clientHeight);
-    } else {
+      target = keepTop ? a.above : a.above + Math.max(0, a.inside - el.clientHeight);
+    } else if (!keepTop) {
       var distBottom = (m.scroll.scrollH - m.scroll.h) + m.scroll.offset;
       target = distBottom <= 0 ? max : max - distBottom;
     }

@@ -14,6 +14,9 @@ function buildPane({ popup = false } = {}) {
     rect: { left: 10, top: 20, width: 400, height: 600 },
     innerText: 'abc',
   });
+  // The chat message list sits inside .interactive-list (bottom-anchored in
+  // live).
+  const chatWrap = new El('div', { attrs: { class: 'interactive-list' } });
   const chatList = new El('div', { attrs: { class: 'monaco-list' } });
   const chatSc = new El('div', {
     attrs: { class: 'monaco-scrollable-element' },
@@ -22,7 +25,8 @@ function buildPane({ popup = false } = {}) {
     clientWidth: 380,
   });
   chatList.appendChild(chatSc);
-  pane.appendChild(chatList);
+  chatWrap.appendChild(chatList);
+  pane.appendChild(chatWrap);
   pane.appendChild(new El('a', { attrs: { class: 'model-picker-name' }, text: 'Qwen' }));
   root.appendChild(pane);
   if (popup) {
@@ -56,7 +60,8 @@ test('fpExpr: fingerprint composition (content, children, model, theme)', () => 
     assert.equal(r.cssFP, '0:' + 'color: white'.length + ':' + 'background: black'.length);
     assert.deepEqual(r.rect, { left: 10, top: 20, width: 400, height: 600 });
     assert.equal(r.scroll.scrollH, 2000);
-    assert.deepEqual(r.scrollPath, [0, 0]);
+    assert.equal(r.scroll.anchorKind, 'bottom'); // chat list is .interactive-list
+    assert.deepEqual(r.scrollPath, [0, 0, 0]);
   } finally { uninstallGlobals(); }
 });
 
@@ -95,7 +100,7 @@ test('fpExpr: missing model picker contributes empty model to fp', () => {
 test('fpExpr: nestedScrolls captures the reasoning-trace list scroll state', () => {
   const { root } = buildPane();
   const pane = root.querySelector('.chat-viewpane-container');
-  const chatSc = pane.children[0].children[0];
+  const chatSc = pane.children[0].children[0].children[0];
   const rows = new El('div', { attrs: { class: 'monaco-list-rows' } });
   const row = new El('div', { attrs: { class: 'monaco-list-row' } });
   rows.appendChild(row);
@@ -111,9 +116,9 @@ test('fpExpr: nestedScrolls captures the reasoning-trace list scroll state', () 
   row.appendChild(box);
   try {
     const r = fpExpr(['.chat-viewpane-container']);
-    // pane > chatList(0) > chatSc(0) > rows(0) > row(0) > box(0) > list(0)
+    // pane > interactiveList(0) > chatList(0) > chatSc(0) > rows(0) > row(0) > box(0) > list(0)
     assert.deepEqual(r.nestedScrolls, [
-      { path: [0, 0, 0, 0, 0, 0], top: 400, scrollH: 600, clientH: 200 },
+      { path: [0, 0, 0, 0, 0, 0, 0], top: 400, scrollH: 600, clientH: 200 },
     ]);
   } finally { uninstallGlobals(); }
 });

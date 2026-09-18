@@ -413,7 +413,7 @@ test('mirror: fitting scroller (room 0) pins the mirror to the bottom; local whe
     rows[1].offsetHeight = 350;
     // Live content fits: scrollH == h, offset 0, every row rendered.
     state(ws, {
-      scroll: { left: 0, top: 0, scrollH: 700, offset: 0, w: 800, h: 700 },
+      scroll: { left: 0, top: 0, scrollH: 700, offset: 0, w: 800, h: 700, anchorKind: 'bottom' },
       scrollPath: [0, 0],
       scrollRows: [0, 400, 400, 300],
     });
@@ -441,7 +441,7 @@ test('mirror: bottom-anchored list at the top keeps the bottom anchor (no telepo
     // Live list overflows (scrollH 1000 > h 700) and sits just below the
     // top: bottom-anchored, position in the negative offset.
     state(ws, {
-      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700 },
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700, anchorKind: 'bottom' },
       scrollPath: [0, 0],
       scrollRows: [0, 400, 400, 300],
     });
@@ -449,11 +449,53 @@ test('mirror: bottom-anchored list at the top keeps the bottom anchor (no telepo
     // Live reaches the very top (offset 0). The anchor must stay bottom:
     // the target stays 200 — a top anchor would flip it to 0 (a teleport).
     state(ws, {
-      scroll: { left: 0, top: 0, scrollH: 1000, offset: 0, w: 800, h: 700 },
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: 0, w: 800, h: 700, anchorKind: 'bottom' },
       scrollPath: [0, 0],
       scrollRows: [0, 400, 400, 300],
     });
     assert.equal(sc.scrollTop, 200, 'no teleport at the top (a top anchor would give 0)');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: top-anchored list (session picker) keeps the TOP of the live viewport', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row"></div><div class="monaco-list-row"></div></div></div></div></div>',
+      scrollPath: [0, 0],
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    const rows = pane.querySelectorAll('.monaco-list-row');
+    sc.scrollHeight = 700;
+    sc.clientHeight = 500; // max = 200
+    rows[0].offsetHeight = 350;
+    rows[1].offsetHeight = 350;
+    // Live session list at its very top: top-anchored, position in
+    // scrollTop (0), offset 0. The mirror renders the live viewport's
+    // content TALLER than its own viewport (inside 700 > clientH 500):
+    // the TOP of the live viewport must stay on screen (scrollTop 0) —
+    // the bottom anchor would cut the first row.
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: 0, w: 800, h: 700, anchorKind: 'top' },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 0, 'top anchor: above 0 (live at the top)');
+    // Live scrolls down 100 and the rendered window shifts (row 0 leaves),
+    // so the entry anchor is stale and the viewport re-anchors to live.
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element"><div class="monaco-list-rows"><div class="monaco-list-row" data-index="1"></div><div class="monaco-list-row" data-index="2"></div></div></div></div></div>',
+    });
+    const rowsNow = pane.querySelectorAll('.monaco-list-row');
+    rowsNow[1].offsetHeight = 350; // the entering row's mirror geometry
+    // Keep the TOP of the live viewport (v0 = 100, v1 = 800 -> above 87.5);
+    // the bottom anchor would give 87.5 + (612.5 - 500) = 200 instead.
+    state(ws, {
+      scroll: { left: 0, top: 100, scrollH: 1000, offset: 0, w: 800, h: 700, anchorKind: 'top' },
+      scrollPath: [0, 0],
+      scrollRows: [0, 400, 400, 300],
+    });
+    assert.equal(sc.scrollTop, 87.5, 'top anchor: above 87.5 (live viewport top on screen)');
   } finally { uninstallGlobals(); }
 });
 
@@ -475,7 +517,7 @@ test('mirror: html updates keep the viewport anchored to the message entry the u
     rows[1].offsetHeight = 350;
     // Anchor with the live viewport stationary (v0 = 10, v1 = 710).
     state(ws, {
-      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700 },
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700, anchorKind: 'bottom' },
       scrollPath: [0, 0],
       scrollRows: [0, 400, 400, 300],
     });
@@ -529,7 +571,7 @@ test('mirror: pinned to the bottom, the viewport follows the stream across html 
     // Live is AT its bottom: distBottom = (scrollH - h) + offset = 0
     // (bottom-anchored, viewport [300, 1000] of a 1000px list).
     state(ws, {
-      scroll: { left: 0, top: 0, scrollH: 1000, offset: -300, w: 800, h: 700 },
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -300, w: 800, h: 700, anchorKind: 'bottom' },
       scrollPath: [0, 0],
       scrollRows: [300, 350, 650, 350],
     });
@@ -571,7 +613,7 @@ test('mirror: at the bottom of the rendered window but NOT live bottom, a new me
     // The mirror's rendered window is the top of the list; there are
     // unrendered messages below in live.
     state(ws, {
-      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700 },
+      scroll: { left: 0, top: 0, scrollH: 1000, offset: -10, w: 800, h: 700, anchorKind: 'bottom' },
       scrollPath: [0, 0],
       scrollRows: [0, 400, 400, 300],
     });
@@ -634,7 +676,7 @@ test('mirror: an anchor row that leaves the rendered window re-anchors the viewp
     assert.equal(rowsNow[0].getAttribute('data-index'), '1', 'row 0 discarded');
     rowsNow[1].offsetHeight = 350; // the entering row's mirror geometry
     state(ws, {
-      scroll: { left: 0, top: 0, scrollH: 1100, offset: -400, w: 800, h: 700 },
+      scroll: { left: 0, top: 0, scrollH: 1100, offset: -400, w: 800, h: 700, anchorKind: 'bottom' },
       scrollPath: [0, 0],
       scrollRows: [400, 400, 400, 300],
     });
