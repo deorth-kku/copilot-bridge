@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // Workspace is one entry of VS Code's known-workspaces list.
@@ -209,7 +210,7 @@ func NewOpener(explicit string, log *slog.Logger) *Opener {
 			cli = p
 		} else if runtime.GOOS == "windows" {
 			if home, err := os.UserHomeDir(); err == nil {
-				cli = filepath.Join(home, "AppData", "Local", "Programs", "Microsoft VS Code", "bin", "code.cmd")
+				cli = filepath.Join(home, "AppData", "Local", "Programs", "Microsoft VS Code", "code.exe")
 			}
 		}
 	}
@@ -227,7 +228,11 @@ func (o *Opener) Open(uri string) error {
 		return errors.New("code CLI not found (use -code to set its path)")
 	}
 	o.log.Debug("workspaces: open", "uri", uri, "cli", o.cli)
-	if err := exec.Command(o.cli, args...).Start(); err != nil {
+	cmd := exec.Command(o.cli, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow: true,
+	}
+	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %s: %w", o.cli, err)
 	}
 	return nil
