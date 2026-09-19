@@ -30,16 +30,18 @@ func main() {
 	web := flag.String("web", "0.0.0.0:9527", "mirror web address (empty to disable)")
 	pane := flag.String("pane", defaultPaneSelectors, "comma-separated candidate selectors for the Copilot pane root")
 	window := flag.String("window", "", "mirror this window (title substring; empty = first window)")
+	storagePath := flag.String("storage", defaultStoragePath(), "path to VS Code globalStorage storage.json (workspaces page)")
+	codePath := flag.String("code", "", "path to the code CLI (empty = auto-detect; workspaces page)")
 	flag.Parse()
 
-	if err := run(*cdpAddr, *settingsPath, *cooldown, *debounce, *logPath, *verbose, *web, *pane, *window); err != nil {
+	if err := run(*cdpAddr, *settingsPath, *cooldown, *debounce, *logPath, *verbose, *web, *pane, *window, *storagePath, *codePath); err != nil {
 		// GUI builds have no console; the error is also in the log file
 		// (if it could be opened).
 		fmt.Fprintln(os.Stderr, err)
 	}
 }
 
-func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter string) error {
+func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter, storagePath, codePath string) error {
 	if dir := filepath.Dir(logPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create log dir: %w", err)
@@ -83,7 +85,7 @@ func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath
 
 	// Optional: forward the Copilot pane to a browser page.
 	if webAddr != "" {
-		mir := mirror.New(disc, log, webAddr, splitSelectors(paneSel), windowFilter)
+		mir := mirror.New(disc, log, webAddr, splitSelectors(paneSel), windowFilter, storagePath, codePath)
 		go func() {
 			if err := mir.Run(ctx); err != nil {
 				log.Error("mirror server", "err", err)
@@ -158,6 +160,16 @@ func defaultSettingsPath() string {
 // $TMPDIR/... on macOS.
 func defaultLogPath() string {
 	return filepath.Join(os.TempDir(), "copilot-bridge", "app.log")
+}
+
+// defaultStoragePath returns the VS Code user globalStorage storage.json
+// location for the current platform (same base dir as defaultSettingsPath).
+func defaultStoragePath() string {
+	if dir, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(dir, "Code", "User", "globalStorage", "storage.json")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "Code", "User", "globalStorage", "storage.json")
 }
 
 // defaultPaneSelectors are the candidate Copilot pane root selectors, tried

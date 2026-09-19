@@ -54,6 +54,26 @@ function state(ws, m) {
   ws.fireMessage(JSON.stringify(Object.assign({ type: 'state' }, m)));
 }
 
+// The page JS talks to the bare `localStorage` global. Node may provide a
+// native one (persisted across runs); a per-test stub keeps the behavior
+// deterministic either way. restore() tears the stub down (or clears the
+// native key) so tests cannot leak state into each other.
+function withLocalStorage(init = {}) {
+  const store = Object.assign({}, init);
+  const stub = {
+    getItem: k => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: k => { delete store[k]; },
+  };
+  try { globalThis.localStorage.removeItem('mirrorWin'); } catch (e) {} // native leftover
+  let installed = false;
+  try { globalThis.localStorage = stub; installed = true; } catch (e) {}
+  return function restore() {
+    if (installed) { try { delete globalThis.localStorage; } catch (e) {} }
+    else { try { globalThis.localStorage.removeItem('mirrorWin'); } catch (e) {} }
+  };
+}
+
 function sent(ws) {
   return ws.sent.map(s => JSON.parse(s));
 }
@@ -92,11 +112,13 @@ test('mirror: window picker rebuilds options and disambiguates same titles', () 
       ],
       windowId: 'win-654321',
     });
-    assert.equal(status.children.length, 3);
+    assert.equal(status.children.length, 4, '3 windows + the Workspaces entry');
     assert.equal(status.children[0].value, 'win-123456');
     assert.equal(status.children[0].textContent, 'W (123456)');
     assert.equal(status.children[1].textContent, 'W (654321)');
     assert.equal(status.children[2].textContent, 'X');
+    assert.equal(status.children[3].value, '__workspaces__');
+    assert.equal(status.children[3].textContent, '— Workspaces…');
     assert.equal(status.value, 'win-654321');
   } finally { uninstallGlobals(); }
 });
@@ -115,7 +137,7 @@ test('mirror: unchanged window set only moves the selection, keeps options', () 
     const first = status.children[0];
     state(ws, Object.assign({}, wins, { windowId: 'win-654321' }));
     assert.equal(status.value, 'win-654321');
-    assert.equal(status.children.length, 2);
+    assert.equal(status.children.length, 3, '2 windows + the Workspaces entry');
     assert.equal(status.children[0], first, 'options not rebuilt');
   } finally { uninstallGlobals(); }
 });
@@ -139,11 +161,12 @@ test('mirror: error state WITH windows keeps the picker populated', () => {
       ],
     });
     // The error is the selected placeholder; the window options remain.
-    assert.equal(status.children.length, 3);
+    assert.equal(status.children.length, 4, 'err + 2 windows + the Workspaces entry');
     assert.equal(status.children[0].textContent, '! pane not found');
     assert.equal(status.children[0].value, '');
     assert.equal(status.children[1].value, 'win-1');
     assert.equal(status.children[2].value, 'win-2');
+    assert.equal(status.children[3].value, '__workspaces__');
     assert.equal(status.value, '');
     // A repeated identical error state does not rebuild the options.
     const first = status.children[1];
@@ -157,7 +180,7 @@ test('mirror: error state WITH windows keeps the picker populated', () => {
     assert.equal(status.children[1], first, 'options not rebuilt');
     // A recovered state drops the placeholder and re-selects the window.
     state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-2' });
-    assert.equal(status.children.length, 2);
+    assert.equal(status.children.length, 3, '2 windows + the Workspaces entry');
     assert.equal(status.children[0].textContent, 'A');
     assert.equal(status.value, 'win-2');
   } finally { uninstallGlobals(); }
@@ -875,6 +898,42 @@ test('mirror: changing the window picker sends a window message', () => {
     status.dispatchEvent(new Event('change', status));
     assert.deepEqual(sent(ws).at(-1), { type: 'window', id: 'win-2' });
   } finally { uninstallGlobals(); }
+});
+
+test('mirror: selecting the Workspaces entry navigates and remembers the window', () => {
+  const { status, ws, win } = setup();
+  const restoreLS = withLocalStorage();
+  try {
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }], windowId: 'win-1' });
+    status.value = '__workspaces__';
+    status.dispatchEvent(new Event('change', status));
+    assert.equal(win.location.href, '/workspaces');
+    assert.equal(globalThis.localStorage.getItem('mirrorWin'), 'win-1');
+    assert.equal(sent(ws).length, 0, 'no window message for the special entry');
+  } finally { restoreLS(); uninstallGlobals(); }
+});
+
+test('mirror: returning restores the remembered window exactly once', () => {
+  const { ws } = setup();
+  const restoreLS = withLocalStorage({ mirrorWin: 'win-2' });
+  try {
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-1' });
+    assert.deepEqual(sent(ws).filter(m => m.type === 'window'), [{ type: 'window', id: 'win-2' }]);
+    assert.equal(globalThis.localStorage.getItem('mirrorWin'), null, 'remembered window consumed');
+    // A later state does not re-send it.
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-1' });
+    assert.equal(sent(ws).filter(m => m.type === 'window').length, 1);
+  } finally { restoreLS(); uninstallGlobals(); }
+});
+
+test('mirror: a stale remembered window is dropped silently', () => {
+  const { ws } = setup();
+  const restoreLS = withLocalStorage({ mirrorWin: 'gone' });
+  try {
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }], windowId: 'win-1' });
+    assert.equal(sent(ws).filter(m => m.type === 'window').length, 0);
+    assert.equal(globalThis.localStorage.getItem('mirrorWin'), null);
+  } finally { restoreLS(); uninstallGlobals(); }
 });
 
 test('mirror: keydown forwards non-printable keys, suppresses plain typing and composition', () => {

@@ -14,6 +14,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json/v2"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"copilot-bridge/internal/cdp"
+	"copilot-bridge/internal/workspaces"
 )
 
 // stateMsg is the server -> browser message carrying a pane snapshot.
@@ -142,6 +144,11 @@ type Mirror struct {
 	addr      string
 	selectors []string
 	window    string
+	// storagePath is the VS Code globalStorage storage.json the workspaces
+	// page lists (read fresh on every request).
+	storagePath string
+	// opener launches workspaces through the code CLI (workspaces page).
+	opener *workspaces.Opener
 	// fallback bounds how often the publish loop probes even when the page
 	// sent no wake event. It covers changes the injected observer cannot
 	// see (CSSOM-only edits, dropped wakes) and re-resolves the session
@@ -312,14 +319,17 @@ func lanIP() string {
 
 // New creates a Mirror. addr is the web bind address; selectors are the
 // candidate pane root selectors (tried in order); window is a title
-// substring used to pick the VS Code window (empty = first window).
-func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string, window string) *Mirror {
+// substring used to pick the VS Code window (empty = first window);
+// storagePath/codePath back the workspaces page (list + launch).
+func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string, window, storagePath, codePath string) *Mirror {
 	return &Mirror{
-		disc:       disc,
-		log:        log,
-		addr:       addr,
-		selectors:  selectors,
-		window:     window,
+		disc:        disc,
+		log:         log,
+		addr:        addr,
+		selectors:   selectors,
+		window:      window,
+		storagePath: storagePath,
+		opener:      workspaces.NewOpener(codePath, log),
 		fallback:    1 * time.Second,
 		snaps:       make(map[string]*snapState),
 		hub:         newWakeHub(),
@@ -339,6 +349,9 @@ func (m *Mirror) Run(ctx context.Context) error {
 	mux.HandleFunc("/", m.handlePage)
 	mux.HandleFunc("/ws", m.handleWS)
 	mux.HandleFunc("/img/", m.handleImage)
+	mux.HandleFunc("/workspaces", m.handleWorkspacesPage)
+	mux.HandleFunc("/api/workspaces", m.handleWorkspaceList)
+	mux.HandleFunc("/api/workspaces/open", m.handleWorkspaceOpen)
 	srv := &http.Server{Addr: m.addr, Handler: mux}
 
 	errCh := make(chan error, 1)
@@ -377,6 +390,69 @@ func (m *Mirror) handlePage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(pageHTML))
+}
+
+func (m *Mirror) handleWorkspacesPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/workspaces" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(workspacesHTML))
+}
+
+// handleWorkspaceList serves the current workspace list from storage.json
+// (fresh read on every request: the page is only shown on demand and the
+// file is small).
+func (m *Mirror) handleWorkspaceList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
+	ws, err := workspaces.List(m.storagePath)
+	if err != nil {
+		m.log.Warn("workspaces: list failed", "err", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.MarshalWrite(w, map[string]string{"err": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.MarshalWrite(w, ws)
+}
+
+// openReq is the browser -> server request to launch one workspace.
+type openReq struct {
+	URI string `json:"uri"`
+}
+
+// handleWorkspaceOpen launches a VS Code window for one workspace via the
+// code CLI (fire-and-forget).
+func (m *Mirror) handleWorkspaceOpen(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	var req openReq
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err == nil {
+		err = json.Unmarshal(body, &req)
+	}
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.MarshalWrite(w, map[string]string{"err": "bad request: " + err.Error()})
+		return
+	}
+	if err := m.opener.Open(req.URI); err != nil {
+		m.log.Warn("workspaces: open failed", "uri", req.URI, "err", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.MarshalWrite(w, map[string]string{"err": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.MarshalWrite(w, map[string]bool{"ok": true})
 }
 
 // handleImage serves one cached image resource under /img/<hash>.

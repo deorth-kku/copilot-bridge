@@ -8,17 +8,22 @@ import (
 )
 
 // TestPageHTMLInlineScriptsCompiles syntax-checks the body of every inline
-// <script> element of the served mirror page. The HTML is a Go raw string,
-// so neither the HTML nor its embedded JS gets any compiler coverage
-// elsewhere.
+// <script> element of the served pages. The HTML is a Go raw string, so
+// neither the HTML nor its embedded JS gets any compiler coverage elsewhere.
 func TestPageHTMLInlineScriptsCompiles(t *testing.T) {
-	scripts := pageScripts()
+	checkPageScripts(t, "page", pageHTML)
+	checkPageScripts(t, "workspaces", workspacesHTML)
+}
+
+func checkPageScripts(t *testing.T, name, htmlSrc string) {
+	t.Helper()
+	scripts := inlineScripts(htmlSrc)
 	if len(scripts) == 0 {
-		t.Fatal("no inline <script> elements found in pageHTML")
+		t.Fatalf("no inline <script> elements found in %s", name)
 	}
 	for i, s := range scripts {
-		t.Run(fmt.Sprintf("script%d", i), func(t *testing.T) {
-			jscheck.Check(t, fmt.Sprintf("page_script%d", i), s)
+		t.Run(name+fmt.Sprintf("_script%d", i), func(t *testing.T) {
+			jscheck.Check(t, name+fmt.Sprintf("_script%d", i), s)
 		})
 	}
 }

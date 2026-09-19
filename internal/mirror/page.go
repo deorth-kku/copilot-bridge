@@ -230,6 +230,13 @@ const pageHTML = `<!doctype html>
   var lastCSSVer = '';
   var lastThemeVer = '';
   var lastWinVer = '';
+  // The window id last selected by (or following) this tab. Remembered in
+  // localStorage when the tab leaves for the workspaces page, so returning
+  // can restore the same window.
+  var lastWinId = '';
+  // Set once the remembered window (if any) has been restored after a
+  // (re)connect: only the first good state message may re-send it.
+  var restoredWin = false;
   // Last live scroll state (m.scroll: live scroller's h/scrollH/offset) and
   // the DOM path of the scroller the server measured (m.scrollPath). Used to
   // mirror the live-drawn scrollbar's position/size onto the mirror scroller.
@@ -309,7 +316,7 @@ const pageHTML = `<!doctype html>
     var ver = err + '|';
     for (var i = 0; i < wins.length; i++) ver += wins[i].id + ':' + wins[i].title + ';';
     if (ver === lastWinVer) {
-      if (m.windowId) status.value = m.windowId;
+      if (m.windowId) { status.value = m.windowId; lastWinId = m.windowId; }
       return;
     }
     lastWinVer = ver;
@@ -329,8 +336,15 @@ const pageHTML = `<!doctype html>
       o.textContent = wins[i].title + (dup[wins[i].title] > 1 ? ' (' + String(wins[i].id).slice(-6) + ')' : '');
       status.appendChild(o);
     }
+    // The special Workspaces entry always trails the window list: selecting
+    // it leaves the mirror page for the workspace list (see the change
+    // handler). It is static, so it never affects the ver rebuild trigger.
+    var wo = document.createElement('option');
+    wo.value = '__workspaces__';
+    wo.textContent = '— Workspaces…';
+    status.appendChild(wo);
     if (err) status.value = '';
-    else if (m.windowId) status.value = m.windowId;
+    else if (m.windowId) { status.value = m.windowId; lastWinId = m.windowId; }
   }
 
   function connect() {
@@ -359,6 +373,23 @@ const pageHTML = `<!doctype html>
       lastScrollPath = m.scrollPath || null;
       lastNestedScrolls = m.nestedScrolls || null;
       syncWindows(m);
+      // First good state after (re)connect: if this tab returned from the
+      // workspaces page with a remembered window that still exists, ask
+      // the server to mirror it again.
+      if (!restoredWin) {
+        restoredWin = true;
+        var saved = '';
+        try { saved = localStorage.getItem('mirrorWin') || ''; } catch (e) {}
+        if (saved) {
+          var wins2 = m.windows || [];
+          var found = false;
+          for (var i = 0; i < wins2.length; i++) {
+            if (wins2[i].id === saved) { found = true; break; }
+          }
+          if (found) send({ type: 'window', id: saved });
+          try { localStorage.removeItem('mirrorWin'); } catch (e) {}
+        }
+      }
       if (m.cssVersion !== lastCSSVer) {
         lastCSSVer = m.cssVersion || '';
         if (m.css != null) cssEl.textContent = m.css;
@@ -1219,8 +1250,17 @@ const pageHTML = `<!doctype html>
   }
 
   // Window picker: switching the option tells the server which VS Code
-  // window to mirror from now on.
+  // window to mirror from now on. The special Workspaces entry instead
+  // leaves the mirror page for the workspace list, remembering this tab's
+  // window so returning restores it.
   status.addEventListener('change', function () {
+    if (status.value === '__workspaces__') {
+      if (lastWinId) {
+        try { localStorage.setItem('mirrorWin', lastWinId); } catch (e) {}
+      }
+      location.href = '/workspaces';
+      return;
+    }
     send({ type: 'window', id: status.value });
   });
 

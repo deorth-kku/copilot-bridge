@@ -15,8 +15,12 @@ import (
 // pageScripts returns the bodies of all inline <script> elements in
 // pageHTML. The HTML is a Go raw string, so the embedded JS gets no
 // compiler coverage elsewhere.
-func pageScripts() []string {
-	doc, err := html.Parse(strings.NewReader(pageHTML))
+func pageScripts() []string { return inlineScripts(pageHTML) }
+
+// inlineScripts returns the bodies of all inline <script> elements in an
+// HTML source string.
+func inlineScripts(htmlSrc string) []string {
+	doc, err := html.Parse(strings.NewReader(htmlSrc))
 	if err != nil {
 		return nil
 	}
