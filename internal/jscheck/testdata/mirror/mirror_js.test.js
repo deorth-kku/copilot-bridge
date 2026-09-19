@@ -24,7 +24,7 @@ const sleep = ms => new Promise(res => setTimeout(res, ms));
 // the window is 1280x800.
 const PANE_RECT = { left: 0, top: 26, width: 800, height: 500 };
 
-function setup() {
+function setup(opts = {}) {
   const root = new El('div');
   const status = new El('select', { attrs: { id: 'status' } });
   status.appendChild(new El('option', { text: 'connecting…' }));
@@ -40,7 +40,7 @@ function setup() {
   root.appendChild(themeEl);
   root.appendChild(pane);
   const doc = makeDocument(root);
-  const win = makeWindow(doc, { host: '127.0.0.1:8123' });
+  const win = makeWindow(doc, { host: '127.0.0.1:8123', search: opts.search });
   WebSocketStub.instances.length = 0;
   installGlobals(doc, win);
   new Function(src)();
@@ -933,6 +933,25 @@ test('mirror: a stale remembered window is dropped silently', () => {
     state(ws, { windows: [{ id: 'win-1', title: 'A' }], windowId: 'win-1' });
     assert.equal(sent(ws).filter(m => m.type === 'window').length, 0);
     assert.equal(globalThis.localStorage.getItem('mirrorWin'), null);
+  } finally { restoreLS(); uninstallGlobals(); }
+});
+
+test('mirror: ?ws= is forwarded to the WS handshake URL', () => {
+  const uri = 'file:///c%3A/Users/deort/vscode-load-llama';
+  const { ws } = setup({ search: '?ws=' + encodeURIComponent(uri) });
+  try {
+    assert.equal(ws.url, 'ws://127.0.0.1:8123/ws?ws=' + encodeURIComponent(uri));
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: ?ws= suppresses the remembered-window restore', () => {
+  const uri = 'file:///c%3A/Users/deort/vscode-load-llama';
+  const { ws } = setup({ search: '?ws=' + encodeURIComponent(uri) });
+  const restoreLS = withLocalStorage({ mirrorWin: 'win-1' });
+  try {
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-1' });
+    assert.equal(sent(ws).filter(m => m.type === 'window').length, 0, 'server already applied the ?ws= selection');
+    assert.equal(globalThis.localStorage.getItem('mirrorWin'), 'win-1', 'remembered window not consumed');
   } finally { restoreLS(); uninstallGlobals(); }
 });
 

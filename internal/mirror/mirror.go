@@ -455,6 +455,24 @@ func (m *Mirror) handleWorkspaceOpen(w http.ResponseWriter, r *http.Request) {
 	_ = json.MarshalWrite(w, map[string]bool{"ok": true})
 }
 
+// resolveWindowURI finds the live window that has the given workspace
+// open: it asks each window's workbench for its own workspace URI (the
+// main process hands every renderer its window configuration, so the
+// answer is exact, not a title guess). ok is false when no live window
+// matches.
+func (m *Mirror) resolveWindowURI(uri string) (string, bool) {
+	for _, win := range m.disc.Windows() {
+		s := m.disc.SessionForID(win.ID)
+		if s == nil {
+			continue
+		}
+		if wuri := cdp.WorkspaceURI(s); wuri != "" && workspaces.SameURI(uri, wuri) {
+			return win.ID, true
+		}
+	}
+	return "", false
+}
+
 // handleImage serves one cached image resource under /img/<hash>.
 func (m *Mirror) handleImage(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/img/")
@@ -524,6 +542,18 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := &client{conn: conn, send: make(chan stateMsg, 64), done: make(chan struct{}), logger: m.log.With("remote", r.RemoteAddr)}
+	// A tab arriving from the workspaces page carries its target workspace
+	// (?ws=). Resolve it to the live window BEFORE the client is added, so
+	// the first snapshot is already the requested window (no flash of the
+	// default window).
+	if wsURI := r.URL.Query().Get("ws"); wsURI != "" {
+		if id, ok := m.resolveWindowURI(wsURI); ok {
+			c.selID.Store(&id)
+			m.log.Info("mirror: ws param resolved", "uri", wsURI, "id", id)
+		} else {
+			m.log.Warn("mirror: ws param unresolved", "uri", wsURI)
+		}
+	}
 	m.addClient(c)
 	defer m.removeClient(c)
 

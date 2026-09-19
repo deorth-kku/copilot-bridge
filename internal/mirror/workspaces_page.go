@@ -120,13 +120,23 @@ const workspacesHTML = `<!DOCTYPE html>
   });
 
   function openRow(row) {
+    var uri = row.getAttribute('data-uri');
+    // Already open: jump this browser to the mirror of that window
+    // (the mirror page asks the server which live window it is) instead
+    // of launching anything.
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].uri === uri && all[i].open) {
+        location.href = '/?ws=' + encodeURIComponent(uri);
+        return;
+      }
+    }
     var st = row.querySelector('.status');
     if (st.textContent === 'opening…') return; // already in flight
     st.textContent = 'opening…';
     fetch('/api/workspaces/open', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uri: row.getAttribute('data-uri') })
+      body: JSON.stringify({ uri: uri })
     }).then(function (r) {
       return r.json().then(function (j) { return { ok: r.ok, j: j }; });
     }).then(function (res) {

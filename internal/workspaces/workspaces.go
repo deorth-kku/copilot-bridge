@@ -182,6 +182,18 @@ func LaunchArgs(uri string) ([]string, error) {
 	return []string{"--folder-uri", uri}, nil
 }
 
+// SameURI reports whether two workspace URI strings refer to the same
+// workspace: a storage.json key and the URI a live window reports for
+// itself (see cdp.WorkspaceURI). Both use the same format, so an exact
+// match is expected; the case-insensitive fallback covers Windows drive
+// letters.
+func SameURI(storageURI, windowURI string) bool {
+	if storageURI == windowURI {
+		return true
+	}
+	return strings.EqualFold(storageURI, windowURI)
+}
+
 // Opener launches workspaces through the `code` CLI.
 type Opener struct {
 	cli string

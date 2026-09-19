@@ -111,3 +111,19 @@ func TestLaunchArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestSameURI(t *testing.T) {
+	if !SameURI("file:///c%3A/Users/deort/vscode-load-llama", "file:///c%3A/Users/deort/vscode-load-llama") {
+		t.Error("exact match must be true")
+	}
+	// Windows drive letters may differ in case between the two sources.
+	if !SameURI("file:///c%3A/Users/deort/vscode-load-llama", "file:///C%3A/Users/deort/vscode-load-llama") {
+		t.Error("case-insensitive drive letter must match")
+	}
+	if SameURI("file:///c%3A/a", "file:///c%3A/b") {
+		t.Error("different paths must not match")
+	}
+	if SameURI("", "file:///c%3A/a") {
+		t.Error("empty window URI must not match")
+	}
+}

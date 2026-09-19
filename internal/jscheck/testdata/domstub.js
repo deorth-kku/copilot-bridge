@@ -416,6 +416,7 @@ function makeWindow(doc, opts = {}) {
     document: doc,
     location: {
       href: opts.href || 'vscode-file://vscode-app/app/index.html',
+      search: opts.search || '',
       protocol: opts.protocol || 'http:',
       host: opts.host || '127.0.0.1:8123',
     },

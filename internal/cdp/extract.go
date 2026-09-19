@@ -808,3 +808,38 @@ func decodeEval[T any](raw jsontext.Value) (*T, error) {
 	}
 	return &out, nil
 }
+
+// workspaceExpr asks the workbench which workspace this window has open.
+// The main process hands every renderer its own window configuration
+// (window.vscode.context.resolveConfiguration); its workspace field is
+// the single-folder URI (w.uri) or the .code-workspace file (w.configPath)
+// in the same percent-encoded format storage.json uses as its keys.
+const workspaceExpr = `(async () => {
+  try {
+    const c = await window.vscode.context.resolveConfiguration();
+    const w = c && c.workspace;
+    if (!w) return null;
+    const pick = (u) => u ? (u._formatted || (u.scheme + '://' + (u.authority || '') + u.path)) : null;
+    return w.uri ? pick(w.uri) : pick(w.configPath);
+  } catch (e) { return null; }
+})()`
+
+// WorkspaceURI returns the workspace URI the window currently has open —
+// in storage.json key format (file:///c%3A/... or
+// vscode-remote://ssh-remote%2Bhost/...) — or "" for empty windows and
+// failed probes.
+func WorkspaceURI(s *Session) string {
+	raw, err := s.Call("Runtime.evaluate", map[string]any{
+		"expression":    workspaceExpr,
+		"awaitPromise":  true,
+		"returnByValue": true,
+	})
+	if err != nil {
+		return ""
+	}
+	uri, err := decodeEval[string](raw)
+	if err != nil || *uri == "" {
+		return ""
+	}
+	return *uri
+}

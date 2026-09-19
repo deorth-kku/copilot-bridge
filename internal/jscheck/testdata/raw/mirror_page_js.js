@@ -15,6 +15,12 @@
   // Set once the remembered window (if any) has been restored after a
   // (re)connect: only the first good state message may re-send it.
   var restoredWin = false;
+  // Workspace URI this tab arrived with (?ws= from the workspaces page).
+  // It is forwarded to the WS handshake so the server selects that window
+  // BEFORE the first snapshot (no flash of the default window), and it
+  // suppresses the remembered-window restore below.
+  var pendingWs = '';
+  try { pendingWs = new URLSearchParams(location.search).get('ws') || ''; } catch (e) {}
   // Last live scroll state (m.scroll: live scroller's h/scrollH/offset) and
   // the DOM path of the scroller the server measured (m.scrollPath). Used to
   // mirror the live-drawn scrollbar's position/size onto the mirror scroller.
@@ -127,7 +133,12 @@
 
   function connect() {
     var proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(proto + '://' + location.host + '/ws');
+    // A ?ws= tab forwards its target workspace in the WS URL: the server
+    // resolves it to the live window before the first snapshot, so this
+    // tab's first paint is already the requested window.
+    var wurl = proto + '://' + location.host + '/ws';
+    if (pendingWs) wurl += '?ws=' + encodeURIComponent(pendingWs);
+    ws = new WebSocket(wurl);
     ws.onopen = function () { setStatus('connected'); };
     ws.onclose = function () { setStatus('disconnected, retrying…'); setTimeout(connect, 1000); };
     ws.onmessage = function (ev) {
@@ -153,19 +164,22 @@
       syncWindows(m);
       // First good state after (re)connect: if this tab returned from the
       // workspaces page with a remembered window that still exists, ask
-      // the server to mirror it again.
+      // the server to mirror it again. A ?ws= tab skips this: the server
+      // already applied that explicit selection at connect time.
       if (!restoredWin) {
         restoredWin = true;
-        var saved = '';
-        try { saved = localStorage.getItem('mirrorWin') || ''; } catch (e) {}
-        if (saved) {
-          var wins2 = m.windows || [];
-          var found = false;
-          for (var i = 0; i < wins2.length; i++) {
-            if (wins2[i].id === saved) { found = true; break; }
+        if (!pendingWs) {
+          var saved = '';
+          try { saved = localStorage.getItem('mirrorWin') || ''; } catch (e) {}
+          if (saved) {
+            var wins2 = m.windows || [];
+            var found = false;
+            for (var i = 0; i < wins2.length; i++) {
+              if (wins2[i].id === saved) { found = true; break; }
+            }
+            if (found) send({ type: 'window', id: saved });
+            try { localStorage.removeItem('mirrorWin'); } catch (e) {}
           }
-          if (found) send({ type: 'window', id: saved });
-          try { localStorage.removeItem('mirrorWin'); } catch (e) {}
         }
       }
       if (m.cssVersion !== lastCSSVer) {
