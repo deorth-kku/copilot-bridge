@@ -169,19 +169,25 @@ const workspacesHTML = `<!DOCTYPE html>
     });
   }
 
-  fetch('/api/workspaces').then(function (r) {
-    return r.json().then(function (j) { return { ok: r.ok, j: j }; });
-  }).then(function (res) {
-    if (!res.ok) {
-      list.innerHTML = '<div class="msg err">' + esc(res.j.err || 'failed to load workspaces') + '</div>';
-      count.textContent = '';
-      return;
-    }
-    all = res.j;
-    render();
-  }).catch(function (e) {
-    list.innerHTML = '<div class="msg err">' + esc(String(e)) + '</div>';
-  });
+  // The workspace list arrives over the WebSocket: the server sends it
+  // once on connect, then after every storage.json change (opening or
+  // closing a VS Code window flips the open flags), so the green dots
+  // update live without a refresh.
+  function connectWS() {
+    var proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    var ws = new WebSocket(proto + '://' + location.host + '/ws?page=workspaces');
+    ws.onmessage = function (ev) {
+      var m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type !== 'workspaces' || !Array.isArray(m.workspaces)) return;
+      all = m.workspaces;
+      render();
+    };
+    ws.onclose = function () {
+      setTimeout(connectWS, 1000);
+    };
+  }
+  connectWS();
 })();
 </script>
 </body>

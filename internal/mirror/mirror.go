@@ -137,6 +137,15 @@ type windowMsg struct {
 	ID   string `json:"id"`
 }
 
+// workspacesMsg is a server -> browser message for the workspaces page:
+// the current workspace list. Sent on connect and after every successful
+// storage.json reload (a VS Code window opening/closing changes the open
+// flags), so the page's green dots update live without a refresh.
+type workspacesMsg struct {
+	Type       string                 `json:"type"` // "workspaces"
+	Workspaces []workspaces.Workspace `json:"workspaces"`
+}
+
 // imgEntry is one fetched image resource, cached by the hash of its source
 // URL (which doubles as the /img/<hash> path segment).
 type imgEntry struct {
@@ -158,10 +167,16 @@ type Mirror struct {
 	selectors []string
 	window    string
 	// storagePath is the VS Code globalStorage storage.json the workspaces
-	// page lists (read fresh on every request).
+	// page lists.
 	storagePath string
 	// opener launches workspaces through the code CLI (workspaces page).
 	opener *workspaces.Opener
+	// wsStore is the hot-reloaded workspace list (storage.json, watched like
+	// settings.json). Readers take an atomic load; the watcher pushes a
+	// "workspaces" message to the workspaces-page clients on every
+	// successful reload. Nil when the initial load failed (the HTTP API
+	// then falls back to a fresh read per request).
+	wsStore *workspaces.Store
 	// fallback bounds how often the publish loop probes even when the page
 	// sent no wake event. It covers changes the injected observer cannot
 	// see (CSSOM-only edits, dropped wakes) and re-resolves the session
@@ -245,8 +260,14 @@ type snapState struct {
 type client struct {
 	logger *slog.Logger
 	conn   *websocket.Conn
-	send   chan stateMsg
-	done   chan struct{}
+	// send carries server -> browser frames (stateMsg for mirror tabs,
+	// workspacesMsg for workspaces-page tabs); the writer marshals any.
+	send chan any
+	done chan struct{}
+	// wsPage marks a workspaces-page tab (?page=workspaces): it consumes
+	// only "workspaces" list pushes and is excluded from the publish
+	// loop's pane-state broadcast.
+	wsPage bool
 	// selID is this tab's status-bar window picker selection (nil = follow
 	// the default: -window flag, else first window). Per-client, so several
 	// browsers can mirror different VS Code windows at once. Written by the
@@ -338,7 +359,7 @@ func lanIP() string {
 // substring used to pick the VS Code window (empty = first window);
 // storagePath/codePath back the workspaces page (list + launch).
 func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string, window, storagePath, codePath string) *Mirror {
-	return &Mirror{
+	m := &Mirror{
 		disc:        disc,
 		log:         log,
 		addr:        addr,
@@ -356,6 +377,16 @@ func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string,
 			CheckOrigin: func(*http.Request) bool { return true },
 		},
 	}
+	// The workspace list is loaded once up front, then hot-reloaded via
+	// fsnotify (like settings.json); a successful reload pushes the new
+	// list to the workspaces-page clients. A missing/unreadable
+	// storage.json is not fatal: the HTTP API falls back to a fresh read.
+	if st, err := workspaces.NewStore(storagePath, log, m.pushWorkspaces); err != nil {
+		log.Warn("workspaces: initial list failed", "path", storagePath, "err", err)
+	} else {
+		m.wsStore = st
+	}
+	return m
 }
 
 // Run starts the web server and the publish loop. It blocks until ctx is
@@ -369,6 +400,14 @@ func (m *Mirror) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/workspaces", m.handleWorkspaceList)
 	mux.HandleFunc("/api/workspaces/open", m.handleWorkspaceOpen)
 	srv := &http.Server{Addr: m.addr, Handler: mux}
+
+	if m.wsStore != nil {
+		if err := m.wsStore.Watch(ctx); err != nil {
+			// Non-fatal: the list stays at its initial snapshot and the
+			// HTTP API still serves it.
+			m.log.Error("start workspaces watcher", "err", err)
+		}
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -417,15 +456,21 @@ func (m *Mirror) handleWorkspacesPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(workspacesHTML))
 }
 
-// handleWorkspaceList serves the current workspace list from storage.json
-// (fresh read on every request: the page is only shown on demand and the
-// file is small).
+// handleWorkspaceList serves the current workspace list. The list comes
+// from the hot-reloaded store snapshot (atomic read); when the store is
+// nil (initial load failed) it falls back to a fresh read of storage.json.
 func (m *Mirror) handleWorkspaceList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.NotFound(w, r)
 		return
 	}
-	ws, err := workspaces.List(m.storagePath)
+	var ws []workspaces.Workspace
+	var err error
+	if m.wsStore != nil {
+		ws = m.wsStore.Load()
+	} else {
+		ws, err = workspaces.List(m.storagePath)
+	}
 	if err != nil {
 		m.log.Warn("workspaces: list failed", "err", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -557,12 +602,16 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	c := &client{conn: conn, send: make(chan stateMsg, 64), done: make(chan struct{}), logger: m.log.With("remote", r.RemoteAddr)}
-	// A tab arriving from the workspaces page carries its target workspace
-	// (?ws=). Resolve it to the live window BEFORE the client is added, so
-	// the first snapshot is already the requested window (no flash of the
-	// default window).
-	if wsURI := r.URL.Query().Get("ws"); wsURI != "" {
+	c := &client{conn: conn, send: make(chan any, 64), done: make(chan struct{}), logger: m.log.With("remote", r.RemoteAddr)}
+	// A workspaces-page tab (?page=workspaces) only consumes the workspace
+	// list pushes; it never mirrors a pane.
+	if r.URL.Query().Get("page") == "workspaces" {
+		c.wsPage = true
+	} else if wsURI := r.URL.Query().Get("ws"); wsURI != "" {
+		// A tab arriving from the mirror carries its target workspace
+		// (?ws=). Resolve it to the live window BEFORE the client is added,
+		// so the first snapshot is already the requested window (no flash
+		// of the default window).
 		if id, ok := m.resolveWindowURI(wsURI); ok {
 			c.selID.Store(&id)
 			m.log.Info("mirror: ws param resolved", "uri", wsURI, "id", id)
@@ -572,14 +621,20 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	m.addClient(c)
 	defer m.removeClient(c)
-
-	// Render immediately with whatever we already have, then ask the
-	// publish loop for a fresh refresh: a just-connected tab has no
-	// selection yet, and its default window's snapshot may be missing or
-	// stale.
-	m.sendFullState(c)
-	m.signalRefresh()
 	go c.writePump()
+
+	if c.wsPage {
+		// The list arrives over the socket: once on connect, then after
+		// every successful storage.json reload.
+		m.sendWorkspaces(c)
+	} else {
+		// Render immediately with whatever we already have, then ask the
+		// publish loop for a fresh refresh: a just-connected tab has no
+		// selection yet, and its default window's snapshot may be missing
+		// or stale.
+		m.sendFullState(c)
+		m.signalRefresh()
+	}
 
 	conn.SetReadLimit(1 << 20)
 	for {
@@ -601,7 +656,7 @@ func (m *Mirror) signalRefresh() {
 	}
 }
 
-func (c *client) writeMsg(msg stateMsg) error {
+func (c *client) writeMsg(msg any) error {
 	wStart := time.Now()
 	wt, err := c.conn.NextWriter(websocket.TextMessage)
 	if err != nil {
@@ -666,12 +721,34 @@ func (m *Mirror) closeClients() {
 
 // sendTo queues one frame for a single client. Non-blocking: a slow client
 // drops the frame rather than stalling the publisher.
-func (c *client) sendTo(msg stateMsg) {
+func (c *client) sendTo(msg any) {
 	select {
 	case c.send <- msg:
 	default:
 		c.logger.Warn("send: frame dropped (slow client)")
 	}
+}
+
+// sendWorkspaces queues the current workspace list for one workspaces-page
+// client (sent on connect).
+func (m *Mirror) sendWorkspaces(c *client) {
+	if m.wsStore == nil {
+		return
+	}
+	c.sendTo(workspacesMsg{Type: "workspaces", Workspaces: m.wsStore.Load()})
+}
+
+// pushWorkspaces is the Store onChange callback: it fans the new workspace
+// list out to every connected workspaces-page client. Non-blocking per
+// client (sendTo drops for slow clients), so it is safe to call from the
+// watcher goroutine.
+func (m *Mirror) pushWorkspaces(list []workspaces.Workspace) {
+	m.clients.All()(func(c *client, _ struct{}) bool {
+		if c.wsPage {
+			c.sendTo(workspacesMsg{Type: "workspaces", Workspaces: list})
+		}
+		return true
+	})
 }
 
 // imgCount returns the number of cached image resources.
@@ -871,6 +948,10 @@ func (m *Mirror) groupClients(wins []cdp.Window) map[string][]*client {
 		groups[id] = nil
 	}
 	m.clients.All()(func(c *client, _ struct{}) bool {
+		// Workspaces-page tabs never mirror a pane.
+		if c.wsPage {
+			return true
+		}
 		id := m.clientWinID(c, wins)
 		groups[id] = append(groups[id], c)
 		return true
