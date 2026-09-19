@@ -31,6 +31,11 @@
   // (VS Code pins it to the bottom while streaming) and to redraw its
   // self-drawn slider, which arrives with live inline geometry.
   var lastNestedScrolls = null;
+  // The live chat-input cursor's character index (m.cursorChar: count of
+  // characters before the caret; -1 = no cursor). The mirror re-wraps the
+  // input text at its own width, so the cursor is re-seated by this index
+  // instead of the live cursor pixels.
+  var lastCursorChar = -1;
   // The scroller element last anchored by restoreScroll and the window it
   // belonged to. A different element or window means the previous anchor is
   // stale (the patch replaced the scroller node, or the user switched
@@ -161,6 +166,7 @@
       if (m.scroll) lastScroll = m.scroll;
       lastScrollPath = m.scrollPath || null;
       lastNestedScrolls = m.nestedScrolls || null;
+      lastCursorChar = (typeof m.cursorChar === 'number') ? m.cursorChar : -1;
       syncWindows(m);
       // First good state after (re)connect: if this tab returned from the
       // workspaces page with a remembered window that still exists, ask
@@ -201,6 +207,9 @@
         syncDrawnScrollbars();
       }
       updatePopup(m);
+      // Re-apply the live content paddings before the caret is re-seated,
+      // so the caret's top measurement sees the padded layout.
+      fitInputEditor();
       syncCursor(m);
     };
   }
@@ -405,6 +414,96 @@
     syncDrawnScrollbars();
   }
 
+  // The live editor's inline height includes Monaco's content paddings:
+  // the first .view-line's inline top is the top padding, and the editor's
+  // inline height minus the live lines' total height is the bottom padding
+  // (an empty live input: 44 = 12 + 20 + 12). The mirror's flow layout
+  // (the responsive CSS puts the layers back in flow with height:auto)
+  // drops those paddings, so an empty input renders 24px shorter than
+  // live. Re-apply them on .view-lines, derived from the live inline
+  // geometry: size-independent (they follow the font metrics, not the pane
+  // width), so the mirror's auto height matches live line-for-line.
+  function fitInputEditor() {
+    var box = pane.querySelector('.chat-input-container');
+    if (!box) return;
+    var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+    if (!ed) return;
+    var vl = ed.querySelector('.view-lines');
+    if (!vl) return;
+    var lines = vl.querySelectorAll('.view-line');
+    if (!lines.length) return;
+    var f = lines[0];
+    var padTop = parseFloat(f.style.top) || 0;
+    var lineH = parseFloat(f.style.height) || 0;
+    var liveH = parseFloat(ed.style.height) || 0;
+    var padBottom = liveH ? liveH - padTop - lines.length * lineH : 0;
+    if (padBottom < 0) padBottom = 0;
+    if (vl.style.paddingTop !== padTop + 'px') vl.style.paddingTop = padTop + 'px';
+    if (vl.style.paddingBottom !== padBottom + 'px') vl.style.paddingBottom = padBottom + 'px';
+  }
+
+  // The live cursor carries the LIVE layout's inline top/left, but the
+  // mirror re-wraps the input text at its own width (the responsive CSS in
+  // #mirror-css), so the live position no longer matches the mirror's text.
+  // lastCursorChar (the cursor's character index, computed live) identifies
+  // the caret size-independently: walk the mirror's view-lines text nodes,
+  // find the node holding that character, and measure it with a Range.
+  function repositionCursor() {
+    if (!(lastCursorChar >= 0)) return;
+    var box = pane.querySelector('.chat-input-container');
+    if (!box) return;
+    var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+    if (!ed) return;
+    var cur = ed.querySelector('.cursor');
+    if (!cur) return;
+    var vlines = ed.querySelector('.view-lines');
+    if (!vlines) return;
+    // Text nodes in document order (spans may nest).
+    var nodes = [];
+    (function w(node) {
+      for (var i = 0; i < node.childNodes.length; i++) {
+        var c = node.childNodes[i];
+        if (c.nodeType === 3) nodes.push(c);
+        else if (c.nodeType === 1) w(c);
+      }
+    })(vlines);
+    if (!nodes.length) return; // empty input: nothing to re-seat on
+    var n = lastCursorChar;
+    var tn = null, off = 0;
+    var acc = 0;
+    for (var i = 0; i < nodes.length; i++) {
+      var l = nodes[i].length;
+      if (n === 0 && acc === 0) {
+        // Caret at the very start: the first non-empty text node.
+        if (l > 0) { tn = nodes[i]; off = 0; break; }
+        continue;
+      }
+      if (n > acc && n <= acc + l) { tn = nodes[i]; off = n - acc; break; }
+      acc += l;
+    }
+    if (!tn) {
+      // The caret is past the last character: the last text node's end.
+      tn = nodes[nodes.length - 1];
+      off = tn.length;
+    }
+    if (!tn || tn.length === 0) return;
+    var range = document.createRange();
+    if (off >= tn.length) {
+      // The caret sits right after this character: use its right edge.
+      range.setStart(tn, tn.length - 1);
+      range.setEnd(tn, tn.length);
+    } else {
+      range.setStart(tn, off);
+      range.setEnd(tn, off + 1);
+    }
+    var r = range.getBoundingClientRect();
+    if (!r.width && !r.height) return;
+    var er = ed.getBoundingClientRect();
+    var caretX = (off >= tn.length) ? r.right : r.left;
+    cur.style.left = Math.round(caretX - er.left) + 'px';
+    cur.style.top = Math.round(r.top - er.top) + 'px';
+  }
+
   // The live chat-input cursor blinks via a 500ms JS timer that toggles the
   // cursor element's inline visibility (Monaco ViewCursors, default 'blink'
   // style) — a static HTML snapshot cannot reproduce that, and it may even
@@ -420,6 +519,9 @@
     var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
     var cur = ed ? ed.querySelector('.cursor') : null;
     if (!cur) return;
+    // The patch just applied the live cursor's inline top/left; re-seat the
+    // caret on its character in the mirror's own (reflowed) layout.
+    repositionCursor();
     var cls = (cur.getAttribute('class') || '').split(/\s+/).filter(function (c) { return c !== ''; });
     var has = cls.indexOf('mirror-cursor-blink') >= 0;
     if (m.inputFocused) {
@@ -961,6 +1063,60 @@
     var r = pane.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
+  // Caret character index (count of characters before the caret) at a click
+  // point inside the chat input editor. The mirror re-wraps the input text
+  // at its own width, so a click on a wrapped line has no live pixel
+  // equivalent: the element-identity mapping (DOM path + relative position)
+  // lands on the wrong character. The character index is size-independent,
+  // so the server re-seats it on the live layout (cdp.EvalCharPoint).
+  // The scan measures every character's box (a Range per character) and
+  // picks the boundary closest to the point — Monaco's own caret rule.
+  // Scanning the boxes (instead of trusting the element under the point)
+  // also covers clicks on the IME textarea overlay, which follows the live
+  // caret and sits ON TOP of the editor's text. Returns -1 outside the
+  // editor box (toolbar/attachment clicks keep the identity mapping).
+  function inputCharAt(target, cx, cy) {
+    var box = (target && target.closest) ? target.closest('.chat-input-container') : null;
+    if (!box) return -1;
+    var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+    if (!ed) return -1;
+    var er = ed.getBoundingClientRect();
+    if (cx < er.left || cx > er.right || cy < er.top || cy > er.bottom) return -1;
+    var vlines = ed.querySelector('.view-lines');
+    if (!vlines) return -1;
+    var nodes = [];
+    (function w(n) {
+      for (var i = 0; i < n.childNodes.length; i++) {
+        var c = n.childNodes[i];
+        if (c.nodeType === 3) nodes.push(c);
+        else if (c.nodeType === 1) w(c);
+      }
+    })(vlines);
+    var total = 0;
+    for (var i = 0; i < nodes.length; i++) total += nodes[i].length;
+    if (!total) return 0; // empty editor: caret at the start
+    var best = 0, bestD = Infinity, acc = 0;
+    for (var i = 0; i < nodes.length; i++) {
+      var tn = nodes[i], l = tn.length;
+      for (var o = 0; o < l; o++) {
+        var range = document.createRange();
+        range.setStart(tn, o);
+        range.setEnd(tn, o + 1);
+        var r = range.getBoundingClientRect();
+        var dx = cx < r.left ? r.left - cx : (cx > r.right ? cx - r.right : 0);
+        var dy = cy < r.top ? r.top - cy : (cy > r.bottom ? cy - r.bottom : 0);
+        var d = dx * dx + dy * dy;
+        if (d < bestD) {
+          bestD = d;
+          // Nearest boundary of the character: its left edge when the point
+          // is in the left half, its right edge otherwise.
+          best = (cx <= (r.left + r.right) / 2) ? acc + o : acc + o + 1;
+        }
+      }
+      acc += l;
+    }
+    return best;
+  }
   // Identify the element under the cursor by its DOM path (child indices from
   // the pane root) plus the click position as a 0..1 fraction within it. A DOM
   // path is robust to sibling additions elsewhere in the tree (e.g. the
@@ -1106,13 +1262,21 @@
       anchorPath = (anc && anc !== pane) ? elemInfo(anc, e.clientX, e.clientY).path : null;
       lastAnchorPath = anchorPath;
     }
-    send({ type: 'mouse', kind: 'pressed', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, button: btn(e), buttons: e.buttons, clickCount: e.detail, anchorPath: anchorPath });
+    var msg = { type: 'mouse', kind: 'pressed', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, button: btn(e), buttons: e.buttons, clickCount: e.detail, anchorPath: anchorPath };
+    var ich = inputCharAt(e.target, e.clientX, e.clientY);
+    if (ich >= 0) msg.char = ich;
+    send(msg);
   });
   pane.addEventListener('mouseup', function (e) {
     e.preventDefault();
     var c = paneCoords(e);
     var ei = elemInfo(e.target, e.clientX, e.clientY);
-    send({ type: 'mouse', kind: 'released', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, button: btn(e), buttons: e.buttons, clickCount: e.detail });
+    var msg = { type: 'mouse', kind: 'released', x: c.x, y: c.y, path: ei.path, relX: ei.relX, relY: ei.relY, button: btn(e), buttons: e.buttons, clickCount: e.detail };
+    // Released lands on the SAME live point as pressed (the character
+    // re-seated live), so Monaco sees a click, not a drag.
+    var ich = inputCharAt(e.target, e.clientX, e.clientY);
+    if (ich >= 0) msg.char = ich;
+    send(msg);
   });
   // Hover is forwarded with the same element-identity mapping as clicks
   // (needed for the responsive layout, where pane-relative offsets no longer
@@ -1309,6 +1473,9 @@
   pane.addEventListener('scroll', syncDrawnScrollbars, true);
   window.addEventListener('resize', syncDrawnScrollbars);
   window.addEventListener('resize', positionPopup);
+  // A viewport resize re-wraps the reflowed chat-input text, moving the
+  // caret's character to a new pixel position without any state message.
+  window.addEventListener('resize', repositionCursor);
   // Fallback focus for browsers where the mousedown focus did not stick.
   // Clicking outside the input area drops the focus flag so re-renders do not
   // steal focus back into the input. A swipe that ends as a click is ignored.

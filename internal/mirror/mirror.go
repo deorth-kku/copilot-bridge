@@ -50,9 +50,15 @@ type stateMsg struct {
 	// InputFocused reports whether the live chat input holds the page focus.
 	// The mirror shows (and blinks) the input cursor only then: live keeps
 	// the cursor hidden whenever the input is not focused.
-	InputFocused bool           `json:"inputFocused,omitempty"`
-	Rect         cdp.PaneRect   `json:"rect"`
-	Scroll       cdp.PaneScroll `json:"scroll"`
+	InputFocused bool `json:"inputFocused,omitempty"`
+	// CursorChar is the live cursor's character index (count of characters
+	// before the caret); -1 when the input has no cursor. The mirror
+	// re-wraps the input text at its own width, so it re-seats the cursor by
+	// this index instead of the live cursor pixels. No omitempty: 0 (caret
+	// at the start) is a valid value.
+	CursorChar int            `json:"cursorChar"`
+	Rect       cdp.PaneRect   `json:"rect"`
+	Scroll     cdp.PaneScroll `json:"scroll"`
 	// ScrollPath identifies the measured scroll container as a DOM path from
 	// the pane root (no omitempty: an empty path means "the root itself").
 	ScrollPath []int `json:"scrollPath"`
@@ -104,6 +110,13 @@ type mouseMsg struct {
 	// live pane-relative popup offset does not transfer to the mirror's
 	// responsive layout.
 	AnchorPath []int `json:"anchorPath,omitempty"`
+	// Char is the chat-input caret character index under a click inside the
+	// input editor (count of characters before the caret; nil when the click
+	// is outside the input). The mirror re-wraps the input at its own width,
+	// so a click on a wrapped line has no live pixel equivalent by element
+	// identity; the server re-seats the character on the live layout
+	// (cdp.EvalCharPoint) instead of using Path/RelX/RelY.
+	Char *int `json:"char,omitempty"`
 }
 
 // keyMsg is a browser -> server keyboard event.
@@ -215,6 +228,9 @@ type snapState struct {
 	// inputFocused: whether the live chat input holds the page focus (the
 	// mirror shows/blinks the input cursor only then).
 	inputFocused bool
+	// cursorChar: the live cursor's character index (-1 = no cursor); the
+	// mirror re-seats the cursor by this index at its own (reflowed) width.
+	cursorChar int
 	// popupHTML/popupFP capture the visible context view (popup menu) that
 	// renders outside the pane root; popupFP == "" means no popup is open.
 	popupHTML string
@@ -695,7 +711,7 @@ func (m *Mirror) sendFullState(c *client) {
 		msg = stateMsg{
 			Type: "state", HTML: s.html, CSS: s.css, CSSVer: s.cssVer,
 			RootStyle: s.rootStyle, ThemeVars: s.themeVars, ThemeVer: s.themeVer,
-			ThemeBg: s.themeBg, InputFocused: s.inputFocused,
+			ThemeBg: s.themeBg, InputFocused: s.inputFocused, CursorChar: s.cursorChar,
 			Rect: s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
 			NestedScrolls: s.nestedScrolls,
 			Window:        s.window, WindowID: s.windowID,
@@ -1033,6 +1049,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath, scrollRows: fpst.ScrollRows,
 		nestedScrolls: fpst.NestedScrolls,
 		window:        s.Title(), windowID: winID, fp: fpst.FP, inputFocused: fpst.InputFocused,
+		cursorChar: fpst.CursorChar,
 	}
 	if newPopup != nil {
 		ns.popupHTML = newPopup.HTML
@@ -1048,7 +1065,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 
 	base := stateMsg{
 		Type: "state", CSSVer: cssVer, RootStyle: rootStyle, ThemeVer: themeVer,
-		NestedScrolls: fpst.NestedScrolls, InputFocused: fpst.InputFocused,
+		NestedScrolls: fpst.NestedScrolls, InputFocused: fpst.InputFocused, CursorChar: fpst.CursorChar,
 		Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
 		Window: s.Title(), WindowID: winID, Windows: wins,
 	}
@@ -1283,7 +1300,20 @@ func (m *Mirror) forwardMouse(s *cdp.Session, winID string, e mouseMsg) {
 	m.snapMu.Unlock()
 
 	x, y := rect.Left+e.X, rect.Top+e.Y
-	if e.Path != nil {
+	placed := false
+	if e.Char != nil && *e.Char >= 0 {
+		// Chat-input click: re-seat the caret character on the live layout.
+		// The element-identity mapping cannot reach the mirror's wrapped
+		// lines (the live line is shorter), so the character index is the
+		// size-independent identity.
+		ecStart := time.Now()
+		if px, py, ok := cdp.EvalCharPoint(s, selectors, *e.Char); ok {
+			x, y = px, py
+			placed = true
+		}
+		m.log.Debug("forwardMouse: evalCharPoint", "char", *e.Char, "ok", placed, "ms", time.Since(ecStart).Milliseconds())
+	}
+	if !placed && e.Path != nil {
 		ecStart := time.Now()
 		if px, py, ok := cdp.EvalClickPoint(s, selectors, e.Path, e.RelX, e.RelY); ok {
 			x, y = px, py

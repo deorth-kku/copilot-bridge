@@ -23,6 +23,7 @@ class Text {
     this.parentElement = null;
   }
   get parentNode() { return this.parentElement; }
+  get length() { return this.data.length; }
 }
 
 // --- element attributes: array of {name, value} with named shortcuts,
@@ -202,7 +203,11 @@ function parseHTML(html) {
     }
     if (lt > i) {
       const t = html.slice(i, lt);
-      if (t) stack[stack.length - 1].push(new Text(t));
+      if (t) {
+        const tn = new Text(t);
+        tn.parentElement = stack[stack.length - 1]._el || null;
+        stack[stack.length - 1].push(tn);
+      }
     }
     if (html.startsWith('<!--', lt)) {
       const end = html.indexOf('-->', lt);
@@ -383,6 +388,36 @@ function dispatch(doc, ev) {
   }
 }
 
+// --- Range (the mirror's cursor repositioning measures the caret's
+//     character in the mirror layout). The stub approximates each character
+//     as an equal slice of its container element's rect. ---
+
+class Range {
+  constructor() {
+    this.startContainer = null;
+    this.startOffset = 0;
+    this.endContainer = null;
+    this.endOffset = 0;
+  }
+  setStart(c, o) { this.startContainer = c; this.startOffset = o; }
+  setEnd(c, o) { this.endContainer = c; this.endOffset = o; }
+  getBoundingClientRect() {
+    const c = this.startContainer;
+    if (!c) return { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+    // A text-node container is measured through its parent element.
+    const el = c.nodeType === 3 ? c.parentElement : c;
+    if (!el) return { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+    const r = el.getBoundingClientRect();
+    const len = (c.nodeType === 3 ? c.data : c.textContent || '').length;
+    const w = len ? r.width / len : 0;
+    const left = r.left + this.startOffset * w;
+    const top = r.top;
+    const width = (this.endOffset - this.startOffset) * w;
+    const height = r.height;
+    return { left, top, width, height, right: left + width, bottom: top + height };
+  }
+}
+
 // --- document / window / getComputedStyle / MutationObserver / WebSocket ---
 
 function makeDocument(root, opts = {}) {
@@ -406,6 +441,7 @@ function makeDocument(root, opts = {}) {
       if (i >= 0) arr.splice(i, 1);
     },
     createElement(tag) { return tag === 'template' ? new Template() : new El(tag); },
+    createRange: () => new Range(),
     dispatchEvent(ev) { return dispatch(doc, ev); },
   };
   return doc;
@@ -517,6 +553,7 @@ module.exports = {
   Template,
   parseHTML,
   Event,
+  Range,
   qsa,
   descendants,
   makeDocument,

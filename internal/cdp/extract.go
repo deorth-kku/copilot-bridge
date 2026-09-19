@@ -122,9 +122,14 @@ type PopupState struct {
 // context that is a .native-edit-context div, not the old textarea). The
 // mirror needs the focus state because live keeps the input cursor hidden
 // whenever the input is not focused, and a static HTML snapshot cannot
-// tell the two apart (the cursor element exists in both states).
+// tell the two apart (the cursor element exists in both states). It also
+// reports the cursor's CHARACTER INDEX (count of characters before the
+// caret), computed from the live layout: the cursor's inline top picks the
+// wrapped line, its left the offset within it. The mirror re-wraps the
+// input text at its own width (responsive layout), so it needs the index —
+// a size-independent identity — not the live cursor pixels.
 const inputEditorJS = `
-  let inputEditor = null, inputFocused = false;
+  let inputEditor = null, inputFocused = false, cursorChar = -1;
   try {
     inputEditor = el.querySelector('.chat-input-container .interactive-input-editor .monaco-editor')
                  || el.querySelector('.interactive-input-editor .monaco-editor');
@@ -132,6 +137,44 @@ const inputEditorJS = `
       // Walk up from the active element (contains() is not spliced in).
       let n = document.activeElement;
       while (n) { if (n === inputEditor) { inputFocused = true; break; } n = n.parentElement; }
+      const cur = inputEditor.querySelector('.cursor');
+      const vlines = inputEditor.querySelector('.view-lines');
+      if (cur && vlines) {
+        const lines = vlines.querySelectorAll('.view-line');
+        if (lines.length) {
+          const cTop = parseFloat(cur.style.top) || 0;
+          const cLeft = parseFloat(cur.style.left) || 0;
+          // Line metrics from the first view-line: its inline top is the
+          // content top padding, its inline height the line height.
+          const f = lines[0];
+          const padTop = parseFloat(f.style.top) || 0;
+          const lineH = parseFloat(f.style.height) || 20;
+          let li = Math.round((cTop - padTop) / lineH);
+          if (li < 0) li = 0;
+          if (li > lines.length) li = lines.length;
+          let idx = 0;
+          for (let i = 0; i < li; i++) idx += lines[i].textContent.length;
+          if (li < lines.length) {
+            // Characters of the cursor's own line before the caret: each
+            // direct child span is one text run (absolute left + width in
+            // the live layout); a partial run is estimated proportionally.
+            const line = lines[li];
+            const lr = line.getBoundingClientRect();
+            for (const s of line.children) {
+              if (s.nodeType !== 1) continue;
+              const t = s.textContent;
+              if (!t.length) continue;
+              const sr = s.getBoundingClientRect();
+              if (!sr.width) continue;
+              const sl = sr.left - lr.left;
+              if (cLeft >= sl + sr.width) idx += t.length;
+              else if (cLeft > sl) idx += Math.min(t.length, Math.round((cLeft - sl) / sr.width * t.length));
+              else break;
+            }
+          }
+          cursorChar = idx;
+        }
+      }
     }
   } catch (e) {}
 `
@@ -146,7 +189,12 @@ type FingerprintState struct {
 	// InputFocused is part of the fp (focus changes must trigger a
 	// re-extract) and is reported here so the cheap probe can carry it to
 	// the state message even when only focus changed.
-	InputFocused  bool           `json:"inputFocused"`
+	InputFocused bool `json:"inputFocused"`
+	// CursorChar is the chat-input cursor's character index (count of
+	// characters before the caret) in the live layout; -1 when the input
+	// has no cursor. The mirror re-wraps the text at its own width, so it
+	// re-seats the cursor by this index instead of the live pixels.
+	CursorChar    int            `json:"cursorChar"`
 	Rect          PaneRect       `json:"rect"`
 	Scroll        PaneScroll     `json:"scroll"`
 	ScrollPath    []int          `json:"scrollPath"`
@@ -467,6 +515,7 @@ const fpExpr = `(selectors) => {
     fp: fp,
     cssFP: cssFP,
     inputFocused: inputFocused,
+    cursorChar: cursorChar,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     // When no real scroller exists (sc is null), report the pane root's own
     // geometry as a neutral state: the mirror early-returns on the null
@@ -690,6 +739,92 @@ const clickPointExpr = `(args) => {
 func EvalClickPoint(s *Session, selectors []string, path []int, relX, relY float64) (float64, float64, bool) {
 	args, _ := json.Marshal([]any{selectors, path, relX, relY})
 	raw, err := callExpr(s, clickPointExpr, string(args))
+	if err != nil {
+		return 0, 0, false
+	}
+	var resp struct {
+		Result struct {
+			Value struct {
+				X float64 `json:"x"`
+				Y float64 `json:"y"`
+			} `json:"value"`
+		} `json:"result"`
+		Exception struct {
+			Text string `json:"text"`
+			Obj  struct {
+				Description string `json:"description"`
+			} `json:"exception"`
+		} `json:"exceptionDetails"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return 0, 0, false
+	}
+	if resp.Exception.Obj.Description != "" || resp.Exception.Text != "" {
+		return 0, 0, false
+	}
+	return resp.Result.Value.X, resp.Result.Value.Y, true
+}
+
+// charPointExpr resolves a chat-input caret character index (count of
+// characters before the caret, same identity as FingerprintState.CursorChar)
+// to an absolute live-page coordinate: the click point on the caret's
+// boundary. The mirror re-wraps the input text at its own width, so a
+// pixel mapping (path + relative position) cannot reach the wrapped lines;
+// the character index is size-independent, and this eval re-seats it on the
+// LIVE layout, where the measurement is exact.
+// NOTE: takes a single args array (not 2 params) so it composes with
+// callExpr, which wraps the expression in an IIFE and passes one argument.
+const charPointExpr = `(args) => {
+  const sels = args[0], char = args[1];
+  let root = null;
+  for (const sel of sels) { try { root = document.querySelector(sel); } catch (e) {} if (root) break; }
+  if (!root) return null;
+  const ed = root.querySelector('.chat-input-container .interactive-input-editor .monaco-editor')
+             || root.querySelector('.interactive-input-editor .monaco-editor');
+  if (!ed) return null;
+  const er = ed.getBoundingClientRect();
+  const vlines = ed.querySelector('.view-lines');
+  if (!vlines) return null;
+  const nodes = [];
+  (function w(n) { for (let i = 0; i < n.childNodes.length; i++) { const c = n.childNodes[i]; if (c.nodeType === 3) nodes.push(c); else if (c.nodeType === 1) w(c); } })(vlines);
+  if (!nodes.length) {
+    // Empty input: the first line's start (content top padding).
+    const f = vlines.querySelector('.view-line');
+    const padTop = f ? (parseFloat(f.style.top) || 0) : 0;
+    const lineH = f ? (parseFloat(f.style.height) || 20) : 20;
+    return { x: er.left + 4, y: er.top + padTop + lineH / 2 };
+  }
+  let total = 0;
+  for (const n of nodes) total += n.length;
+  if (char < 0) char = 0;
+  if (char > total) char = total;
+  // The caret sits at boundary char: click the left edge of the first
+  // character for char 0, otherwise the right edge of character char-1
+  // (the boundary between char-1 and char).
+  let ci = char - 1;
+  if (ci < 0) ci = 0;
+  if (ci >= total) ci = total - 1;
+  let acc = 0, tn = null, off = 0;
+  for (const n of nodes) {
+    const l = n.length;
+    if (ci >= acc && ci < acc + l) { tn = n; off = ci - acc; break; }
+    acc += l;
+  }
+  if (!tn) return null;
+  const range = document.createRange();
+  range.setStart(tn, off);
+  range.setEnd(tn, off + 1);
+  const r = range.getBoundingClientRect();
+  if (!r.width && !r.height) return null;
+  return { x: (char === 0) ? r.left : r.right, y: r.top + r.height / 2 };
+}`
+
+// EvalCharPoint resolves a chat-input caret character index to an absolute
+// live-page coordinate (see charPointExpr). ok is false when the input
+// editor or its text cannot be resolved.
+func EvalCharPoint(s *Session, selectors []string, char int) (float64, float64, bool) {
+	args, _ := json.Marshal([]any{selectors, char})
+	raw, err := callExpr(s, charPointExpr, string(args))
 	if err != nil {
 		return 0, 0, false
 	}

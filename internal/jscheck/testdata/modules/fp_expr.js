@@ -122,7 +122,7 @@ module.exports = (selectors) => {
     }
   } catch (e) { nestedScrolls = null; }
 
-  let inputEditor = null, inputFocused = false;
+  let inputEditor = null, inputFocused = false, cursorChar = -1;
   try {
     inputEditor = el.querySelector('.chat-input-container .interactive-input-editor .monaco-editor')
                  || el.querySelector('.interactive-input-editor .monaco-editor');
@@ -130,6 +130,44 @@ module.exports = (selectors) => {
       // Walk up from the active element (contains() is not spliced in).
       let n = document.activeElement;
       while (n) { if (n === inputEditor) { inputFocused = true; break; } n = n.parentElement; }
+      const cur = inputEditor.querySelector('.cursor');
+      const vlines = inputEditor.querySelector('.view-lines');
+      if (cur && vlines) {
+        const lines = vlines.querySelectorAll('.view-line');
+        if (lines.length) {
+          const cTop = parseFloat(cur.style.top) || 0;
+          const cLeft = parseFloat(cur.style.left) || 0;
+          // Line metrics from the first view-line: its inline top is the
+          // content top padding, its inline height the line height.
+          const f = lines[0];
+          const padTop = parseFloat(f.style.top) || 0;
+          const lineH = parseFloat(f.style.height) || 20;
+          let li = Math.round((cTop - padTop) / lineH);
+          if (li < 0) li = 0;
+          if (li > lines.length) li = lines.length;
+          let idx = 0;
+          for (let i = 0; i < li; i++) idx += lines[i].textContent.length;
+          if (li < lines.length) {
+            // Characters of the cursor's own line before the caret: each
+            // direct child span is one text run (absolute left + width in
+            // the live layout); a partial run is estimated proportionally.
+            const line = lines[li];
+            const lr = line.getBoundingClientRect();
+            for (const s of line.children) {
+              if (s.nodeType !== 1) continue;
+              const t = s.textContent;
+              if (!t.length) continue;
+              const sr = s.getBoundingClientRect();
+              if (!sr.width) continue;
+              const sl = sr.left - lr.left;
+              if (cLeft >= sl + sr.width) idx += t.length;
+              else if (cLeft > sl) idx += Math.min(t.length, Math.round((cLeft - sl) / sr.width * t.length));
+              else break;
+            }
+          }
+          cursorChar = idx;
+        }
+      }
     }
   } catch (e) {}
 
@@ -182,6 +220,7 @@ module.exports = (selectors) => {
     fp: fp,
     cssFP: cssFP,
     inputFocused: inputFocused,
+    cursorChar: cursorChar,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     // When no real scroller exists (sc is null), report the pane root's own
     // geometry as a neutral state: the mirror early-returns on the null

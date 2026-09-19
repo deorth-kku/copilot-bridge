@@ -1218,3 +1218,90 @@ test('mirror: syncCursor is a no-op without a chat input editor', () => {
     assert.equal(pane.querySelector('.cursor'), null);
   } finally { uninstallGlobals(); }
 });
+
+// Chat-input editor with text: root > chat-input-container >
+// interactive-input-editor > monaco-editor > overflow-guard >
+// editor-scrollable > lines-content > view-lines > view-line > span, with
+// the cursors-layer (and its cursor) inside lines-content, like live.
+const INPUT_EDITOR_HTML =
+  '<div class="root"><div class="chat-input-container">' +
+  '<div class="interactive-input-editor"><div class="monaco-editor">' +
+  '<div class="overflow-guard"><div class="monaco-scrollable-element editor-scrollable">' +
+  '<div class="lines-content">' +
+  '<div class="view-lines"><div class="view-line"><span>abcdefgh</span></div></div>' +
+  '<div class="cursors-layer"><div class="cursor" style="top: 12px; left: 494px;"></div></div>' +
+  '</div></div></div>' +
+  '</div></div></div></div>';
+
+// Deliver the editor HTML, give the editor/span their mirror rects, then
+// deliver the same state again so the re-seat runs against real geometry
+// (the first delivery re-seats against zero rects, which is a no-op).
+function seatEditor({ pane, ws }, cursorChar) {
+  state(ws, { html: INPUT_EDITOR_HTML, inputFocused: true, cursorChar });
+  const ed = pane.querySelector('.monaco-editor');
+  const span = pane.querySelector('.view-line span');
+  const cur = pane.querySelector('.cursor');
+  // Editor (10,100) 400x44; the 8-char span (10,112) 80x20 → 10px/char.
+  ed.rect = { left: 10, top: 100, width: 400, height: 44 };
+  span.rect = { left: 10, top: 112, width: 80, height: 20 };
+  state(ws, { html: INPUT_EDITOR_HTML, inputFocused: true, cursorChar });
+  return { ed, span, cur };
+}
+
+test('mirror: cursor re-seats onto the mirror reflowed text (mid-text)', () => {
+  const { pane, ws } = setup();
+  try {
+    const { cur } = seatEditor({ pane, ws }, 4);
+    // Character 4 ('e') starts at x = 10 + 4*10 = 50 → editor-relative 40;
+    // top 112 → editor-relative 12. The live pixels (494,12) are replaced.
+    assert.equal(cur.style.left, '40px');
+    assert.equal(cur.style.top, '12px');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: cursor at the end of the text uses the last character right edge', () => {
+  const { pane, ws } = setup();
+  try {
+    const { cur } = seatEditor({ pane, ws }, 8);
+    // After character 7: right edge x = 10 + 8*10 = 90 → editor-relative 80.
+    assert.equal(cur.style.left, '80px');
+    assert.equal(cur.style.top, '12px');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: cursor at the start of the text sits at the first character left edge', () => {
+  const { pane, ws } = setup();
+  try {
+    const { cur } = seatEditor({ pane, ws }, 0);
+    assert.equal(cur.style.left, '0px');
+    assert.equal(cur.style.top, '12px');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: empty input (no text nodes) does not throw and skips the re-seat', () => {
+  const { pane, ws } = setup();
+  try {
+    const html =
+      '<div class="root"><div class="chat-input-container">' +
+      '<div class="interactive-input-editor"><div class="monaco-editor">' +
+      '<div class="view-lines"><div class="view-line"></div></div>' +
+      '<div class="cursors-layer"><div class="cursor" style="top: 12px; left: 0px;"></div></div>' +
+      '</div></div></div></div>';
+    state(ws, { html, inputFocused: true, cursorChar: 0 });
+    const cur = pane.querySelector('.cursor');
+    assert.ok(cur, 'cursor survives');
+    assert.equal(cur.style.left, undefined, 'no re-seat without text nodes');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: viewport resize re-seats the cursor on the reflowed text', () => {
+  const { pane, ws, win } = setup();
+  try {
+    const { span, cur } = seatEditor({ pane, ws }, 4);
+    assert.equal(cur.style.left, '40px');
+    // The mirror widens: the same text now reflows at 20px/char.
+    span.rect = { left: 10, top: 112, width: 160, height: 20 };
+    win.dispatchEvent({ type: 'resize' });
+    assert.equal(cur.style.left, '80px', 'character 4 at 10 + 4*20 = 90 → editor-relative 80');
+  } finally { uninstallGlobals(); }
+});
