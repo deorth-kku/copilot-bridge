@@ -24,6 +24,7 @@ class Text {
   }
   get parentNode() { return this.parentElement; }
   get length() { return this.data.length; }
+  get textContent() { return this.data; }
 }
 
 // --- element attributes: array of {name, value} with named shortcuts,
@@ -401,6 +402,12 @@ class Range {
   }
   setStart(c, o) { this.startContainer = c; this.startOffset = o; }
   setEnd(c, o) { this.endContainer = c; this.endOffset = o; }
+  selectNodeContents(n) {
+    this.startContainer = n;
+    this.startOffset = 0;
+    this.endContainer = n;
+    this.endOffset = n.nodeType === 3 ? n.data.length : (n.textContent || '').length;
+  }
   getBoundingClientRect() {
     const c = this.startContainer;
     if (!c) return { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };

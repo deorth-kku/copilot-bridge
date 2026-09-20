@@ -122,7 +122,7 @@ module.exports = (selectors) => {
     }
   } catch (e) { nestedScrolls = null; }
 
-  let inputEditor = null, inputFocused = false, cursorChar = -1;
+  let inputEditor = null, inputFocused = false, cursorChar = -1, inputBreaks = null, inputFP = '';
   try {
     inputEditor = el.querySelector('.chat-input-container .interactive-input-editor .monaco-editor')
                  || el.querySelector('.interactive-input-editor .monaco-editor');
@@ -132,8 +132,63 @@ module.exports = (selectors) => {
       while (n) { if (n === inputEditor) { inputFocused = true; break; } n = n.parentElement; }
       const cur = inputEditor.querySelector('.cursor');
       const vlines = inputEditor.querySelector('.view-lines');
-      if (cur && vlines) {
-        const lines = vlines.querySelectorAll('.view-line');
+      let lines = null;
+      if (vlines) {
+        lines = vlines.querySelectorAll('.view-line');
+        // inputFP: the editor width plus each line's character count. A
+        // live re-wrap (window resize) changes these WITHOUT changing the
+        // pane's innerText, yet it changes the break structure below, so
+        // both must be part of the fingerprint.
+        try {
+          inputFP = Math.round(inputEditor.getBoundingClientRect().width) + ':';
+          for (let i = 0; i < lines.length; i++) {
+            inputFP += lines[i].textContent.length;
+            if (i < lines.length - 1) inputFP += ',';
+          }
+        } catch (e) {}
+        // inputBreaks: one entry per boundary between consecutive view
+        // lines; true = a hard newline (a text-line end), false = a soft
+        // wrap. The mirror re-groups the live view lines across the soft
+        // boundaries so the text re-flows continuously at the mirror
+        // width. A hard line can never exceed the live wrap width, and a
+        // wrapped line's non-final segments always reach it, so a line
+        // whose text falls short of the widest line by more than one
+        // character was not wrapped: the boundary after it is hard. A
+        // hard line ending exactly at the wrap column is indistinguishable
+        // from a wrapped segment in the DOM (the rare miss).
+        if (lines.length > 1) {
+          const widths = [];
+          let maxW = 0, wi = 0;
+          for (let i = 0; i < lines.length; i++) {
+            const range = document.createRange();
+            range.selectNodeContents(lines[i]);
+            const rr = range.getBoundingClientRect();
+            widths.push(rr.width);
+            if (rr.width > maxW) { maxW = rr.width; wi = i; }
+          }
+          if (maxW > 0) {
+            // One character's width, from the widest line's first
+            // character (exact for the chat input's monospace font).
+            let wmax = 0;
+            let fn = null;
+            (function w(node) {
+              if (fn) return;
+              if (node.nodeType === 3) { if (node.textContent.length) { fn = node; return; } return; }
+              for (let i = 0; i < node.childNodes.length; i++) w(node.childNodes[i]);
+            })(lines[wi]);
+            if (fn) {
+              const cr = document.createRange();
+              cr.setStart(fn, 0);
+              cr.setEnd(fn, 1);
+              wmax = cr.getBoundingClientRect().width;
+            }
+            const thr = maxW - wmax;
+            inputBreaks = [];
+            for (let i = 0; i < lines.length - 1; i++) inputBreaks.push(widths[i] <= thr);
+          }
+        }
+      }
+      if (cur && vlines && lines) {
         if (lines.length) {
           const cTop = parseFloat(cur.style.top) || 0;
           const cLeft = parseFloat(cur.style.left) || 0;

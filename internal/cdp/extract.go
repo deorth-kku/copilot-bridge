@@ -129,7 +129,7 @@ type PopupState struct {
 // input text at its own width (responsive layout), so it needs the index —
 // a size-independent identity — not the live cursor pixels.
 const inputEditorJS = `
-  let inputEditor = null, inputFocused = false, cursorChar = -1;
+  let inputEditor = null, inputFocused = false, cursorChar = -1, inputBreaks = null, inputFP = '';
   try {
     inputEditor = el.querySelector('.chat-input-container .interactive-input-editor .monaco-editor')
                  || el.querySelector('.interactive-input-editor .monaco-editor');
@@ -139,8 +139,63 @@ const inputEditorJS = `
       while (n) { if (n === inputEditor) { inputFocused = true; break; } n = n.parentElement; }
       const cur = inputEditor.querySelector('.cursor');
       const vlines = inputEditor.querySelector('.view-lines');
-      if (cur && vlines) {
-        const lines = vlines.querySelectorAll('.view-line');
+      let lines = null;
+      if (vlines) {
+        lines = vlines.querySelectorAll('.view-line');
+        // inputFP: the editor width plus each line's character count. A
+        // live re-wrap (window resize) changes these WITHOUT changing the
+        // pane's innerText, yet it changes the break structure below, so
+        // both must be part of the fingerprint.
+        try {
+          inputFP = Math.round(inputEditor.getBoundingClientRect().width) + ':';
+          for (let i = 0; i < lines.length; i++) {
+            inputFP += lines[i].textContent.length;
+            if (i < lines.length - 1) inputFP += ',';
+          }
+        } catch (e) {}
+        // inputBreaks: one entry per boundary between consecutive view
+        // lines; true = a hard newline (a text-line end), false = a soft
+        // wrap. The mirror re-groups the live view lines across the soft
+        // boundaries so the text re-flows continuously at the mirror
+        // width. A hard line can never exceed the live wrap width, and a
+        // wrapped line's non-final segments always reach it, so a line
+        // whose text falls short of the widest line by more than one
+        // character was not wrapped: the boundary after it is hard. A
+        // hard line ending exactly at the wrap column is indistinguishable
+        // from a wrapped segment in the DOM (the rare miss).
+        if (lines.length > 1) {
+          const widths = [];
+          let maxW = 0, wi = 0;
+          for (let i = 0; i < lines.length; i++) {
+            const range = document.createRange();
+            range.selectNodeContents(lines[i]);
+            const rr = range.getBoundingClientRect();
+            widths.push(rr.width);
+            if (rr.width > maxW) { maxW = rr.width; wi = i; }
+          }
+          if (maxW > 0) {
+            // One character's width, from the widest line's first
+            // character (exact for the chat input's monospace font).
+            let wmax = 0;
+            let fn = null;
+            (function w(node) {
+              if (fn) return;
+              if (node.nodeType === 3) { if (node.textContent.length) { fn = node; return; } return; }
+              for (let i = 0; i < node.childNodes.length; i++) w(node.childNodes[i]);
+            })(lines[wi]);
+            if (fn) {
+              const cr = document.createRange();
+              cr.setStart(fn, 0);
+              cr.setEnd(fn, 1);
+              wmax = cr.getBoundingClientRect().width;
+            }
+            const thr = maxW - wmax;
+            inputBreaks = [];
+            for (let i = 0; i < lines.length - 1; i++) inputBreaks.push(widths[i] <= thr);
+          }
+        }
+      }
+      if (cur && vlines && lines) {
         if (lines.length) {
           const cTop = parseFloat(cur.style.top) || 0;
           const cLeft = parseFloat(cur.style.left) || 0;
@@ -194,7 +249,13 @@ type FingerprintState struct {
 	// characters before the caret) in the live layout; -1 when the input
 	// has no cursor. The mirror re-wraps the text at its own width, so it
 	// re-seats the cursor by this index instead of the live pixels.
-	CursorChar    int            `json:"cursorChar"`
+	CursorChar int `json:"cursorChar"`
+	// InputBreaks is one bool per boundary between the chat input's
+	// consecutive live view lines: true = hard newline (a text-line end),
+	// false = soft wrap. The mirror re-groups the view lines across the
+	// soft boundaries so the text re-flows continuously at the mirror
+	// width. Nil when the input has fewer than two view lines.
+	InputBreaks   []bool         `json:"inputBreaks,omitempty"`
 	Rect          PaneRect       `json:"rect"`
 	Scroll        PaneScroll     `json:"scroll"`
 	ScrollPath    []int          `json:"scrollPath"`
@@ -510,12 +571,13 @@ const fpExpr = `(selectors) => {
         '|' + (inputFocused ? 1 : 0);
     }
   } catch (e) {}
-  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP + ':' + curFP;
+  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP + ':' + curFP + ':' + inputFP;
   return {
     fp: fp,
     cssFP: cssFP,
     inputFocused: inputFocused,
     cursorChar: cursorChar,
+    inputBreaks: inputBreaks,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
     // When no real scroller exists (sc is null), report the pane root's own
     // geometry as a neutral state: the mirror early-returns on the null

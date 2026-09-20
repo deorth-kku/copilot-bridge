@@ -56,9 +56,14 @@ type stateMsg struct {
 	// re-wraps the input text at its own width, so it re-seats the cursor by
 	// this index instead of the live cursor pixels. No omitempty: 0 (caret
 	// at the start) is a valid value.
-	CursorChar int            `json:"cursorChar"`
-	Rect       cdp.PaneRect   `json:"rect"`
-	Scroll     cdp.PaneScroll `json:"scroll"`
+	CursorChar int `json:"cursorChar"`
+	// InputBreaks marks which live view-line boundaries are hard newlines
+	// (true) versus soft wraps (false); the mirror merges the segments
+	// joined by soft wraps so the text flows continuously at the mirror
+	// width. See cdp.FingerprintState.InputBreaks.
+	InputBreaks []bool         `json:"inputBreaks,omitempty"`
+	Rect        cdp.PaneRect   `json:"rect"`
+	Scroll      cdp.PaneScroll `json:"scroll"`
 	// ScrollPath identifies the measured scroll container as a DOM path from
 	// the pane root (no omitempty: an empty path means "the root itself").
 	ScrollPath []int `json:"scrollPath"`
@@ -1146,7 +1151,8 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 
 	base := stateMsg{
 		Type: "state", CSSVer: cssVer, RootStyle: rootStyle, ThemeVer: themeVer,
-		NestedScrolls: fpst.NestedScrolls, InputFocused: fpst.InputFocused, CursorChar: fpst.CursorChar,
+		NestedScrolls: fpst.NestedScrolls, InputFocused: fpst.InputFocused,
+		CursorChar: fpst.CursorChar, InputBreaks: fpst.InputBreaks,
 		Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
 		Window: s.Title(), WindowID: winID, Windows: wins,
 	}

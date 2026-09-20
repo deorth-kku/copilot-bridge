@@ -466,8 +466,12 @@ const pageHTML = `<!doctype html>
       }
       updatePopup(m);
       // Re-apply the live content paddings before the caret is re-seated,
-      // so the caret's top measurement sees the padded layout.
+      // so the caret's top measurement sees the padded layout. The re-flow
+      // runs AFTER the fit (the fit reads the live inline line geometry,
+      // which the regrouped blocks would no longer report) and BEFORE the
+      // caret re-seating (which walks the regrouped text).
       fitInputEditor();
+      reflowInputLines(m.inputBreaks);
       syncCursor(m);
     };
   }
@@ -698,6 +702,50 @@ const pageHTML = `<!doctype html>
     if (padBottom < 0) padBottom = 0;
     if (vl.style.paddingTop !== padTop + 'px') vl.style.paddingTop = padTop + 'px';
     if (vl.style.paddingBottom !== padBottom + 'px') vl.style.paddingBottom = padBottom + 'px';
+  }
+
+  // The live view lines are one block per LIVE visual line: a long text
+  // line is split into several .view-line blocks at the live wrap width.
+  // The mirror re-flows the input at its OWN width, so those live soft
+  // wraps must not survive as block boundaries — each would re-wrap
+  // again, leaving ragged tails. reflowInputLines merges the segments
+  // joined by a SOFT boundary (breaks[i] === false) into one block and
+  // keeps the hard-newline blocks separate. Character order is preserved,
+  // so the cursorChar re-seating and the click character mapping stay
+  // valid. The merge reuses each group's first line element (its inline
+  // line-height survives). The incremental DOM patch self-heals the
+  // regrouped structure on the next HTML update: the positional diff
+  // trims a group's surplus spans and appends the missing lines with
+  // their fresh text.
+  function reflowInputLines(breaks) {
+    var box = pane.querySelector('.chat-input-container');
+    if (!box) return;
+    var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+    if (!ed) return;
+    var vl = ed.querySelector('.view-lines');
+    if (!vl) return;
+    // Static snapshot: the rebuild below detaches these elements.
+    var lines = Array.prototype.slice.call(vl.querySelectorAll('.view-line'));
+    if (lines.length < 2 || !breaks || breaks.length !== lines.length - 1) return;
+    // Group indices: a soft boundary (false) joins the next line to the
+    // current group; a hard boundary (true) starts a new group.
+    var groups = [];
+    var cur = [0];
+    for (var i = 0; i < breaks.length; i++) {
+      if (breaks[i]) { groups.push(cur); cur = [i + 1]; }
+      else cur.push(i + 1);
+    }
+    groups.push(cur);
+    if (groups.length === lines.length) return; // all hard: one block per line already
+    vl.innerHTML = '';
+    for (var g = 0; g < groups.length; g++) {
+      var head = lines[groups[g][0]];
+      for (var j = 1; j < groups[g].length; j++) {
+        var l = lines[groups[g][j]];
+        while (l.firstChild) head.appendChild(l.firstChild);
+      }
+      vl.appendChild(head);
+    }
   }
 
   // The live cursor carries the LIVE layout's inline top/left, but the
