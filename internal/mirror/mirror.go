@@ -1092,6 +1092,14 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 	var html, rootStyle, themeVars, themeBg string
 	var newPopup *cdp.PopupState
 	var htmlMs int64
+	// The nested-scroll state shipped with a message must be measured at the
+	// SAME instant as the HTML it accompanies. The fingerprint (taken first,
+	// to decide whether to extract) can predate a content chunk that the
+	// extract (taken second) already includes; shipping the fingerprint's
+	// nestedScrolls with the newer HTML would leave the mirror's nested list
+	// (the reasoning-trace / streaming spinner) one chunk behind its own
+	// content, clipping the spinner at the box bottom until the next message.
+	nestedScrolls := fpst.NestedScrolls
 	if fpChanged {
 		exStart := time.Now()
 		hs, err := cdp.ExtractHTML(s, m.selectors)
@@ -1104,6 +1112,9 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 			return
 		}
 		html, rootStyle, themeVars, themeBg = hs.HTML, hs.RootStyle, hs.ThemeVars, hs.ThemeBg
+		if hs.NestedScrolls != nil {
+			nestedScrolls = hs.NestedScrolls
+		}
 		if hs.Popup != nil {
 			newPopup = hs.Popup
 			// Popups can carry images too (e.g. the attached-image hover
@@ -1133,7 +1144,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		html: html, css: css, cssVer: cssVer, cssFP: fpst.CSSFP,
 		rootStyle: rootStyle, themeVars: themeVars, themeVer: themeVer, themeBg: themeBg,
 		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath, scrollRows: fpst.ScrollRows,
-		nestedScrolls: fpst.NestedScrolls,
+		nestedScrolls: nestedScrolls,
 		window:        s.Title(), windowID: winID, fp: fpst.FP, inputFocused: fpst.InputFocused,
 		cursorChar: fpst.CursorChar,
 	}
@@ -1151,7 +1162,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 
 	base := stateMsg{
 		Type: "state", CSSVer: cssVer, RootStyle: rootStyle, ThemeVer: themeVer,
-		NestedScrolls: fpst.NestedScrolls, InputFocused: fpst.InputFocused,
+		NestedScrolls: nestedScrolls, InputFocused: fpst.InputFocused,
 		CursorChar: fpst.CursorChar, InputBreaks: fpst.InputBreaks,
 		Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
 		Window: s.Title(), WindowID: winID, Windows: wins,

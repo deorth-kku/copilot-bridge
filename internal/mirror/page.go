@@ -459,19 +459,17 @@ const pageHTML = `<!doctype html>
       } else {
         // Layout/scroll-only update (e.g. the live page scrolled): no DOM
         // re-render, just keep the local scroll position in sync with the
-        // live page.
+        // live page. The input fit runs first (a no-op normally: the DOM is
+        // unchanged) so the list's clientHeight is final before the scroll
+        // is restored.
+        fitInputEditor();
+        reflowInputLines(m.inputBreaks);
         restoreScroll(m);
         restoreNestedScrolls(m);
         syncDrawnScrollbars();
       }
       updatePopup(m);
-      // Re-apply the live content paddings before the caret is re-seated,
-      // so the caret's top measurement sees the padded layout. The re-flow
-      // runs AFTER the fit (the fit reads the live inline line geometry,
-      // which the regrouped blocks would no longer report) and BEFORE the
-      // caret re-seating (which walks the regrouped text).
-      fitInputEditor();
-      reflowInputLines(m.inputBreaks);
+      // The caret re-seating walks the regrouped text, so it runs last.
       syncCursor(m);
     };
   }
@@ -671,6 +669,16 @@ const pageHTML = `<!doctype html>
         }
       }
     }
+    // Re-apply the live content paddings BEFORE the scroll is restored:
+    // the fit changes the chat input's height, which changes the list's
+    // clientHeight, so restoreScroll must see the FINAL geometry —
+    // otherwise a pinned bottom is left one input line (24px) short of
+    // the true bottom on every html update. The re-flow runs AFTER the
+    // fit (the fit reads the live inline line geometry, which the
+    // regrouped blocks would no longer report) and BEFORE the caret
+    // re-seating (which walks the regrouped text).
+    fitInputEditor();
+    reflowInputLines(m.inputBreaks);
     restoreNestedScrolls(m);
     restoreScroll(m);
     syncDrawnScrollbars();
@@ -1222,18 +1230,27 @@ const pageHTML = `<!doctype html>
       var max = el.scrollHeight - el.clientHeight;
       if (max <= 0) continue;
       // The live state of this container did not change since the last
-      // apply (and it is the same element): keep the user's local scroll
-      // position instead of re-applying the live ratio. A replaced element
-      // (patch, window switch) or a moved live scroll re-applies.
+      // apply (and it is the same element) AND the mirror's own scroll range
+      // is unchanged: keep the user's local scroll position instead of
+      // re-applying the live ratio. A replaced element (patch, window
+      // switch), a moved live scroll, OR a changed mirror range re-applies.
+      // The mirror-range check is essential: the live list's virtualized
+      // scrollHeight lags its DOM by a message, so on the message where the
+      // trace grew (mirror content grew, max increased) the live (top,
+      // scrollH) is still unchanged. Without this check the preserve would
+      // skip, leaving the mirror one chunk behind its own content and
+      // clipping the streaming spinner at the box bottom until the next
+      // message.
       var key = JSON.stringify(ns.path);
       var prev = lastNestedApplied[key];
       if (prev && prev.el === el && prev.top === ns.top &&
-          prev.scrollH === ns.scrollH && prev.clientH === ns.clientH) {
+          prev.scrollH === ns.scrollH && prev.clientH === ns.clientH &&
+          prev.max === max) {
         continue;
       }
       var ratio = liveMax > 0 ? Math.max(0, Math.min(1, ns.top / liveMax)) : 0;
       el.scrollTop = ratio * max;
-      lastNestedApplied[key] = { el: el, top: ns.top, scrollH: ns.scrollH, clientH: ns.clientH };
+      lastNestedApplied[key] = { el: el, top: ns.top, scrollH: ns.scrollH, clientH: ns.clientH, max: max };
     }
   }
 
