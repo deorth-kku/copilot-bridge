@@ -27,13 +27,18 @@ const workspacesHTML = `<!DOCTYPE html>
   html, body { margin: 0; height: 100%; background: #181818; color: #cccccc; font: 13px "Segoe WPC", "Segoe UI", sans-serif; }
   #bar { position: fixed; top: 0; left: 0; right: 0; background: #181818; border-bottom: 1px solid #2b2b2b; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 10px; z-index: 10; box-sizing: border-box; }
   /* .monaco-inputbox look: 4px radius, focus border #0078d4. */
-  #bar select, #q { background: #313131; color: #cccccc; border: 1px solid #3c3c3c; height: 36px; box-sizing: border-box; border-radius: 4px; }
-  #bar select:focus, #q:focus { outline: none; border-color: #0078d4; }
+  #q { background: #313131; color: #cccccc; border: 1px solid #3c3c3c; height: 36px; box-sizing: border-box; border-radius: 4px; }
+  #q:focus { outline: none; border-color: #0078d4; }
   #q::placeholder { color: #989898; }
-  #nav { min-width: 112px; font: 16px "Segoe WPC", "Segoe UI", sans-serif; padding: 0 8px; }
+  /* Back-button idiom, probed from the live chat view's "Go Back"
+     toolbar action: icon-only, transparent, no border, 6px radius,
+     hover bg rgba(90,93,94,0.31), 22x22 hit area (16px icon + 3px pad).
+     Mobile keeps a 36px touch target with the same look. */
+  #nav { width: 36px; height: 36px; padding: 0; background: transparent; border: none; border-radius: 6px; color: #cccccc; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  #nav:hover { background: rgba(90,93,94,0.31); }
   #q { order: 2; flex: 1 1 100%; font: 16px "Segoe WPC", "Segoe UI", sans-serif; padding: 0 10px; }
   #count { order: 1; color: #9d9d9d; white-space: nowrap; font-size: 12px; margin-left: auto; }
-  /* Mobile bar is TWO wrapped rows (picker row + full-width search row):
+  /* Mobile bar is TWO wrapped rows (nav row + full-width search row):
      6 + 36 + 6 row-gap + 36 + 6 padding + 1px border = 91px. */
   #list { position: absolute; top: 91px; bottom: 0; left: 0; right: 0; overflow-y: auto; }
   /* VS Code-style scrollbar: transparent track, translucent slider. */
@@ -57,8 +62,8 @@ const workspacesHTML = `<!DOCTYPE html>
   .msg.err { color: #f85149; }
   @media (min-width: 800px) {
     #bar { flex-wrap: nowrap; height: 26px; padding: 0 8px; }
-    #bar select, #q { height: 20px; font-size: 12px; }
-    #nav { min-width: 110px; padding: 0 6px; }
+    #q { height: 20px; font-size: 12px; }
+    #nav { width: 22px; height: 22px; }
     #q { order: 2; flex: 1 1 auto; padding: 0 8px; }
     #count { order: 3; margin-left: 0; }
     #list { top: 27px; }
@@ -69,10 +74,7 @@ const workspacesHTML = `<!DOCTYPE html>
 </head>
 <body>
 <div id="bar">
-  <select id="nav">
-    <option value="workspaces" selected>Workspaces</option>
-    <option value="mirror">&larr; Mirror</option>
-  </select>
+  <button id="nav" type="button" title="Mirror" aria-label="Mirror"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8H3.2M7.5 3.8 3.2 8l4.3 4.2"/></svg></button>
   <input id="q" placeholder="search workspaces…" autocomplete="off">
   <span id="count"></span>
 </div>
@@ -85,8 +87,8 @@ const workspacesHTML = `<!DOCTYPE html>
   var count = document.getElementById('count');
   var all = [];
 
-  nav.addEventListener('change', function () {
-    if (nav.value === 'mirror') location.href = '/';
+  nav.addEventListener('click', function () {
+    location.href = '/';
   });
 
   function esc(s) {
