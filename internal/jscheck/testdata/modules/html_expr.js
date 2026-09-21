@@ -1,9 +1,13 @@
 module.exports = (selectors) => {
-  let el = null;
-  for (const sel of selectors) {
-    try { el = document.querySelector(sel); } catch (e) {}
-    if (el) break;
-  }
+  
+  const findRoot = (sels) => {
+    for (const sel of sels) {
+      try { const e = document.querySelector(sel); if (e) return e; } catch (err) {}
+    }
+    return null;
+  };
+
+  const el = findRoot(selectors);
   if (!el) return { err: 'pane not found' };
   const r = el.getBoundingClientRect();
 
@@ -232,6 +236,10 @@ module.exports = (selectors) => {
       (document.documentElement.getAttribute('style') || '').length + ':' +
       (document.body ? (document.body.getAttribute('style') || '').length : 0);
   } catch (e) {}
+
+  const scroll = sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight, anchorKind: anchorKind }
+    : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight, anchorKind: anchorKind };
+
   const rootStyle = ((document.documentElement.getAttribute('style') || '') + ';' +
     (document.body ? (document.body.getAttribute('style') || '') : '')).trim();
   // Capture every CSS custom property computed at the pane root. VS Code
@@ -306,11 +314,7 @@ module.exports = (selectors) => {
     themeBg: themeBg,
     inputFocused: inputFocused,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
-    // When no real scroller exists (sc is null), report the pane root's own
-    // geometry as a neutral state: the mirror early-returns on the null
-    // scrollPath, so these values are informational only.
-    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight, anchorKind: anchorKind }
-      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight, anchorKind: anchorKind },
+    scroll: scroll,
     scrollPath: scrollPath,
     scrollRows: scrollRows,
     nestedScrolls: nestedScrolls,

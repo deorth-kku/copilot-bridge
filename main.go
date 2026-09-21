@@ -142,17 +142,23 @@ func processEvent(ev cdp.Event, store *config.Store, ld *loader.Loader, log *slo
 	go ld.Load(m)
 }
 
-// defaultSettingsPath returns the VS Code user settings.json location for
-// the current platform:
-//   - Windows: %APPDATA%\Code\User\settings.json
-//   - Linux:   ~/.config/Code/User/settings.json
-//   - macOS:   ~/Library/Application Support/Code/User/settings.json
-func defaultSettingsPath() string {
+// vscodeUserDir returns the VS Code user data directory for the current
+// platform:
+//   - Windows: %APPDATA%\Code\User
+//   - Linux:   ~/.config/Code/User
+//   - macOS:   ~/Library/Application Support/Code/User
+func vscodeUserDir() string {
 	if dir, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(dir, "Code", "User", "settings.json")
+		return filepath.Join(dir, "Code", "User")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "Code", "User", "settings.json")
+	return filepath.Join(home, ".config", "Code", "User")
+}
+
+// defaultSettingsPath returns the VS Code user settings.json location
+// (vscodeUserDir + settings.json).
+func defaultSettingsPath() string {
+	return filepath.Join(vscodeUserDir(), "settings.json")
 }
 
 // defaultLogPath returns the log file location in the platform temp dir,
@@ -163,13 +169,9 @@ func defaultLogPath() string {
 }
 
 // defaultStoragePath returns the VS Code user globalStorage storage.json
-// location for the current platform (same base dir as defaultSettingsPath).
+// location (vscodeUserDir + globalStorage/storage.json).
 func defaultStoragePath() string {
-	if dir, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(dir, "Code", "User", "globalStorage", "storage.json")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "Code", "User", "globalStorage", "storage.json")
+	return filepath.Join(vscodeUserDir(), "globalStorage", "storage.json")
 }
 
 // defaultPaneSelectors are the candidate Copilot pane root selectors, tried

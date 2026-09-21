@@ -235,16 +235,11 @@ func (s *Session) inject(name, js string) {
 	}
 	// A page-side exception is NOT a CDP error: it rides inside the result
 	// as exceptionDetails.
-	var r struct {
-		Exception struct {
-			Text string `json:"text"`
-			Obj  struct {
-				Description string `json:"description"`
-			} `json:"exception"`
-		} `json:"exceptionDetails"`
-	}
-	if err := json.Unmarshal(raw, &r); err == nil && (r.Exception.Obj.Description != "" || r.Exception.Text != "") {
-		s.log.Error("injection threw", "binding", name, "err", r.Exception.Obj.Description)
+	var r evalResp
+	if err := json.Unmarshal(raw, &r); err == nil {
+		if d := r.exception(); d != "" {
+			s.log.Error("injection threw", "binding", name, "err", d)
+		}
 	}
 }
 
@@ -320,16 +315,23 @@ func (s *Session) handle(raw []byte) {
 	}
 }
 
-func (s *Session) send(method string, params any) {
-	s.mu.Lock()
+// buildFrame marshals one outgoing CDP command and allocates its id. The
+// caller must hold s.mu (nextID and the connection are guarded by it).
+func (s *Session) buildFrame(method string, params any) (id int, b []byte, err error) {
 	s.nextID++
-	id := s.nextID
+	id = s.nextID
 	m := map[string]any{"id": id, "method": method}
 	if params != nil {
 		m["params"] = params
 	}
-	b, _ := json.Marshal(m)
-	if s.conn != nil {
+	b, err = json.Marshal(m)
+	return id, b, err
+}
+
+func (s *Session) send(method string, params any) {
+	s.mu.Lock()
+	_, b, _ := s.buildFrame(method, params)
+	if s.conn != nil && b != nil {
 		s.conn.WriteMessage(websocket.TextMessage, b)
 	}
 	s.mu.Unlock()
@@ -346,20 +348,13 @@ func (s *Session) Call(method string, params any) (jsontext.Value, error) {
 		s.mu.Unlock()
 		return nil, errors.New("not connected")
 	}
-	s.nextID++
-	id := s.nextID
-	ch := make(chan callResult, 1)
-	s.pending[id] = ch
-	m := map[string]any{"id": id, "method": method}
-	if params != nil {
-		m["params"] = params
-	}
-	b, err := json.Marshal(m)
+	id, b, err := s.buildFrame(method, params)
 	if err != nil {
-		delete(s.pending, id)
 		s.mu.Unlock()
 		return nil, err
 	}
+	ch := make(chan callResult, 1)
+	s.pending[id] = ch
 	start := time.Now()
 	werr := s.conn.WriteMessage(websocket.TextMessage, b)
 	s.mu.Unlock()

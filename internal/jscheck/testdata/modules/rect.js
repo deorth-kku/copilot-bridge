@@ -1,7 +1,14 @@
 module.exports = (args) => {
   const sels = args[0], path = args[1];
-  let root = null;
-  for (const sel of sels) { try { root = document.querySelector(sel); } catch (e) {} if (root) break; }
+  
+  const findRoot = (sels) => {
+    for (const sel of sels) {
+      try { const e = document.querySelector(sel); if (e) return e; } catch (err) {}
+    }
+    return null;
+  };
+
+  const root = findRoot(sels);
   if (!root) return null;
   let el = root;
   if (Array.isArray(path) && path.length) {

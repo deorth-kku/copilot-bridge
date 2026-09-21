@@ -51,13 +51,10 @@ func TestdataDir() string {
 	return filepath.Join(filepath.Dir(thisFile), "testdata")
 }
 
-// WriteFixtures writes the generated JS fixtures under dir so the committed
-// node:test files can be run directly against the testdata tree (no
-// sandbox): modules[name] becomes modules/name.js wrapped as
-// `module.exports = <src>;` and raw[name] becomes raw/name.js verbatim.
-// The directories are gitignored; regenerate after changing any JS
-// constant (TestJSUnitStandalone does this automatically).
-func WriteFixtures(dir string, modules, raw map[string]string) error {
+// writeModuleFiles writes the generated JS fixtures under dir:
+// modules[name] becomes modules/name.js wrapped as `module.exports = <src>;`
+// and raw[name] becomes raw/name.js verbatim.
+func writeModuleFiles(dir string, modules, raw map[string]string) error {
 	mdir := filepath.Join(dir, "modules")
 	if err := os.MkdirAll(mdir, 0o755); err != nil {
 		return err
@@ -77,6 +74,14 @@ func WriteFixtures(dir string, modules, raw map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// WriteFixtures writes the generated JS fixtures under dir so the committed
+// node:test files can be run directly against the testdata tree (no
+// sandbox). The directories are gitignored; regenerate after changing any
+// JS constant (TestJSUnitStandalone does this automatically).
+func WriteFixtures(dir string, modules, raw map[string]string) error {
+	return writeModuleFiles(dir, modules, raw)
 }
 
 // RunNodeTest runs `node --test` on the given absolute test file paths and
@@ -131,23 +136,8 @@ func RunJSUnit(t *testing.T, modules, raw map[string]string, testFiles ...string
 		copyFile(t, filepath.Join(testdata, tf), dst)
 		copied = append(copied, dst)
 	}
-	mdir := filepath.Join(dir, "modules")
-	if err := os.MkdirAll(mdir, 0o755); err != nil {
+	if err := writeModuleFiles(dir, modules, raw); err != nil {
 		t.Fatal(err)
-	}
-	for name, src := range modules {
-		if err := os.WriteFile(filepath.Join(mdir, name+".js"), []byte("module.exports = "+src+";\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	rdir := filepath.Join(dir, "raw")
-	if err := os.MkdirAll(rdir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, src := range raw {
-		if err := os.WriteFile(filepath.Join(rdir, name+".js"), []byte(src), 0o644); err != nil {
-			t.Fatal(err)
-		}
 	}
 	// Explicit file list (a bare directory arg is not reliably treated as
 	// a test root across node versions).

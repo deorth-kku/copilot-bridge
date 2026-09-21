@@ -1,5 +1,13 @@
 module.exports = (args) => {
   const sels = args[0], path = args[1], rx = args[2], ry = args[3];
+  
+  const findRoot = (sels) => {
+    for (const sel of sels) {
+      try { const e = document.querySelector(sel); if (e) return e; } catch (err) {}
+    }
+    return null;
+  };
+
   let root = null;
   let p = path;
   // A path starting with -1 is rooted at the live context view (popup)
@@ -14,7 +22,7 @@ module.exports = (args) => {
     }
     if (root) p = p.slice(1);
   } else {
-    for (const sel of sels) { try { root = document.querySelector(sel); } catch (e) {} if (root) break; }
+    root = findRoot(sels);
   }
   if (!root) return null;
   let el = root;

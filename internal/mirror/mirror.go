@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1149,8 +1150,8 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 	m.snapMu.Lock()
 	prev := m.snaps[winID]
 	rectChanged := prev == nil || prev.rect != fpst.Rect
-	scrollChanged := prev == nil || prev.scroll != fpst.Scroll || !equalInts(prev.scrollPath, fpst.ScrollPath) ||
-		!equalFloats(prev.scrollRows, fpst.ScrollRows)
+	scrollChanged := prev == nil || prev.scroll != fpst.Scroll || !slices.Equal(prev.scrollPath, fpst.ScrollPath) ||
+		!slices.Equal(prev.scrollRows, fpst.ScrollRows)
 	fpChanged := prev == nil || prev.fp != fpst.FP
 	cssFPChanged := prev == nil || prev.cssFP != fpst.CSSFP
 	// Nested scrollers (reasoning-trace lists) scroll without any DOM change:
@@ -1300,10 +1301,8 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 	// The popup's anchor depends on each client's OWN last-clicked control
 	// (several tabs can mirror this window at once), so resolve it per
 	// client on every refresh while a popup is open: one cheap eval per
-	// client, only while visible. The mirror applies the live
-	// (popup - anchor) offset to its own copy of the control, which is
-	// size-independent. Marshal a copy of the message per client — never
-	// mutate the shared Popup pointer.
+	// client, only while visible. Marshal a copy of the message per client
+	// — never mutate the shared Popup pointer.
 	marshalStart := time.Now()
 	// Phase 1: the pane HTML and the popup, styled by the CACHED css. This is
 	// what makes the popup visible in the mirror, so it must not wait for a
@@ -1326,16 +1325,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 				c.lastWin.Store(&winID)
 			}
 			if ns.popupFP != "" && msg.Popup != nil {
-				if ap := c.lastAnchor.Load(); ap != nil {
-					if ar, ok := cdp.EvalRect(s, m.selectors, *ap); ok {
-						p := *msg.Popup
-						p.Anchor = &cdp.PaneRect{
-							Left: ar.Left - fpst.Rect.Left, Top: ar.Top - fpst.Rect.Top,
-							Width: ar.Width, Height: ar.Height,
-						}
-						msg.Popup = &p
-					}
-				}
+				m.withPopupAnchor(&msg, c, s, fpst.Rect)
 			}
 			c.sendTo(msg)
 		}
@@ -1368,16 +1358,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 			for _, c := range m.groupClients(m.disc.Windows())[winID] {
 				fm := follow
 				if fm.Popup != nil {
-					if ap := c.lastAnchor.Load(); ap != nil {
-						if ar, ok := cdp.EvalRect(s, m.selectors, *ap); ok {
-							p := *fm.Popup
-							p.Anchor = &cdp.PaneRect{
-								Left: ar.Left - fpst.Rect.Left, Top: ar.Top - fpst.Rect.Top,
-								Width: ar.Width, Height: ar.Height,
-							}
-							fm.Popup = &p
-						}
-					}
+					m.withPopupAnchor(&fm, c, s, fpst.Rect)
 				}
 				c.sendTo(fm)
 			}
@@ -1394,6 +1375,31 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		"marshalMs", time.Since(marshalStart).Milliseconds(),
 		"changed", strings.Join(changedParts, ","), "clients", len(group),
 		"htmlBytes", len(html), "cssBytes", len(css))
+}
+
+// withPopupAnchor resolves the client's last-clicked control to a live rect
+// and attaches it as the popup's anchor, mutating the (per-client COPY of
+// the) message in place. The mirror applies the live (popup - anchor)
+// offset to its own copy of the control, which is size-independent. No-op
+// when the message carries no popup or the client has no anchor yet.
+func (m *Mirror) withPopupAnchor(msg *stateMsg, c *client, s *cdp.Session, paneRect cdp.PaneRect) {
+	if msg.Popup == nil {
+		return
+	}
+	ap := c.lastAnchor.Load()
+	if ap == nil {
+		return
+	}
+	ar, ok := cdp.EvalRect(s, m.selectors, *ap)
+	if !ok {
+		return
+	}
+	p := *msg.Popup
+	p.Anchor = &cdp.PaneRect{
+		Left: ar.Left - paneRect.Left, Top: ar.Top - paneRect.Top,
+		Width: ar.Width, Height: ar.Height,
+	}
+	msg.Popup = &p
 }
 
 // windowIn reports whether id is in the (title-sorted) window set.
@@ -1612,37 +1618,13 @@ func orDefault(s, def string) string {
 	return s
 }
 
-func equalInts(a, b []int) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func equalFloats(a, b []float64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func equalNested(a, b []cdp.NestedScroll) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
 		if a[i].Top != b[i].Top || a[i].ScrollH != b[i].ScrollH || a[i].ClientH != b[i].ClientH ||
-			!equalInts(a[i].Path, b[i].Path) {
+			!slices.Equal(a[i].Path, b[i].Path) {
 			return false
 		}
 	}

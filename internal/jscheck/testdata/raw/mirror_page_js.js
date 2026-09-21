@@ -426,6 +426,15 @@
     syncDrawnScrollbars();
   }
 
+  // The chat input's Monaco editor, or null when the input is not rendered.
+  // box may be passed (a click target's closest .chat-input-container);
+  // otherwise the pane's own input container is used.
+  function chatInputEditor(box) {
+    if (!box) box = pane.querySelector('.chat-input-container');
+    if (!box) return null;
+    return box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+  }
+
   // The live editor's inline height includes Monaco's content paddings:
   // the first .view-line's inline top is the top padding, and the editor's
   // inline height minus the live lines' total height is the bottom padding
@@ -436,9 +445,7 @@
   // geometry: size-independent (they follow the font metrics, not the pane
   // width), so the mirror's auto height matches live line-for-line.
   function fitInputEditor() {
-    var box = pane.querySelector('.chat-input-container');
-    if (!box) return;
-    var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+    var ed = chatInputEditor();
     if (!ed) return;
     var vl = ed.querySelector('.view-lines');
     if (!vl) return;
@@ -468,9 +475,7 @@
   // trims a group's surplus spans and appends the missing lines with
   // their fresh text.
   function reflowInputLines(breaks) {
-    var box = pane.querySelector('.chat-input-container');
-    if (!box) return;
-    var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+    var ed = chatInputEditor();
     if (!ed) return;
     var vl = ed.querySelector('.view-lines');
     if (!vl) return;
@@ -498,6 +503,19 @@
     }
   }
 
+  // Text nodes under root in document order (spans may nest).
+  function collectTextNodes(root) {
+    var nodes = [];
+    (function w(node) {
+      for (var i = 0; i < node.childNodes.length; i++) {
+        var c = node.childNodes[i];
+        if (c.nodeType === 3) nodes.push(c);
+        else if (c.nodeType === 1) w(c);
+      }
+    })(root);
+    return nodes;
+  }
+
   // The live cursor carries the LIVE layout's inline top/left, but the
   // mirror re-wraps the input text at its own width (the responsive CSS in
   // #mirror-css), so the live position no longer matches the mirror's text.
@@ -506,23 +524,13 @@
   // find the node holding that character, and measure it with a Range.
   function repositionCursor() {
     if (!(lastCursorChar >= 0)) return;
-    var box = pane.querySelector('.chat-input-container');
-    if (!box) return;
-    var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+    var ed = chatInputEditor();
     if (!ed) return;
     var cur = ed.querySelector('.cursor');
     if (!cur) return;
     var vlines = ed.querySelector('.view-lines');
     if (!vlines) return;
-    // Text nodes in document order (spans may nest).
-    var nodes = [];
-    (function w(node) {
-      for (var i = 0; i < node.childNodes.length; i++) {
-        var c = node.childNodes[i];
-        if (c.nodeType === 3) nodes.push(c);
-        else if (c.nodeType === 1) w(c);
-      }
-    })(vlines);
+    var nodes = collectTextNodes(vlines);
     if (!nodes.length) return; // empty input: nothing to re-seat on
     var n = lastCursorChar;
     var tn = null, off = 0;
@@ -570,9 +578,7 @@
   // Runs on BOTH update paths: the cursor element survives DOM patches in
   // place, and scroll-only updates must not drop the blink.
   function syncCursor(m) {
-    var box = pane.querySelector('.chat-input-container');
-    if (!box) return;
-    var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+    var ed = chatInputEditor();
     var cur = ed ? ed.querySelector('.cursor') : null;
     if (!cur) return;
     // The patch just applied the live cursor's inline top/left; re-seat the
@@ -609,18 +615,6 @@
   // position: the mirror's responsive layout does not preserve live pixel
   // offsets, so a copied position lands the popup in the wrong place.
   var lastAnchorPath = null;
-  // Resolve a DOM path (child indices from the pane root) to a current
-  // element, or null when the path no longer resolves (DOM re-patched).
-  function resolvePath(path) {
-    var el = pane.firstElementChild;
-    if (!el) return null;
-    if (!path || !path.length) return el;
-    for (var i = 0; i < path.length; i++) {
-      el = el.children[path[i]];
-      if (!el) return null;
-    }
-    return el;
-  }
   // Validate the live anchor (popup rect vs live anchor rect, both in LIVE
   // pane-relative coordinates). A popup opens flush against one of its
   // anchor's horizontal edges (VS Code aligns the popup's bottom with the
@@ -660,7 +654,7 @@
     var used = false;
     var ar = null;
     if (lastAnchorPath && lastPopup.anchor) {
-      var a = resolvePath(lastAnchorPath);
+      var a = pathEl(lastAnchorPath);
       if (a) {
         var ar0 = a.getBoundingClientRect();
         if (popupNearAnchor(lastPopup, lastPopup.anchor) &&
@@ -778,11 +772,12 @@
     positionPopup();
   }
 
-  // Resolve a DOM path from the pane root to the element it addresses
-  // (null when the path no longer matches the current DOM, e.g. after a
-  // restructure the mirror has not re-rendered yet).
+  // Resolve a DOM path (child indices from the pane root) to a current
+  // element, or null when the path no longer resolves (the DOM was re-
+  // patched). An empty (or missing) path is the pane root itself.
   function pathEl(path) {
     var el = pane.firstElementChild || pane;
+    if (!path || !path.length) return el;
     for (var i = 0; i < path.length; i++) {
       el = el.children[path[i]];
       if (!el) return null;
@@ -1142,21 +1137,13 @@
   // editor box (toolbar/attachment clicks keep the identity mapping).
   function inputCharAt(target, cx, cy) {
     var box = (target && target.closest) ? target.closest('.chat-input-container') : null;
-    if (!box) return -1;
-    var ed = box.querySelector('.interactive-input-editor .monaco-editor') || box.querySelector('.monaco-editor');
+    var ed = chatInputEditor(box);
     if (!ed) return -1;
     var er = ed.getBoundingClientRect();
     if (cx < er.left || cx > er.right || cy < er.top || cy > er.bottom) return -1;
     var vlines = ed.querySelector('.view-lines');
     if (!vlines) return -1;
-    var nodes = [];
-    (function w(n) {
-      for (var i = 0; i < n.childNodes.length; i++) {
-        var c = n.childNodes[i];
-        if (c.nodeType === 3) nodes.push(c);
-        else if (c.nodeType === 1) w(c);
-      }
-    })(vlines);
+    var nodes = collectTextNodes(vlines);
     var total = 0;
     for (var i = 0; i < nodes.length; i++) total += nodes[i].length;
     if (!total) return 0; // empty editor: caret at the start
@@ -1536,11 +1523,14 @@
   // Keep the self-drawn scrollbar in sync with any local (programmatic)
   // scrolling of the mirror scrollers and with viewport resizes (rotation).
   pane.addEventListener('scroll', syncDrawnScrollbars, true);
-  window.addEventListener('resize', syncDrawnScrollbars);
-  window.addEventListener('resize', positionPopup);
-  // A viewport resize re-wraps the reflowed chat-input text, moving the
-  // caret's character to a new pixel position without any state message.
-  window.addEventListener('resize', repositionCursor);
+  // A viewport resize re-wraps the reflowed chat-input text (moving the
+  // caret's character to a new pixel position without any state message),
+  // repositions an open popup, and re-maps the self-drawn scrollbars.
+  window.addEventListener('resize', function () {
+    syncDrawnScrollbars();
+    positionPopup();
+    repositionCursor();
+  });
   // Fallback focus for browsers where the mousedown focus did not stick.
   // Clicking outside the input area drops the focus flag so re-renders do not
   // steal focus back into the input. A swipe that ends as a click is ignored.

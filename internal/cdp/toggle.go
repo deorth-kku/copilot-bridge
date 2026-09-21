@@ -1,9 +1,5 @@
 package cdp
 
-import (
-	"encoding/json/v2"
-)
-
 // toggleChatExpr resolves the title-bar "Toggle Chat" button to the center
 // of its bounding box. The attribute match is EXACT, not a substring scan:
 // chat-message accessibility labels carry arbitrary conversation text and
@@ -29,29 +25,13 @@ func ToggleChatPoint(s *Session) (float64, float64, bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	var resp struct {
-		Result struct {
-			Value struct {
-				OK bool    `json:"ok"`
-				X  float64 `json:"x"`
-				Y  float64 `json:"y"`
-			} `json:"value"`
-		} `json:"result"`
-		Exception struct {
-			Text string `json:"text"`
-			Obj  struct {
-				Description string `json:"description"`
-			} `json:"exception"`
-		} `json:"exceptionDetails"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
+	v, err := decodeEval[struct {
+		OK bool    `json:"ok"`
+		X  float64 `json:"x"`
+		Y  float64 `json:"y"`
+	}](raw)
+	if err != nil || !v.OK {
 		return 0, 0, false
 	}
-	if resp.Exception.Obj.Description != "" || resp.Exception.Text != "" {
-		return 0, 0, false
-	}
-	if !resp.Result.Value.OK {
-		return 0, 0, false
-	}
-	return resp.Result.Value.X, resp.Result.Value.Y, true
+	return v.X, v.Y, true
 }

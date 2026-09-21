@@ -29,8 +29,10 @@ const workspacesHTML = `<!DOCTYPE html>
   html { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #181818; color: #cccccc; font: 13px "Segoe WPC", "Segoe UI", sans-serif; }
   #bar { position: fixed; top: 0; left: 0; right: 0; background: #181818; border-bottom: 1px solid #2b2b2b; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 10px; z-index: 10; box-sizing: border-box; }
-  /* .monaco-inputbox look: 4px radius, focus border #0078d4. */
-  #q { background: #313131; color: #cccccc; border: 1px solid #3c3c3c; height: 36px; box-sizing: border-box; border-radius: 4px; }
+  /* .monaco-inputbox look: 4px radius, focus border #0078d4. Mobile-first:
+     full-width row and 16px font (no iOS zoom-on-focus); the desktop look
+     is restored in the min-width:800px block below. */
+  #q { background: #313131; color: #cccccc; border: 1px solid #3c3c3c; height: 36px; box-sizing: border-box; border-radius: 4px; order: 2; flex: 1 1 100%; font: 16px "Segoe WPC", "Segoe UI", sans-serif; padding: 0 10px; }
   #q:focus { outline: none; border-color: #0078d4; }
   #q::placeholder { color: #989898; }
   /* Back-button idiom, probed from the live chat view's "Go Back"
@@ -39,7 +41,6 @@ const workspacesHTML = `<!DOCTYPE html>
      Mobile keeps a 36px touch target with the same look. */
   #nav { width: 36px; height: 36px; padding: 0; background: transparent; border: none; border-radius: 6px; color: #cccccc; cursor: pointer; display: flex; align-items: center; justify-content: center; }
   #nav:hover { background: rgba(90,93,94,0.31); }
-  #q { order: 2; flex: 1 1 100%; font: 16px "Segoe WPC", "Segoe UI", sans-serif; padding: 0 10px; }
   #count { order: 1; color: #9d9d9d; white-space: nowrap; font-size: 12px; margin-left: auto; }
   /* Mobile bar is TWO wrapped rows (nav row + full-width search row):
      6 + 36 + 6 row-gap + 36 + 6 padding + 1px border = 91px. */
@@ -65,9 +66,8 @@ const workspacesHTML = `<!DOCTYPE html>
   .msg.err { color: #f85149; }
   @media (min-width: 800px) {
     #bar { flex-wrap: nowrap; height: 26px; padding: 0 8px; }
-    #q { height: 20px; font-size: 12px; }
+    #q { height: 20px; font-size: 12px; order: 2; flex: 1 1 auto; padding: 0 8px; }
     #nav { width: 22px; height: 22px; }
-    #q { order: 2; flex: 1 1 auto; padding: 0 8px; }
     #count { order: 3; margin-left: 0; }
     #list { top: 27px; }
     .row { padding: 5px 10px; }

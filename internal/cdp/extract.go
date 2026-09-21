@@ -58,6 +58,27 @@ type NestedScroll struct {
 	ClientH float64 `json:"clientH"`
 }
 
+// layoutState is the pane layout metadata shared by the cheap fingerprint
+// probe (FingerprintState) and the full HTML extract (HTMLState).
+type layoutState struct {
+	Rect PaneRect `json:"rect"`
+	// Scroll is the scroll state of the pane's nearest scrollable ancestor
+	// (see PaneScroll).
+	Scroll PaneScroll `json:"scroll"`
+	// ScrollPath identifies the measured scroll container as a DOM path from
+	// the pane root (no omitempty: an empty path means "the root itself",
+	// null means "no scroller").
+	ScrollPath []int `json:"scrollPath"`
+	// ScrollRows is each currently rendered row's [offsetTop, offsetHeight]
+	// pair in full-content coordinates (see scrollPathJS). The mirror uses it
+	// to align its viewport with the live viewport inside the rendered row
+	// window, because the mirror's content is only that window.
+	ScrollRows []float64 `json:"scrollRows,omitempty"`
+	// NestedScrolls carries the scroll state of nested scroll containers the
+	// main scroller does not cover (see NestedScroll).
+	NestedScrolls []NestedScroll `json:"nestedScrolls,omitempty"`
+}
+
 // HTMLState is the result of ExtractHTML.
 type HTMLState struct {
 	Err       string `json:"err"`
@@ -72,19 +93,9 @@ type HTMLState struct {
 	// ThemeBg is the pane root's effective background color (the nearest
 	// non-transparent ancestor's computed value); the mirror pins it on its
 	// own root and page body.
-	ThemeBg    string     `json:"themeBg"`
-	Rect       PaneRect   `json:"rect"`
-	Scroll     PaneScroll `json:"scroll"`
-	ScrollPath []int      `json:"scrollPath"`
-	// ScrollRows is each currently rendered row's [offsetTop, offsetHeight]
-	// pair in full-content coordinates (see scrollPathJS). The mirror uses it
-	// to align its viewport with the live viewport inside the rendered row
-	// window, because the mirror's content is only that window.
-	ScrollRows []float64 `json:"scrollRows,omitempty"`
-	// NestedScrolls carries the scroll state of nested scroll containers the
-	// main scroller does not cover (see NestedScroll).
-	NestedScrolls []NestedScroll `json:"nestedScrolls,omitempty"`
-	CSSFP         string         `json:"cssFP"`
+	ThemeBg string `json:"themeBg"`
+	layoutState
+	CSSFP string `json:"cssFP"`
 	// Popup is the currently visible context view (nil when none is open).
 	Popup *PopupState `json:"popup"`
 }
@@ -255,33 +266,57 @@ type FingerprintState struct {
 	// false = soft wrap. The mirror re-groups the view lines across the
 	// soft boundaries so the text re-flows continuously at the mirror
 	// width. Nil when the input has fewer than two view lines.
-	InputBreaks   []bool         `json:"inputBreaks,omitempty"`
-	Rect          PaneRect       `json:"rect"`
-	Scroll        PaneScroll     `json:"scroll"`
-	ScrollPath    []int          `json:"scrollPath"`
-	ScrollRows    []float64      `json:"scrollRows,omitempty"`
-	NestedScrolls []NestedScroll `json:"nestedScrolls,omitempty"`
+	InputBreaks []bool `json:"inputBreaks,omitempty"`
+	layoutState
 }
 
-// htmlExpr extracts the pane subtree's outerHTML plus the layout metadata
-// the mirror needs (bounding box, scroll, theme inline styles, and a cheap
-// CSS fingerprint). It is an arrow function (NOT invoked); ExtractHTML
-// passes the candidate selectors as its single argument.
-const htmlExpr = `(selectors) => {
-  let el = null;
-  for (const sel of selectors) {
-    try { el = document.querySelector(sel); } catch (e) {}
-    if (el) break;
-  }
-  if (!el) return { err: 'pane not found' };
-  const r = el.getBoundingClientRect();
-` + scrollContainerJS + inputEditorJS + `
+// findRootJS is spliced into every pane-root expression (they are evaluated
+// as separate programs, so the helper must be inlined). It tries the
+// candidate selectors in order and returns the first match (or null).
+const findRootJS = `
+  const findRoot = (sels) => {
+    for (const sel of sels) {
+      try { const e = document.querySelector(sel); if (e) return e; } catch (err) {}
+    }
+    return null;
+  };
+`
+
+// cssFPJS is spliced into both htmlExpr and fpExpr (same inlining
+// constraint). It computes the cheap CSS fingerprint: the stylesheet count
+// plus the inline <style> lengths on documentElement and body. VS Code adds
+// inline <style> elements (e.g. when opening a context view), so any of
+// those flips the fingerprint and triggers a CSS re-extract.
+const cssFPJS = `
   let cssFP = '';
   try {
     cssFP = document.styleSheets.length + ':' +
       (document.documentElement.getAttribute('style') || '').length + ':' +
       (document.body ? (document.body.getAttribute('style') || '').length : 0);
   } catch (e) {}
+`
+
+// scrollObjJS is spliced into both htmlExpr and fpExpr (same inlining
+// constraint). It builds the scroll state object from the measured
+// scroller (sc) and the rows' offset (scrollOffset). When no real scroller
+// exists (sc is null), it reports the pane root's own geometry as a neutral
+// state: the mirror early-returns on the null scrollPath, so those values
+// are informational only.
+const scrollObjJS = `
+  const scroll = sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight, anchorKind: anchorKind }
+    : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight, anchorKind: anchorKind };
+`
+
+// htmlExpr extracts the pane subtree's outerHTML plus the layout metadata
+// the mirror needs (bounding box, scroll, theme inline styles, and a cheap
+// CSS fingerprint). It is an arrow function (NOT invoked); ExtractHTML
+// passes the candidate selectors as its single argument.
+const htmlExpr = `(selectors) => {
+  ` + findRootJS + `
+  const el = findRoot(selectors);
+  if (!el) return { err: 'pane not found' };
+  const r = el.getBoundingClientRect();
+` + scrollContainerJS + inputEditorJS + cssFPJS + scrollObjJS + `
   const rootStyle = ((document.documentElement.getAttribute('style') || '') + ';' +
     (document.body ? (document.body.getAttribute('style') || '') : '')).trim();
   // Capture every CSS custom property computed at the pane root. VS Code
@@ -356,11 +391,7 @@ const htmlExpr = `(selectors) => {
     themeBg: themeBg,
     inputFocused: inputFocused,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
-    // When no real scroller exists (sc is null), report the pane root's own
-    // geometry as a neutral state: the mirror early-returns on the null
-    // scrollPath, so these values are informational only.
-    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight, anchorKind: anchorKind }
-      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight, anchorKind: anchorKind },
+    scroll: scroll,
     scrollPath: scrollPath,
     scrollRows: scrollRows,
     nestedScrolls: nestedScrolls,
@@ -519,20 +550,11 @@ const nestedScrollJS = `
 // CSS fingerprint, and the layout metadata (bounding box + scroll) without
 // dumping the pane's outerHTML.
 const fpExpr = `(selectors) => {
-  let el = null;
-  for (const sel of selectors) {
-    try { el = document.querySelector(sel); } catch (e) {}
-    if (el) break;
-  }
+  ` + findRootJS + `
+  const el = findRoot(selectors);
   if (!el) return { err: 'pane not found' };
   const r = el.getBoundingClientRect();
-` + scrollContainerJS + inputEditorJS + `
-  let cssFP = '';
-  try {
-    cssFP = document.styleSheets.length + ':' +
-      (document.documentElement.getAttribute('style') || '').length + ':' +
-      (document.body ? (document.body.getAttribute('style') || '').length : 0);
-  } catch (e) {}
+` + scrollContainerJS + inputEditorJS + cssFPJS + scrollObjJS + `
   const model = (el.querySelector('.model-picker-name') || { textContent: '' }).textContent;
   // Include a cheap theme indicator so a theme change (which does not change
   // text content) still triggers a full re-extract of themeVars.
@@ -579,11 +601,7 @@ const fpExpr = `(selectors) => {
     cursorChar: cursorChar,
     inputBreaks: inputBreaks,
     rect: { left: r.left, top: r.top, width: r.width, height: r.height },
-    // When no real scroller exists (sc is null), report the pane root's own
-    // geometry as a neutral state: the mirror early-returns on the null
-    // scrollPath, so these values are informational only.
-    scroll: sc ? { left: sc.scrollLeft || 0, top: sc.scrollTop || 0, scrollH: sc.scrollHeight || 0, offset: scrollOffset, w: sc.clientWidth, h: sc.clientHeight, anchorKind: anchorKind }
-      : { left: 0, top: 0, scrollH: el.scrollHeight || 0, offset: 0, w: el.clientWidth, h: el.clientHeight, anchorKind: anchorKind },
+    scroll: scroll,
     scrollPath: scrollPath,
     nestedScrolls: nestedScrolls,
     scrollRows: scrollRows,
@@ -597,8 +615,8 @@ const fpExpr = `(selectors) => {
 const healthExpr = `(selectors) => {
   let heap = null;
   try { if (performance.memory) heap = { used: performance.memory.usedJSHeapSize, total: performance.memory.totalJSHeapSize }; } catch (e) {}
-  let el = null;
-  for (const sel of selectors) { try { el = document.querySelector(sel); } catch (e) {} if (el) break; }
+  ` + findRootJS + `
+  const el = findRoot(selectors);
   return {
     nodes: document.getElementsByTagName('*').length,
     paneNodes: el ? el.getElementsByTagName('*').length : null,
@@ -765,6 +783,7 @@ func ExtractCSS(s *Session) (*CSSState, error) {
 // which wraps the expression in an IIFE and passes one argument.
 const clickPointExpr = `(args) => {
   const sels = args[0], path = args[1], rx = args[2], ry = args[3];
+  ` + findRootJS + `
   let root = null;
   let p = path;
   // A path starting with -1 is rooted at the live context view (popup)
@@ -779,7 +798,7 @@ const clickPointExpr = `(args) => {
     }
     if (root) p = p.slice(1);
   } else {
-    for (const sel of sels) { try { root = document.querySelector(sel); } catch (e) {} if (root) break; }
+    root = findRoot(sels);
   }
   if (!root) return null;
   let el = root;
@@ -804,27 +823,14 @@ func EvalClickPoint(s *Session, selectors []string, path []int, relX, relY float
 	if err != nil {
 		return 0, 0, false
 	}
-	var resp struct {
-		Result struct {
-			Value struct {
-				X float64 `json:"x"`
-				Y float64 `json:"y"`
-			} `json:"value"`
-		} `json:"result"`
-		Exception struct {
-			Text string `json:"text"`
-			Obj  struct {
-				Description string `json:"description"`
-			} `json:"exception"`
-		} `json:"exceptionDetails"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
+	v, err := decodeEval[struct {
+		X float64 `json:"x"`
+		Y float64 `json:"y"`
+	}](raw)
+	if err != nil {
 		return 0, 0, false
 	}
-	if resp.Exception.Obj.Description != "" || resp.Exception.Text != "" {
-		return 0, 0, false
-	}
-	return resp.Result.Value.X, resp.Result.Value.Y, true
+	return v.X, v.Y, true
 }
 
 // charPointExpr resolves a chat-input caret character index (count of
@@ -838,8 +844,8 @@ func EvalClickPoint(s *Session, selectors []string, path []int, relX, relY float
 // callExpr, which wraps the expression in an IIFE and passes one argument.
 const charPointExpr = `(args) => {
   const sels = args[0], char = args[1];
-  let root = null;
-  for (const sel of sels) { try { root = document.querySelector(sel); } catch (e) {} if (root) break; }
+  ` + findRootJS + `
+  const root = findRoot(sels);
   if (!root) return null;
   const ed = root.querySelector('.chat-input-container .interactive-input-editor .monaco-editor')
              || root.querySelector('.interactive-input-editor .monaco-editor');
@@ -890,27 +896,14 @@ func EvalCharPoint(s *Session, selectors []string, char int) (float64, float64, 
 	if err != nil {
 		return 0, 0, false
 	}
-	var resp struct {
-		Result struct {
-			Value struct {
-				X float64 `json:"x"`
-				Y float64 `json:"y"`
-			} `json:"value"`
-		} `json:"result"`
-		Exception struct {
-			Text string `json:"text"`
-			Obj  struct {
-				Description string `json:"description"`
-			} `json:"exception"`
-		} `json:"exceptionDetails"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
+	v, err := decodeEval[struct {
+		X float64 `json:"x"`
+		Y float64 `json:"y"`
+	}](raw)
+	if err != nil {
 		return 0, 0, false
 	}
-	if resp.Exception.Obj.Description != "" || resp.Exception.Text != "" {
-		return 0, 0, false
-	}
-	return resp.Result.Value.X, resp.Result.Value.Y, true
+	return v.X, v.Y, true
 }
 
 // rectExpr resolves a DOM path (child indices from the pane root) to the
@@ -918,8 +911,8 @@ func EvalCharPoint(s *Session, selectors []string, char int) (float64, float64, 
 // null return) when the path does not resolve.
 const rectExpr = `(args) => {
   const sels = args[0], path = args[1];
-  let root = null;
-  for (const sel of sels) { try { root = document.querySelector(sel); } catch (e) {} if (root) break; }
+  ` + findRootJS + `
+  const root = findRoot(sels);
   if (!root) return null;
   let el = root;
   if (Array.isArray(path) && path.length) {
@@ -940,64 +933,55 @@ func EvalRect(s *Session, selectors []string, path []int) (PaneRect, bool) {
 	if err != nil {
 		return PaneRect{}, false
 	}
-	var resp struct {
-		Result struct {
-			Value struct {
-				OK     bool    `json:"ok"`
-				Left   float64 `json:"left"`
-				Top    float64 `json:"top"`
-				Width  float64 `json:"width"`
-				Height float64 `json:"height"`
-			} `json:"value"`
-		} `json:"result"`
-		Exception struct {
-			Text string `json:"text"`
-			Obj  struct {
-				Description string `json:"description"`
-			} `json:"exception"`
-		} `json:"exceptionDetails"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
+	v, err := decodeEval[struct {
+		OK     bool    `json:"ok"`
+		Left   float64 `json:"left"`
+		Top    float64 `json:"top"`
+		Width  float64 `json:"width"`
+		Height float64 `json:"height"`
+	}](raw)
+	if err != nil || !v.OK {
 		return PaneRect{}, false
 	}
-	if resp.Exception.Obj.Description != "" || resp.Exception.Text != "" {
-		return PaneRect{}, false
+	return PaneRect{Left: v.Left, Top: v.Top, Width: v.Width, Height: v.Height}, true
+}
+
+// evalResp is a Runtime.evaluate response: the result value plus the
+// page-side exception (if any).
+type evalResp struct {
+	Result struct {
+		Value jsontext.Value `json:"value"`
+	} `json:"result"`
+	Exception struct {
+		Text string `json:"text"`
+		Obj  struct {
+			Description string `json:"description"`
+		} `json:"exception"`
+	} `json:"exceptionDetails"`
+}
+
+// exception returns the page-side exception description of a response (""
+// when none). Note: CDP puts the description at
+// exceptionDetails.exception.description, with a human-readable fallback at
+// exceptionDetails.text.
+func (r evalResp) exception() string {
+	if r.Exception.Obj.Description != "" {
+		return r.Exception.Obj.Description
 	}
-	if !resp.Result.Value.OK {
-		return PaneRect{}, false
-	}
-	return PaneRect{
-		Left: resp.Result.Value.Left, Top: resp.Result.Value.Top,
-		Width: resp.Result.Value.Width, Height: resp.Result.Value.Height,
-	}, true
+	return r.Exception.Text
 }
 
 // decodeEval unwraps a Runtime.evaluate response and decodes result.value
-// into T. Page exceptions are surfaced as errors. Note: CDP puts the
-// exception's description at exceptionDetails.exception.description (with a
-// human-readable fallback at exceptionDetails.text); a rejected promise
+// into T. Page exceptions are surfaced as errors. A rejected promise
 // (awaitPromise) also carries result.value = {}, so the exception check
 // must happen before decoding the value.
 func decodeEval[T any](raw jsontext.Value) (*T, error) {
-	var resp struct {
-		Result struct {
-			Value jsontext.Value `json:"value"`
-		} `json:"result"`
-		Exception struct {
-			Text string `json:"text"`
-			Obj  struct {
-				Description string `json:"description"`
-			} `json:"exception"`
-		} `json:"exceptionDetails"`
-	}
+	var resp evalResp
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, err
 	}
-	if desc := resp.Exception.Obj.Description; desc != "" {
+	if desc := resp.exception(); desc != "" {
 		return nil, errors.New("page exception: " + desc)
-	}
-	if resp.Exception.Text != "" {
-		return nil, errors.New("page exception: " + resp.Exception.Text)
 	}
 	var out T
 	if err := json.Unmarshal(resp.Result.Value, &out); err != nil {
