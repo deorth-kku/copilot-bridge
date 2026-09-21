@@ -112,6 +112,70 @@ func TestLaunchArgs(t *testing.T) {
 	}
 }
 
+func TestOverlay(t *testing.T) {
+	known, err := List(writeFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Live windows contradict storage.json: one window has the drive-root
+	// workspace open (storage says vscode-load-llama), and a second
+	// window has a workspace storage.json does not know yet.
+	live := map[string]string{
+		"w1": "file:///e%3A/",
+		"w2": "file:///c%3A/Users/deort/newws",
+	}
+	got := Overlay(known, live)
+	// The three known workspaces plus the live-only one.
+	if len(got) != 4 {
+		t.Fatalf("got %d workspaces, want 4: %+v", len(got), got)
+	}
+	// Open first (the live state wins over storage.json's openedWindows),
+	// local before remote, each group name-sorted.
+	want := []struct {
+		uri  string
+		open bool
+	}{
+		{"file:///e%3A/", true},
+		{"file:///c%3A/Users/deort/newws", true},
+		{"file:///c%3A/Users/deort/vscode-load-llama", false},
+		{"vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d", false},
+	}
+	for i, w := range want {
+		if got[i].URI != w.uri || got[i].Open != w.open {
+			t.Fatalf("got[%d] = %+v, want uri %q open %v", i, got[i], w.uri, w.open)
+		}
+	}
+	// storage.json claimed vscode-load-llama open; the live probe must
+	// have cleared it.
+	for _, w := range got {
+		if w.URI == "file:///c%3A/Users/deort/vscode-load-llama" && w.Open {
+			t.Fatal("stale storage.json open flag must be cleared by the live probe")
+		}
+	}
+
+	// No live windows: every known workspace is closed, order unchanged
+	// (local name-sorted, then remote).
+	got = Overlay(known, nil)
+	if len(got) != 3 {
+		t.Fatalf("got %d workspaces, want 3: %+v", len(got), got)
+	}
+	for _, w := range got {
+		if w.Open {
+			t.Fatalf("no live window, but %q is open: %+v", w.URI, w)
+		}
+	}
+	if got[0].URI != "file:///e%3A/" || got[1].URI != "file:///c%3A/Users/deort/vscode-load-llama" || got[2].URI != "vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d" {
+		t.Fatalf("wrong order: %+v", got)
+	}
+
+	// A live URI differing only in drive-letter case matches the known
+	// entry (SameURI semantics).
+	got = Overlay(known, map[string]string{"w1": "file:///E%3A/"})
+	if len(got) != 3 || !got[0].Open || got[0].URI != "file:///e%3A/" {
+		t.Fatalf("case-insensitive match failed: %+v", got)
+	}
+}
+
 func TestSameURI(t *testing.T) {
 	if !SameURI("file:///c%3A/Users/deort/vscode-load-llama", "file:///c%3A/Users/deort/vscode-load-llama") {
 		t.Error("exact match must be true")

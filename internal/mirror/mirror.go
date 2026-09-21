@@ -143,9 +143,11 @@ type windowMsg struct {
 }
 
 // workspacesMsg is a server -> browser message for the workspaces page:
-// the current workspace list. Sent on connect and after every successful
-// storage.json reload (a VS Code window opening/closing changes the open
-// flags), so the page's green dots update live without a refresh.
+// the current workspace list. Sent on connect and whenever the list
+// changes (a storage.json reload, a window opening/closing, or the
+// fallback tick re-probing the live windows), so the page's green dots
+// update live without a refresh. The open flags follow the LIVE windows
+// (CDP probe), not storage.json's lagging windowsState.
 type workspacesMsg struct {
 	Type       string                 `json:"type"` // "workspaces"
 	Workspaces []workspaces.Workspace `json:"workspaces"`
@@ -223,6 +225,15 @@ type Mirror struct {
 	// button must not be re-probed constantly). Only the publish-loop
 	// goroutine touches it.
 	toggleTimes map[string]time.Time
+
+	// wsRefresh is signalled by the storage.json watcher (the known
+	// workspace list changed) so the publish loop recomputes the
+	// CDP-overlaid list. Buffered by 1: one pending signal coalesces.
+	wsRefresh chan struct{}
+	// lastWsPush is the last workspace list pushed to the workspaces-page
+	// clients; it drives change detection for the next push. Only the
+	// publish-loop goroutine touches it.
+	lastWsPush []workspaces.Workspace
 }
 
 // snapState is one extracted pane snapshot.
@@ -376,6 +387,7 @@ func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string,
 		snaps:       make(map[string]*snapState),
 		hub:         newWakeHub(),
 		refreshNow:  make(chan struct{}, 1),
+		wsRefresh:   make(chan struct{}, 1),
 		toggleTimes: make(map[string]time.Time),
 		upgrader: websocket.Upgrader{
 			// Local-only tool; accept any origin (127.0.0.1 / localhost).
@@ -383,10 +395,13 @@ func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string,
 		},
 	}
 	// The workspace list is loaded once up front, then hot-reloaded via
-	// fsnotify (like settings.json); a successful reload pushes the new
-	// list to the workspaces-page clients. A missing/unreadable
-	// storage.json is not fatal: the HTTP API falls back to a fresh read.
-	if st, err := workspaces.NewStore(storagePath, log, m.pushWorkspaces); err != nil {
+	// fsnotify (like settings.json). A known-list change signals the
+	// publish loop, which recomputes the CDP-overlaid list (the open
+	// flags follow the live windows, not storage.json's lagging
+	// windowsState) and pushes it to the workspaces-page clients. A
+	// missing/unreadable storage.json is not fatal: the HTTP API falls
+	// back to a fresh read.
+	if st, err := workspaces.NewStore(storagePath, log, m.onWorkspacesChanged); err != nil {
 		log.Warn("workspaces: initial list failed", "path", storagePath, "err", err)
 	} else {
 		m.wsStore = st
@@ -461,21 +476,15 @@ func (m *Mirror) handleWorkspacesPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(workspacesHTML))
 }
 
-// handleWorkspaceList serves the current workspace list. The list comes
-// from the hot-reloaded store snapshot (atomic read); when the store is
-// nil (initial load failed) it falls back to a fresh read of storage.json.
+// handleWorkspaceList serves the current workspace list: the known
+// workspaces with the live open state overlaid from CDP (falls back to a
+// fresh read of storage.json when the store is nil).
 func (m *Mirror) handleWorkspaceList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.NotFound(w, r)
 		return
 	}
-	var ws []workspaces.Workspace
-	var err error
-	if m.wsStore != nil {
-		ws = m.wsStore.Load()
-	} else {
-		ws, err = workspaces.List(m.storagePath)
-	}
+	ws, err := m.currentWorkspaces()
 	if err != nil {
 		m.log.Warn("workspaces: list failed", "err", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -521,22 +530,53 @@ func (m *Mirror) handleWorkspaceOpen(w http.ResponseWriter, r *http.Request) {
 	_ = json.MarshalWrite(w, map[string]bool{"ok": true})
 }
 
-// resolveWindowURI finds the live window that has the given workspace
-// open: it asks each window's workbench for its own workspace URI (the
-// main process hands every renderer its window configuration, so the
-// answer is exact, not a title guess). ok is false when no live window
-// matches.
-func (m *Mirror) resolveWindowURI(uri string) (string, bool) {
+// liveWorkspaces probes every live window for the workspace it has open
+// (the same workbench probe the jump-to-window logic uses: the main
+// process hands every renderer its window configuration, so the answer
+// is exact, not a title guess) and returns window id -> workspace URI
+// (storage.json key format). Empty windows (no folder open) and failed
+// probes are omitted.
+func (m *Mirror) liveWorkspaces() map[string]string {
+	out := make(map[string]string)
 	for _, win := range m.disc.Windows() {
 		s := m.disc.SessionForID(win.ID)
 		if s == nil {
 			continue
 		}
-		if wuri := cdp.WorkspaceURI(s); wuri != "" && workspaces.SameURI(uri, wuri) {
-			return win.ID, true
+		if uri := cdp.WorkspaceURI(s); uri != "" {
+			out[win.ID] = uri
+		}
+	}
+	return out
+}
+
+// resolveWindowURI finds the live window that has the given workspace
+// open. ok is false when no live window matches.
+func (m *Mirror) resolveWindowURI(uri string) (string, bool) {
+	for id, wuri := range m.liveWorkspaces() {
+		if workspaces.SameURI(uri, wuri) {
+			return id, true
 		}
 	}
 	return "", false
+}
+
+// currentWorkspaces returns the workspace list to show: the known
+// workspaces (hot-reloaded storage.json) with the live open state
+// overlaid from CDP, so the open flags follow the actual windows instead
+// of storage.json's lagging windowsState.
+func (m *Mirror) currentWorkspaces() ([]workspaces.Workspace, error) {
+	var known []workspaces.Workspace
+	var err error
+	if m.wsStore != nil {
+		known = m.wsStore.Load()
+	} else {
+		known, err = workspaces.List(m.storagePath)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return workspaces.Overlay(known, m.liveWorkspaces()), nil
 }
 
 // handleImage serves one cached image resource under /img/<hash>.
@@ -734,19 +774,20 @@ func (c *client) sendTo(msg any) {
 	}
 }
 
-// sendWorkspaces queues the current workspace list for one workspaces-page
-// client (sent on connect).
+// sendWorkspaces queues the current CDP-overlaid workspace list for one
+// workspaces-page client (sent on connect). The list is computed on demand
+// so a just-appeared tab sees the live windows, not a stale snapshot.
 func (m *Mirror) sendWorkspaces(c *client) {
-	if m.wsStore == nil {
+	list, err := m.currentWorkspaces()
+	if err != nil || list == nil {
 		return
 	}
-	c.sendTo(workspacesMsg{Type: "workspaces", Workspaces: m.wsStore.Load()})
+	c.sendTo(workspacesMsg{Type: "workspaces", Workspaces: list})
 }
 
-// pushWorkspaces is the Store onChange callback: it fans the new workspace
-// list out to every connected workspaces-page client. Non-blocking per
-// client (sendTo drops for slow clients), so it is safe to call from the
-// watcher goroutine.
+// pushWorkspaces fans the workspace list out to every connected
+// workspaces-page client. Non-blocking per client (sendTo drops for slow
+// clients), so it is safe to call from any goroutine.
 func (m *Mirror) pushWorkspaces(list []workspaces.Workspace) {
 	m.clients.All()(func(c *client, _ struct{}) bool {
 		if c.wsPage {
@@ -754,6 +795,59 @@ func (m *Mirror) pushWorkspaces(list []workspaces.Workspace) {
 		}
 		return true
 	})
+}
+
+// onWorkspacesChanged is the Store onChange callback: the known workspace
+// list changed, so the CDP-overlaid list must be recomputed. The publish
+// loop owns the CDP probes, so the watcher only signals it.
+func (m *Mirror) onWorkspacesChanged(_ []workspaces.Workspace) {
+	select {
+	case m.wsRefresh <- struct{}{}:
+	default:
+	}
+}
+
+// refreshWorkspaces recomputes the CDP-overlaid workspace list and pushes
+// it to the workspaces-page clients when it changed. Only the publish-loop
+// goroutine calls it; a failed computation keeps the previous list.
+func (m *Mirror) refreshWorkspaces() {
+	list, err := m.currentWorkspaces()
+	if err != nil {
+		m.log.Warn("workspaces: live list failed, keeping previous", "err", err)
+		return
+	}
+	if equalWorkspaces(m.lastWsPush, list) {
+		return
+	}
+	m.lastWsPush = list
+	m.pushWorkspaces(list)
+}
+
+// equalWorkspaces reports whether two workspace lists are identical (same
+// entries in the same order; Name/Path/Remote derive from the URI, so URI
+// + Open + LastActive fully describe an entry).
+func equalWorkspaces(a, b []workspaces.Workspace) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].URI != b[i].URI || a[i].Open != b[i].Open || a[i].LastActive != b[i].LastActive {
+			return false
+		}
+	}
+	return true
+}
+
+// wsPageClients counts the connected workspaces-page tabs.
+func (m *Mirror) wsPageClients() int {
+	n := 0
+	m.clients.All()(func(c *client, _ struct{}) bool {
+		if c.wsPage {
+			n++
+		}
+		return true
+	})
+	return n
 }
 
 // imgCount returns the number of cached image resources.
@@ -879,9 +973,28 @@ func (m *Mirror) publishLoop(ctx context.Context) {
 		case <-m.refreshNow:
 			m.log.Debug("mirror: refresh (client event)")
 			m.refreshAll()
+		case <-m.wsRefresh:
+			// The known workspace list changed (storage.json reload);
+			// recompute the CDP-overlaid list for the workspaces page.
+			m.log.Debug("mirror: workspaces refresh (known list changed)")
+			m.refreshWorkspaces()
+		case <-m.disc.WindowsChanged():
+			// A window opened or closed: the open-workspace set (the
+			// workspaces page's green dots) may have changed.
+			if m.wsPageClients() > 0 {
+				m.log.Debug("mirror: workspaces refresh (window set changed)")
+				m.refreshWorkspaces()
+			}
 		case <-ticker.C:
 			m.log.Debug("mirror: refresh (fallback)")
 			m.refreshAll()
+			// Re-probe the live windows: a window can change its folder
+			// (File > Open Folder) without the window set changing, and a
+			// just-opened window's CDP session may not have been dialled
+			// when the window-set signal fired.
+			if m.wsPageClients() > 0 {
+				m.refreshWorkspaces()
+			}
 		case <-healthTicker.C:
 			for winID := range groups {
 				s := m.disc.SessionForID(winID)

@@ -175,6 +175,62 @@ func TestDiscoveryLifecycle(t *testing.T) {
 	cancel()
 }
 
+func TestDiscoveryWindowsChanged(t *testing.T) {
+	wsHost := startHoldWS(t)
+	mock := &mockCDPServer{wsHost: wsHost}
+	mock.set(false)
+	srv := httptest.NewServer(mock)
+	defer srv.Close()
+
+	events := make(chan Event, 16)
+	d := NewDiscovery(strings.TrimPrefix(srv.URL, "http://"), events, discardLog, defaultDebounceMs)
+	d.Poll = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	ch := d.WindowsChanged()
+
+	// VS Code starts with one window: the set changes, one signal.
+	mock.set(true, "t1")
+	waitFor(t, "first window signal", func() bool {
+		select {
+		case <-ch:
+			return true
+		default:
+			return false
+		}
+	})
+	// The signal must not fire again while the window set is stable.
+	mock.set(true, "t1") // same set the previous scan saw
+	select {
+	case <-ch:
+		t.Fatal("no window-set change, but a signal was pending")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// A second window opens: one more signal.
+	mock.set(true, "t1", "t2")
+	waitFor(t, "second window signal", func() bool {
+		select {
+		case <-ch:
+			return true
+		default:
+			return false
+		}
+	})
+	// VS Code exits: the set empties, one more signal.
+	mock.set(false)
+	waitFor(t, "disconnect signal", func() bool {
+		select {
+		case <-ch:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
 func TestDiscoveryWindowsSorted(t *testing.T) {
 	wsHost := startHoldWS(t)
 	mock := &mockCDPServer{wsHost: wsHost}

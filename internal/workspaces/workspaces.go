@@ -81,6 +81,48 @@ func List(storagePath string) ([]Workspace, error) {
 		ws.LastActive = uri == last
 		out = append(out, ws)
 	}
+	sortWorkspaces(out)
+	return out, nil
+}
+
+// Overlay applies the live open state to the known-workspace list, so the
+// result follows the actual windows instead of storage.json's
+// windowsState (which lags: VS Code does not always rewrite it when a
+// window opens or closes). live maps window id -> workspace URI (the
+// storage.json key format, as reported by cdp.WorkspaceURI); Open is true
+// exactly for the workspaces some live window reports, and live
+// workspaces missing from the known list are appended, so a freshly
+// opened workspace shows up before storage.json catches up. The result
+// is sorted like List's output.
+func Overlay(known []Workspace, live map[string]string) []Workspace {
+	idx := make(map[string]int, len(known)+len(live))
+	out := make([]Workspace, len(known))
+	for i, ws := range known {
+		ws.Open = false // the live probe is the source of truth
+		out[i] = ws
+		idx[strings.ToLower(ws.URI)] = i
+	}
+	for _, uri := range live {
+		k := strings.ToLower(uri)
+		if i, ok := idx[k]; ok {
+			out[i].Open = true
+			continue
+		}
+		ws, ok := parseWorkspace(uri)
+		if !ok {
+			continue
+		}
+		ws.Open = true
+		idx[k] = len(out)
+		out = append(out, ws)
+	}
+	sortWorkspaces(out)
+	return out
+}
+
+// sortWorkspaces orders a workspace list: open workspaces first, then
+// local before remote, each group sorted case-insensitively by name.
+func sortWorkspaces(out []Workspace) {
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Open != out[j].Open {
 			return out[i].Open
@@ -90,7 +132,6 @@ func List(storagePath string) ([]Workspace, error) {
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	return out, nil
 }
 
 // normalizeAuthority percent-decodes the authority portion of a URI before

@@ -49,19 +49,28 @@ type Discovery struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
 	up       bool
+	// windowsChanged is signalled (at most one pending) when the live
+	// window set changes: a window opened or closed, or VS Code
+	// started/stopped.
+	windowsChanged chan struct{}
 }
 
 func NewDiscovery(cdpAddr string, events chan Event, log *slog.Logger, debounceMs int) *Discovery {
 	return &Discovery{
-		base:       "http://" + cdpAddr,
-		log:        log,
-		events:     events,
-		client:     &http.Client{Timeout: 2 * time.Second},
-		sessions:   make(map[string]*Session),
-		Poll:       2 * time.Second,
-		debounceMs: clampDebounceMs(debounceMs),
+		base:           "http://" + cdpAddr,
+		log:            log,
+		events:         events,
+		client:         &http.Client{Timeout: 2 * time.Second},
+		sessions:       make(map[string]*Session),
+		Poll:           2 * time.Second,
+		debounceMs:     clampDebounceMs(debounceMs),
+		windowsChanged: make(chan struct{}, 1),
 	}
 }
+
+// WindowsChanged is signalled (at most one pending) when the live window
+// set changes (a window opened or closed, or VS Code started/stopped).
+func (d *Discovery) WindowsChanged() <-chan struct{} { return d.windowsChanged }
 
 // Run blocks until ctx is cancelled, then stops all sessions.
 func (d *Discovery) Run(ctx context.Context) {
@@ -83,6 +92,7 @@ func (d *Discovery) scan(ctx context.Context) {
 		if d.up {
 			d.log.Info("VS Code disconnected")
 			d.stopAll()
+			d.signalWindowsChanged()
 		}
 		d.up = false
 		return
@@ -100,6 +110,18 @@ func (d *Discovery) scan(ctx context.Context) {
 	current := make(map[string]Target, len(targets))
 	for _, t := range targets {
 		current[t.ID] = t
+	}
+	// The window set changed when the target ids differ from the current
+	// sessions (a window opened or closed). A dead session being restarted
+	// keeps its id, so it is not a change.
+	changed := len(current) != len(d.sessions)
+	if !changed {
+		for id := range current {
+			if _, ok := d.sessions[id]; !ok {
+				changed = true
+				break
+			}
+		}
 	}
 	// start new (or restart dead) sessions
 	for id, t := range current {
@@ -124,6 +146,18 @@ func (d *Discovery) scan(ctx context.Context) {
 		}
 	}
 	d.mu.Unlock()
+	if changed {
+		d.signalWindowsChanged()
+	}
+}
+
+// signalWindowsChanged signals (at most one pending) that the live window
+// set changed.
+func (d *Discovery) signalWindowsChanged() {
+	select {
+	case d.windowsChanged <- struct{}{}:
+	default:
+	}
 }
 
 // SessionFor returns the first live session whose title contains match,

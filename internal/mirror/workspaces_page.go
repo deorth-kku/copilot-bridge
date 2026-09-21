@@ -3,7 +3,10 @@ package mirror
 // workspacesHTML is the workspaces page served at /workspaces. It lists
 // every workspace VS Code knows about (from globalStorage storage.json)
 // with a live search box; clicking a row asks the server to launch a VS
-// Code window for it via the code CLI. Same idiom as the mirror page:
+// Code window for it via the code CLI. The green dots (open workspaces)
+// follow the LIVE windows — the server probes each window's workbench
+// over CDP — not storage.json's lagging windowsState. Same idiom as the
+// mirror page:
 // one inline <style>, one inline <script> IIFE, no framework. The look is
 // a HAND-WRITTEN replica of the VS Code (Dark Modern) UI: the page must
 // render with no live VS Code window, so no workbench CSS is borrowed —
@@ -172,9 +175,10 @@ const workspacesHTML = `<!DOCTYPE html>
   }
 
   // The workspace list arrives over the WebSocket: the server sends it
-  // once on connect, then after every storage.json change (opening or
-  // closing a VS Code window flips the open flags), so the green dots
-  // update live without a refresh.
+  // once on connect, then whenever it changes (a window opening/closing,
+  // a window switching folders, or a storage.json update). The open
+  // flags follow the LIVE windows (server-side CDP probe), so the green
+  // dots update without a refresh even when storage.json lags.
   function connectWS() {
     var proto = location.protocol === 'https:' ? 'wss' : 'ws';
     var ws = new WebSocket(proto + '://' + location.host + '/ws?page=workspaces');
