@@ -1219,14 +1219,15 @@
     }
     var path = [];
     var node = t;
-    var underRoot = (t === root);
     while (node && node !== root && node !== pane) {
       var parent = node.parentElement;
       if (!parent) break;
       path.unshift(Array.prototype.indexOf.call(parent.children, node));
       node = parent;
     }
-    if (node === root) underRoot = true;
+    // The walk stops AT root (t under root) or at pane/null (t outside),
+    // so the final node alone tells whether t is under the extracted root.
+    var underRoot = (node === root);
     var tr = t.getBoundingClientRect();
     var rx = tr.width > 0 ? (cx - tr.left) / tr.width : 0;
     var ry = tr.height > 0 ? (cy - tr.top) / tr.height : 0;

@@ -468,11 +468,9 @@ func (m *Mirror) handlePage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(pageHTML))
 }
 
+// handleWorkspacesPage serves the workspaces page. The mux pattern
+// "/workspaces" matches only that exact path, so no path check is needed.
 func (m *Mirror) handleWorkspacesPage(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/workspaces" {
-		http.NotFound(w, r)
-		return
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(workspacesHTML))
 }
@@ -746,12 +744,12 @@ func (m *Mirror) addClient(c *client) {
 }
 
 func (m *Mirror) removeClient(c *client) {
-	// LoadAndDelete is atomic: only the first remover wins, so c.done is
-	// closed exactly once even if two callers race.
+	// LoadAndDelete is atomic: only the first remover wins, so c.done and
+	// the connection are each closed exactly once even if two callers race.
 	if _, ok := m.clients.LoadAndDelete(c); ok {
 		close(c.done)
+		c.conn.Close()
 	}
-	c.conn.Close()
 }
 
 func (m *Mirror) closeClients() {
@@ -1508,17 +1506,21 @@ func (m *Mirror) handleInput(c *client, raw []byte) {
 // (the responsive layout is a different size than the live pane); events
 // without one fall back to the pane-relative offset.
 func (m *Mirror) forwardMouse(s *cdp.Session, winID string, e mouseMsg) {
+	// m.selectors is immutable (set in the constructor); only the snaps
+	// read below needs the lock.
+	selectors := m.selectors
 	m.snapMu.Lock()
 	var rect cdp.PaneRect
 	if sn := m.snaps[winID]; sn != nil {
 		rect = sn.rect
 	}
-	selectors := m.selectors
 	m.snapMu.Unlock()
 
 	x, y := rect.Left+e.X, rect.Top+e.Y
 	placed := false
-	if e.Char != nil && *e.Char >= 0 {
+	// The browser only sends char for a caret position (>= 0), so a
+	// non-nil Char already implies a valid character index.
+	if e.Char != nil {
 		// Chat-input click: re-seat the caret character on the live layout.
 		// The element-identity mapping cannot reach the mirror's wrapped
 		// lines (the live line is shorter), so the character index is the
