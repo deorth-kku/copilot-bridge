@@ -391,7 +391,9 @@ function dispatch(doc, ev) {
 
 // --- Range (the mirror's cursor repositioning measures the caret's
 //     character in the mirror layout). The stub approximates each character
-//     as an equal slice of its container element's rect. ---
+//     as an equal slice of its container element's rect, UNLESS the
+//     container (text node or parent element) carries a `charWidths` array
+//     of per-character widths (e.g. CJK glyphs ~2x the Latin advance). ---
 
 class Range {
   constructor() {
@@ -416,10 +418,20 @@ class Range {
     if (!el) return { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
     const r = el.getBoundingClientRect();
     const len = (c.nodeType === 3 ? c.data : c.textContent || '').length;
-    const w = len ? r.width / len : 0;
-    const left = r.left + this.startOffset * w;
+    const cw = c.charWidths || el.charWidths || null;
+    let left, width;
+    if (cw && cw.length === len) {
+      let a = 0, b = 0;
+      for (let i = 0; i < this.startOffset; i++) a += cw[i];
+      for (let i = 0; i < this.endOffset; i++) b += cw[i];
+      left = r.left + a;
+      width = b - a;
+    } else {
+      const w = len ? r.width / len : 0;
+      left = r.left + this.startOffset * w;
+      width = (this.endOffset - this.startOffset) * w;
+    }
     const top = r.top;
-    const width = (this.endOffset - this.startOffset) * w;
     const height = r.height;
     return { left, top, width, height, right: left + width, bottom: top + height };
   }

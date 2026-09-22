@@ -259,3 +259,47 @@ test('fpExpr: single view line -> no breaks', () => {
     assert.equal(r.inputBreaks, null);
   } finally { uninstallGlobals(); }
 });
+
+// A single view line whose ONE text run mixes CJK (26px) and Latin (13px)
+// glyphs, like plain chat input (no decorations -> one span per line). The
+// old proportional (uniform-width) estimate of the caret's character index
+// skews on such text (it would report 6 for the caret below); the
+// per-character Range boundary search must land exactly on 5. The editor
+// content origin is offset (left: 100) because Range rects are in viewport
+// coordinates while the cursor's inline left is line-relative: the search
+// must convert before comparing.
+test('fpExpr: cursorChar exact on mixed CJK/Latin text (no proportional skew)', () => {
+  const { root } = buildPane();
+  const pane = root.querySelector('.chat-viewpane-container');
+  const container = new El('div', { attrs: { class: 'chat-input-container' } });
+  const editor = new El('div', { attrs: { class: 'interactive-input-editor' } });
+  const monaco = new El('div', { attrs: { class: 'monaco-editor' }, rect: { left: 100, top: 0, width: 545, height: 44 } });
+  const vlines = new El('div', { attrs: { class: 'view-lines' } });
+  const text = '你好你好abcdefg你好'; // 4 CJK + 7 Latin + 2 CJK (13 chars)
+  const widths = Array.from(text).map(ch => (ch.codePointAt(0) > 0x2e7f ? 26 : 13));
+  const total = widths.reduce((a, b) => a + b, 0); // 6*26 + 7*13 = 247
+  const line = new El('div', { attrs: { class: 'view-line' }, text, rect: { left: 100, top: 12, width: total, height: 20 } });
+  line.style.setProperty('top', '12px');
+  line.style.setProperty('height', '20px');
+  const span = new El('span', { attrs: { class: 'mtk1' }, text, rect: { left: 100, top: 12, width: total, height: 20 } });
+  span.charWidths = widths; // CJK glyphs 2x the Latin advance
+  span.appendChild(new Text(text));
+  line.appendChild(span);
+  vlines.appendChild(line);
+  monaco.appendChild(vlines);
+  const layer = new El('div', { attrs: { class: 'cursors-layer' } });
+  const cursor = new El('div', { attrs: { class: 'cursor' } });
+  layer.appendChild(cursor);
+  monaco.appendChild(layer);
+  editor.appendChild(monaco);
+  container.appendChild(editor);
+  pane.appendChild(container);
+  cursor.style.setProperty('top', '12px');
+  // Caret after 'a' (true index 5): 4 CJK (26px) + 1 Latin (13px) = 117px.
+  // Proportional would give round(117/247 * 13) = 6.
+  cursor.style.setProperty('left', '117px');
+  try {
+    const r = fpExpr(['.chat-viewpane-container']);
+    assert.equal(r.cursorChar, 5);
+  } finally { uninstallGlobals(); }
+});

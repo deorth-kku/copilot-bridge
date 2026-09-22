@@ -209,7 +209,11 @@ module.exports = (selectors) => {
           if (li < lines.length) {
             // Characters of the cursor's own line before the caret: each
             // direct child span is one text run (absolute left + width in
-            // the live layout); a partial run is estimated proportionally.
+            // the live layout). A caret inside a run is located by its
+            // per-character Range boundaries, NOT proportionally: plain
+            // input text is one span per line, and CJK glyphs fall back
+            // to a ~2x-wide font, so a uniform-width (proportional)
+            // estimate skews the index on mixed CJK/Latin text.
             const line = lines[li];
             const lr = line.getBoundingClientRect();
             for (const s of line.children) {
@@ -220,7 +224,43 @@ module.exports = (selectors) => {
               if (!sr.width) continue;
               const sl = sr.left - lr.left;
               if (cLeft >= sl + sr.width) idx += t.length;
-              else if (cLeft > sl) idx += Math.min(t.length, Math.round((cLeft - sl) / sr.width * t.length));
+              else if (cLeft > sl) {
+                // The caret is inside this run. leftOf(i) is the left edge
+                // of character i (i == length: the run's right edge); the
+                // boundaries are monotonic, so binary-search the largest
+                // one at/before cLeft and compare it with its successor.
+                const tn = (function findText(node) {
+                  if (node.nodeType === 3) return node;
+                  for (let i = 0; i < node.childNodes.length; i++) {
+                    const r = findText(node.childNodes[i]);
+                    if (r) return r;
+                  }
+                  return null;
+                })(s);
+                if (tn) {
+                  const txt = tn.textContent;
+                  // Line-relative: the Range rect is in viewport coordinates,
+                  // but cLeft (the cursor's inline left) is relative to the
+                  // editor's content origin, i.e. the line's left edge.
+                  const leftOf = (i) => {
+                    if (i >= txt.length) return sl + sr.width;
+                    const cr = document.createRange();
+                    cr.setStart(tn, i);
+                    cr.setEnd(tn, i + 1);
+                    return cr.getBoundingClientRect().left - lr.left;
+                  };
+                  let lo = 0, hi = txt.length;
+                  while (lo < hi) {
+                    const mid = (lo + hi + 1) >> 1;
+                    if (leftOf(mid) <= cLeft + 0.5) lo = mid;
+                    else hi = mid - 1;
+                  }
+                  let k = lo;
+                  if (lo < txt.length &&
+                      Math.abs(leftOf(lo + 1) - cLeft) < Math.abs(leftOf(lo) - cLeft)) k = lo + 1;
+                  idx += k;
+                }
+              }
               else break;
             }
           }
