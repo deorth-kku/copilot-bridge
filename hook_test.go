@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"io"
 	"net/http"
@@ -174,7 +175,7 @@ func TestRunHookNoNtfyWithoutTopic(t *testing.T) {
 	}
 }
 
-func TestRunHookNtfyOnlyOnStop(t *testing.T) {
+func TestRunHookNoNtfyOnSessionStart(t *testing.T) {
 	n := 0
 	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++ }))
 	defer ntfy.Close()
@@ -190,6 +191,132 @@ func TestRunHookNtfyOnlyOnStop(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("ntfy requests = %d, want 0 for a SessionStart event", n)
+	}
+}
+
+func TestRunHookQuestionNtfy(t *testing.T) {
+	var ntfyPath, ntfyTitle, ntfyClick, ntfyBody string
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ntfyPath = r.URL.Path
+		ntfyTitle = r.Header.Get("Title")
+		ntfyClick = r.Header.Get("Click")
+		b, _ := io.ReadAll(r.Body)
+		ntfyBody = string(b)
+	}))
+	defer ntfy.Close()
+	stubNtfy(t, ntfy)
+
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"mirror":"http://mirror.example/?ws=file:///x%2Fy"}`))
+	}))
+	defer bridge.Close()
+
+	// The payload shape probed from a live PreToolUse hook stdin dump.
+	payload, _ := json.Marshal(map[string]any{
+		"hook_event_name": "PreToolUse",
+		"session_id":      "01c86818-0239-4f9d-8a9c-375f7590bd28",
+		"tool_name":       "vscode_askQuestions",
+		"tool_input": map[string]any{
+			"questions": []map[string]any{
+				{
+					"header":   "Scope",
+					"question": "Which files should the fix cover?",
+					"options":  []map[string]string{{"label": "all"}, {"label": "core only"}},
+				},
+				{
+					"header":   "Style",
+					"question": "Keep the existing style?",
+					"options":  []map[string]string{{"label": "yes"}},
+				},
+			},
+		},
+	})
+	if err := runHook(bridge.URL, "my-topic", strings.NewReader(string(payload))); err != nil {
+		t.Fatal(err)
+	}
+	if ntfyPath != "/my-topic" {
+		t.Errorf("ntfy path = %q, want /my-topic", ntfyPath)
+	}
+	if ntfyTitle != "VS Code Copilot: question [01c86818]" {
+		t.Errorf("ntfy title = %q", ntfyTitle)
+	}
+	if ntfyClick != "http://mirror.example/?ws=file:///x%2Fy" {
+		t.Errorf("ntfy click = %q", ntfyClick)
+	}
+	want := "1. Which files should the fix cover?\n   - all\n   - core only\n\n2. Keep the existing style?\n   - yes"
+	if ntfyBody != want {
+		t.Errorf("ntfy body = %q, want %q", ntfyBody, want)
+	}
+}
+
+func TestRunHookQuestionNtfyBridgeDown(t *testing.T) {
+	var ntfyClick, ntfyBody string
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ntfyClick = r.Header.Get("Click")
+		b, _ := io.ReadAll(r.Body)
+		ntfyBody = string(b)
+	}))
+	defer ntfy.Close()
+	stubNtfy(t, ntfy)
+
+	if err := runHook("http://127.0.0.1:1", "my-topic", strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"vscode_askQuestions","tool_input":{"questions":[{"question":"q?"}]}}`)); err == nil {
+		t.Fatal("expected an error when the bridge is unreachable")
+	}
+	if ntfyClick != "" {
+		t.Errorf("ntfy click = %q, want empty without a bridge", ntfyClick)
+	}
+	if ntfyBody != "1. q?" {
+		t.Errorf("ntfy body = %q", ntfyBody)
+	}
+}
+
+func TestRunHookPreToolUseOtherToolNoNtfy(t *testing.T) {
+	n := 0
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++ }))
+	defer ntfy.Close()
+	stubNtfy(t, ntfy)
+
+	if err := runHook(okBridge(t).URL, "my-topic", strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("ntfy requests = %d, want 0 for a non-question tool", n)
+	}
+}
+
+func TestRunHookQuestionNoNtfyWithoutTopic(t *testing.T) {
+	n := 0
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++ }))
+	defer ntfy.Close()
+	stubNtfy(t, ntfy)
+
+	if err := runHook(okBridge(t).URL, "", strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"vscode_askQuestions","tool_input":{"questions":[{"question":"q?"}]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("ntfy requests = %d, want 0 without a topic", n)
+	}
+}
+
+func TestFormatQuestions(t *testing.T) {
+	// Normal shape: two questions, the second without options.
+	in := jsontext.Value(`{"questions":[{"question":"a?","options":[{"label":"x"},{"label":"y"}]},{"question":"b?"}]}`)
+	if got := formatQuestions(in); got != "1. a?\n   - x\n   - y\n\n2. b?" {
+		t.Fatalf("got %q", got)
+	}
+	// Unparseable, empty, or question-less input.
+	if got := formatQuestions(jsontext.Value(`nope`)); got != "" {
+		t.Fatalf("bad json: got %q", got)
+	}
+	if got := formatQuestions(jsontext.Value("")); got != "" {
+		t.Fatalf("empty: got %q", got)
+	}
+	if got := formatQuestions(jsontext.Value(`{}`)); got != "" {
+		t.Fatalf("no questions: got %q", got)
 	}
 }
 

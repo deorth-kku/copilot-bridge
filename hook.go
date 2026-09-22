@@ -5,11 +5,18 @@ package main
 // we forward it verbatim to the bridge's /api/hook endpoint, where the
 // shutdown planner decides what to do with the event.
 //
-// When -ntfy-topic is set, a Stop event additionally pushes an ntfy.sh
-// notification: the agent's last message (parsed from the session
-// transcript, best effort) as the body, and the bridge's mirror URL as
-// the notification's Click target, so tapping the phone notification
-// opens the mirror of the workspace the task ran in.
+// When -ntfy-topic is set, two events additionally push an ntfy.sh
+// notification, both carrying the bridge's mirror URL as the
+// notification's Click target (tapping the phone notification opens the
+// mirror of the workspace the task ran in):
+//   - Stop: the agent's last message (parsed from the session transcript,
+//     best effort) as the body.
+//   - PreToolUse of the ask-questions tool (tool_name
+//     "vscode_askQuestions"): the questions and their options as the body,
+//     so a phone notification arrives while the agent waits for an answer.
+//
+// The hook only notifies: it never writes to stdout (no
+// hookSpecificOutput) and never influences the tool call.
 //
 // The subcommand ALWAYS exits with status 0: VS Code treats exit code 2
 // as a blocking error (shown to the model) and other non-zero codes as
@@ -61,6 +68,11 @@ const ntfyMaxAttempts = 2
 // wait).
 var ntfyRetryDelay = time.Second
 
+// askQuestionsToolName is the tool_name VS Code puts in the PreToolUse
+// payload for the ask-user-questions tool (probed 2026-09-22 from a live
+// hook stdin dump).
+const askQuestionsToolName = "vscode_askQuestions"
+
 // runHookCommand is the entry point for the "hook" subcommand. It always
 // exits with status 0 (see the package comment).
 func runHookCommand(args []string) {
@@ -78,31 +90,43 @@ func runHookCommand(args []string) {
 }
 
 // runHook reads the hook payload from stdin, forwards it to the bridge's
-// /api/hook endpoint, and (when a topic is configured and the event is a
-// Stop) pushes an ntfy notification carrying the bridge's mirror URL.
-// The ntfy push is independent of the bridge: a missing bridge still gets
-// a "task finished" notification (without the mirror Click link).
+// /api/hook endpoint, and (when a topic is configured) pushes an ntfy
+// notification for a Stop event (the agent's last message) or a PreToolUse
+// event of the ask-questions tool (the questions themselves), each
+// carrying the bridge's mirror URL as the Click target. The ntfy push is
+// independent of the bridge: a missing bridge still notifies (without the
+// mirror Click link).
 func runHook(bridge, ntfyTopic string, stdin io.Reader) error {
 	body, err := io.ReadAll(io.LimitReader(stdin, hookMaxBody))
 	if err != nil {
 		return fmt.Errorf("read stdin: %w", err)
 	}
 	var ev struct {
-		Name           string `json:"hook_event_name"`
-		SessionID      string `json:"session_id"`
-		TranscriptPath string `json:"transcript_path"`
+		Name           string         `json:"hook_event_name"`
+		SessionID      string         `json:"session_id"`
+		TranscriptPath string         `json:"transcript_path"`
+		ToolName       string         `json:"tool_name"`
+		ToolInput      jsontext.Value `json:"tool_input"`
 	}
 	// Not fatal: the payload is forwarded verbatim regardless; the fields
-	// are only needed for the ntfy notification.
+	// are only needed for the ntfy notifications.
 	_ = json.Unmarshal(body, &ev)
-	// Best effort: the last assistant message of the session transcript
-	// (VS Code's transcript format is not a stable API).
-	lastText := lastAssistantText(ev.TranscriptPath)
 
 	mirrorURL, bridgeErr := bridgeHook(bridge, body)
 
-	if ntfyTopic != "" && ev.Name == "Stop" {
-		pushNtfy(ntfyTopic, ev.SessionID, lastText, mirrorURL)
+	if ntfyTopic != "" {
+		switch ev.Name {
+		case "Stop":
+			// Best effort: the last assistant message of the session
+			// transcript (VS Code's transcript format is not a stable API).
+			pushNtfy(ntfyTopic, ev.SessionID, lastAssistantText(ev.TranscriptPath), mirrorURL)
+		case "PreToolUse":
+			// PreToolUse fires for EVERY tool; only the ask-questions tool
+			// gets a notification.
+			if ev.ToolName == askQuestionsToolName {
+				pushQuestionNtfy(ntfyTopic, ev.SessionID, ev.ToolInput, mirrorURL)
+			}
+		}
 	}
 	return bridgeErr
 }
@@ -142,7 +166,22 @@ func bridgeHook(bridge string, body []byte) (string, error) {
 // 5xx) are retried once — a missed task-finished notification is worse
 // than one more attempt.
 func pushNtfy(topic, sessionID, lastText, mirrorURL string) {
-	title := "VS Code Copilot: task finished"
+	pushNtfyMessage(topic, ntfyTitle("task finished", sessionID),
+		fallback(lastText, "Agent task finished (no last message captured)"), mirrorURL)
+}
+
+// pushQuestionNtfy pushes one ntfy notification for an agent question (a
+// PreToolUse event of the ask-questions tool): the questions and their
+// options as the body, the mirror URL as the Click target. Same
+// best-effort contract as pushNtfy.
+func pushQuestionNtfy(topic, sessionID string, toolInput jsontext.Value, mirrorURL string) {
+	pushNtfyMessage(topic, ntfyTitle("question", sessionID),
+		fallback(formatQuestions(toolInput), "Agent asked a question (details unavailable)"), mirrorURL)
+}
+
+// ntfyTitle builds the notification title with the short session id.
+func ntfyTitle(what, sessionID string) string {
+	title := "VS Code Copilot: " + what
 	if sessionID != "" {
 		id := sessionID
 		if len(id) > 8 {
@@ -150,12 +189,22 @@ func pushNtfy(topic, sessionID, lastText, mirrorURL string) {
 		}
 		title += " [" + id + "]"
 	}
-	msg := lastText
+	return title
+}
+
+// fallback returns msg when it is non-blank, else the default text.
+func fallback(msg, def string) string {
+	if strings.TrimSpace(msg) == "" {
+		return def
+	}
+	return msg
+}
+
+// pushNtfyMessage performs the (truncating, retrying) ntfy push for a
+// pre-built title/body pair.
+func pushNtfyMessage(topic, title, msg, mirrorURL string) {
 	if r := []rune(msg); len(r) > ntfyMaxLen {
 		msg = string(r[:ntfyMaxLen]) + " ...[truncated]"
-	}
-	if strings.TrimSpace(msg) == "" {
-		msg = "Agent task finished (no last message captured)"
 	}
 	client := &http.Client{Timeout: ntfyTimeout}
 	var lastErr error
@@ -171,6 +220,38 @@ func pushNtfy(topic, sessionID, lastText, mirrorURL string) {
 	if lastErr != nil {
 		reportNtfyError(lastErr)
 	}
+}
+
+// formatQuestions renders the ask-questions tool input as a phone-friendly
+// message: each question's text followed by its option labels. The tool
+// input shape (probed 2026-09-22): {"questions":[{"header","question",
+// "options":[{"label"}...]}]}.
+func formatQuestions(toolInput jsontext.Value) string {
+	var in struct {
+		Questions []struct {
+			Question string `json:"question"`
+			Options  []struct {
+				Label string `json:"label"`
+			} `json:"options"`
+		} `json:"questions"`
+	}
+	if len(toolInput) == 0 || json.Unmarshal(toolInput, &in) != nil {
+		return ""
+	}
+	var b strings.Builder
+	for i, q := range in.Questions {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		fmt.Fprintf(&b, "%d. %s", i+1, q.Question)
+		for _, o := range q.Options {
+			if o.Label != "" {
+				b.WriteString("\n   - ")
+				b.WriteString(o.Label)
+			}
+		}
+	}
+	return b.String()
 }
 
 // ntfyPushOnce performs a single ntfy push attempt.
