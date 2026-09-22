@@ -1294,8 +1294,16 @@ const pageHTML = `<!doctype html>
   //   sliderTop = liveRatio * (clientH - sliderH)   scaled to mirror height)
   // The track is absolute inside the scroller, so it scrolls out of view with
   // the content; offset its top by the scroller's scrollTop to pin it to the
-  // top of the visible area. Other (nested) scrollers fall back to their own
-  // geometry — except the reasoning-trace wrap of a .chat-thinking-box, whose
+  // top of the visible area. The offset is CLAMPED so the track's bottom
+  // never passes the in-flow content bottom: an absolute descendant that
+  // overflows downward EXTENDS the scroller's scrollable overflow area, so
+  // an unclamped track would inflate scrollHeight whenever the content is
+  // shorter than scrollTop + clientHeight (e.g. after the thinking box
+  // collapses and the live content fits one screen while the mirror still
+  // overflows) — pin-bottom would then pin to the phantom max, leaving a
+  // blank strip below the last row that re-anchors itself on every state
+  // message. Other (nested) scrollers fall back to their own geometry —
+  // except the reasoning-trace wrap of a .chat-thinking-box, whose
   // live state is carried in lastNestedScrolls and handled after the loop.
   // Called after every DOM patch, scroll restoration, local scroll, and
   // viewport resize.
@@ -1315,13 +1323,31 @@ const pageHTML = `<!doctype html>
       if (!slider) continue;
       var clientH = el.clientHeight;
       if (clientH <= 0) continue;
+      // In-flow content height (the track and the other absolute children —
+      // shadows, sticky container, horizontal track — never contribute).
+      // The track's bottom must stay at or above contentH - clientH, or it
+      // would extend the scrollable overflow area and inflate scrollHeight.
+      var contentBottom = 0;
+      for (var c = 0; c < el.children.length; c++) {
+        var kid = el.children[c];
+        if (kid === track || getComputedStyle(kid).position === 'absolute') continue;
+        var kb = kid.offsetTop + kid.offsetHeight;
+        if (kb > contentBottom) contentBottom = kb;
+      }
+      var cs = getComputedStyle(el);
+      var contentH = contentBottom + (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+      var trackTop = Math.min(el.scrollTop, Math.max(0, contentH - clientH));
+      // The scroll range the scroller actually has once the track can no
+      // longer inflate it (the browser's scrollHeight includes the track
+      // overflow until the clamp is applied).
+      var effScrollH = Math.max(clientH, contentH);
       var ratio, sliderH;
       if (el === target && lastScroll && lastScroll.scrollH > lastScroll.h) {
         var liveMax = lastScroll.scrollH - lastScroll.h;
         ratio = Math.max(0, Math.min(1, (lastScroll.top - lastScroll.offset) / liveMax));
         sliderH = clientH * lastScroll.h / lastScroll.scrollH;
       } else {
-        var max = el.scrollHeight - clientH;
+        var max = effScrollH - clientH;
         if (el.scrollHeight <= 0) continue;
         // Live is not scrolling this scroller (it is not the measured one),
         // so the track arrived with its live class: when the live content
@@ -1329,12 +1355,12 @@ const pageHTML = `<!doctype html>
         // though the mirror's copy overflows and scrolls locally. Show it
         // exactly when the mirror can scroll, hide it otherwise.
         track.style.opacity = max > 0 ? '1' : '';
-        ratio = max > 0 ? Math.max(0, Math.min(1, el.scrollTop / max)) : 1;
-        sliderH = clientH * clientH / el.scrollHeight;
+        ratio = max > 0 ? Math.max(0, Math.min(1, Math.min(el.scrollTop, max) / max)) : 1;
+        sliderH = clientH * clientH / effScrollH;
       }
       if (sliderH < 20) sliderH = 20;
       track.style.height = clientH + 'px';
-      track.style.top = el.scrollTop + 'px';
+      track.style.top = trackTop + 'px';
       slider.style.top = ratio * (clientH - sliderH) + 'px';
       slider.style.height = sliderH + 'px';
       // The live page pins the sticky (pinned) user message to the top of the
@@ -1372,8 +1398,20 @@ const pageHTML = `<!doctype html>
         var vratio = vliveMax > 0 ? Math.max(0, Math.min(1, ns.top / vliveMax)) : 0;
         var vsliderH = ns.scrollH > 0 ? vch * ns.clientH / ns.scrollH : vch;
         if (vsliderH < 20) vsliderH = 20;
+        // Same clamp as the main loop: the track is absolute, so a bottom
+        // edge past the in-flow content (the list) would extend the wrap's
+        // scrollable range and inflate its scrollHeight.
+        var wBottom = 0;
+        for (var c2 = 0; c2 < wrap.children.length; c2++) {
+          var kid2 = wrap.children[c2];
+          if (kid2 === vtrack || getComputedStyle(kid2).position === 'absolute') continue;
+          var kb2 = kid2.offsetTop + kid2.offsetHeight;
+          if (kb2 > wBottom) wBottom = kb2;
+        }
+        var wcs = getComputedStyle(wrap);
+        var wContentH = wBottom + (parseFloat(wcs.paddingTop) || 0) + (parseFloat(wcs.paddingBottom) || 0);
         vtrack.style.height = vch + 'px';
-        vtrack.style.top = wrap.scrollTop + 'px';
+        vtrack.style.top = Math.min(wrap.scrollTop, Math.max(0, wContentH - vch)) + 'px';
         vslider.style.top = vratio * (vch - vsliderH) + 'px';
         vslider.style.height = vsliderH + 'px';
       }

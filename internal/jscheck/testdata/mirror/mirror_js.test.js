@@ -883,6 +883,8 @@ test('mirror: a locally scrollable list shows its drawn scrollbar track', () => 
     const sc = pane.querySelector('.monaco-scrollable-element');
     sc.scrollHeight = 700;
     sc.clientHeight = 500;
+    // In-flow content height: the track-top clamp must see the rows, not 0.
+    sc.querySelector('.monaco-list-rows').offsetHeight = 700;
     // A scroll-only state re-runs syncDrawnScrollbars with the real geometry.
     state(ws, { scroll: { left: 0, top: 0, scrollH: 700, offset: 0, w: 800, h: 500 }, scrollPath: null });
     const track = pane.querySelector('.scrollbar');
@@ -1012,6 +1014,8 @@ test('mirror: drawn scrollbar mirrors the live slider, and local scroll pins tra
     const scroller = pane.children[0].children[0].children[0];
     scroller.clientHeight = 300;
     scroller.scrollHeight = 600;
+    // In-flow content fills the scroller, so the track-top clamp is a no-op.
+    scroller.children[0].offsetHeight = 600;
     const track = scroller.children[1];
     const slider = track.children[0];
     const sticky = scroller.children[2];
@@ -1027,6 +1031,54 @@ test('mirror: drawn scrollbar mirrors the live slider, and local scroll pins tra
     scroller.dispatchEvent(new Event('scroll', scroller));
     assert.equal(track.style.top, '50px');
     assert.equal(sticky.style.top, '-50px');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: a shrunken content does not inflate the scroll range via the drawn track', async () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="monaco-list"><div class="monaco-scrollable-element">' +
+        '<div class="scrollbar invisible vertical"><div class="slider"></div></div>' +
+        '<div class="monaco-list-rows"><div class="monaco-list-row" data-index="0"></div></div>' +
+        '</div></div></div>',
+      scrollPath: [0, 0],
+    });
+    const sc = pane.querySelector('.monaco-scrollable-element');
+    const row = sc.querySelector('.monaco-list-row');
+    // The thinking box collapsed: the mirror content shrank to 525px in a
+    // 411px viewport, but the scroller still carries the stale inflated
+    // scrollHeight (762) from when the content was taller.
+    sc.scrollHeight = 762;
+    sc.clientHeight = 411;
+    sc.querySelector('.monaco-list-rows').offsetHeight = 525;
+    row.offsetHeight = 525;
+    // Live still fits one screen (scrollH == h) and sits at its bottom.
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 762, offset: 0, w: 800, h: 762, anchorKind: 'bottom' },
+      scrollPath: [0, 0],
+      scrollRows: [0, 525],
+    });
+    assert.equal(sc.scrollTop, 114, 'bottom anchor: inside 525 - clientH 411');
+    // The user wheels to the bottom: the (stale, inflated) max is 351, so
+    // the mirror pins at 351 — the exact bug state before the fix.
+    row.rect = { left: 10, top: 100, width: 780, height: 525 };
+    row.dispatchEvent({ type: 'wheel', target: row, clientX: 100, clientY: 140, deltaX: 0, deltaY: 300, deltaMode: 0, buttons: 0, preventDefault() {} });
+    assert.equal(sc.scrollTop, 351, 'pinned at the stale max');
+    // The next state message re-applies the phantom max (pinned branch), but
+    // the track must NOT extend the scrollable overflow area with it.
+    state(ws, {
+      scroll: { left: 0, top: 0, scrollH: 762, offset: 0, w: 800, h: 762, anchorKind: 'bottom' },
+      scrollPath: [0, 0],
+      scrollRows: [0, 525],
+    });
+    const track = sc.querySelector('.scrollbar');
+    // The track's bottom is clamped to the content bottom (525 - 411 = 114);
+    // offset by the stale scrollTop (351) it would extend the scrollable
+    // area to 762 and leave a 237px blank strip below the last row.
+    assert.equal(track.style.top, '114px', 'track top clamped to the content bottom');
+    assert.equal(track.style.height, '411px');
+    await sleep(200); // let the wheel flush timer fire (before uninstalling)
   } finally { uninstallGlobals(); }
 });
 
