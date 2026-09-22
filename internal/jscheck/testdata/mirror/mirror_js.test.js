@@ -998,7 +998,7 @@ test('mirror: compositionend forwards committed text (falling back to the textar
   } finally { uninstallGlobals(); }
 });
 
-test('mirror: drawn scrollbar mirrors the live slider, and local scroll pins track + sticky', () => {
+test('mirror: drawn scrollbar mirrors the live slider; local scroll pins the track', () => {
   const { pane, ws } = setup();
   try {
     state(ws, {
@@ -1025,12 +1025,15 @@ test('mirror: drawn scrollbar mirrors the live slider, and local scroll pins tra
     assert.equal(track.style.top, '0px');
     assert.equal(slider.style.height, '90px');
     assert.equal(slider.style.top, '30px'); // 1/7 * (300 - 90)
-    assert.equal(sticky.style.top, '0px');
-    // Local scroll: the track stays pinned to the visible top, the sticky offsets.
+    // The live pinned user message (.monaco-tree-sticky-container) is dropped
+    // in the mirror (hidden by the page CSS); the scrollbar sync must never
+    // offset it.
+    assert.equal(sticky.style.top, undefined, 'sticky is never offset');
+    // Local scroll: the track stays pinned to the visible top.
     scroller.scrollTop = 50;
     scroller.dispatchEvent(new Event('scroll', scroller));
     assert.equal(track.style.top, '50px');
-    assert.equal(sticky.style.top, '-50px');
+    assert.equal(sticky.style.top, undefined, 'sticky stays untouched on local scroll');
   } finally { uninstallGlobals(); }
 });
 

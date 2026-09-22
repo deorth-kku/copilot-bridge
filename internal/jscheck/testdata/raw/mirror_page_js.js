@@ -1105,14 +1105,6 @@
       track.style.top = trackTop + 'px';
       slider.style.top = ratio * (clientH - sliderH) + 'px';
       slider.style.height = sliderH + 'px';
-      // The live page pins the sticky (pinned) user message to the top of the
-      // list viewport (its scrollTop is always 0, the sticky sits at top:0 in
-      // scroller coordinates). The mirror scroller does scroll, so offset the
-      // sticky by -scrollTop to keep it pinned to the top of the visible area.
-      if (el === target) {
-        var sticky = el.querySelector(':scope > .monaco-tree-sticky-container');
-        if (sticky) sticky.style.top = -el.scrollTop + 'px';
-      }
     }
     // The reasoning-trace wrap of each .chat-thinking-box is a nested
     // .monaco-scrollable-element (NOT a .monaco-list child, so the loop above

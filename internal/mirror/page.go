@@ -110,6 +110,12 @@ const pageHTML = `<!doctype html>
   #pane .chat-welcome-view-container[style*="height: 0px"] .chat-welcome-view { display: none !important; }
   #pane .monaco-list-rows { position: static !important; transform: none !important; top: auto !important; left: auto !important; height: auto !important; overflow: visible !important; contain: none !important; }
   #pane .monaco-list-row { position: static !important; top: auto !important; }
+  /* The live chat pins the LAST user message to the top of the list viewport
+     (.monaco-tree-sticky-container, absolute at top:0 of the scroller). The
+     mirror's scroller scrolls on its own, so replicating the pin fights the
+     mirror's flow layout and causes artifacts; the message is already in the
+     list, so the mirror drops the effect. */
+  #pane .monaco-tree-sticky-container { display: none !important; }
   /* Rows OUTSIDE popups reflow to their content height (the responsive
      mirror width wraps text differently than the live pane). */
   #pane .monaco-list-row:not(.context-view .monaco-list-row) { height: auto !important; }
@@ -1363,14 +1369,6 @@ const pageHTML = `<!doctype html>
       track.style.top = trackTop + 'px';
       slider.style.top = ratio * (clientH - sliderH) + 'px';
       slider.style.height = sliderH + 'px';
-      // The live page pins the sticky (pinned) user message to the top of the
-      // list viewport (its scrollTop is always 0, the sticky sits at top:0 in
-      // scroller coordinates). The mirror scroller does scroll, so offset the
-      // sticky by -scrollTop to keep it pinned to the top of the visible area.
-      if (el === target) {
-        var sticky = el.querySelector(':scope > .monaco-tree-sticky-container');
-        if (sticky) sticky.style.top = -el.scrollTop + 'px';
-      }
     }
     // The reasoning-trace wrap of each .chat-thinking-box is a nested
     // .monaco-scrollable-element (NOT a .monaco-list child, so the loop above
