@@ -17,6 +17,7 @@ package main
 // are reported on stderr and appended to the app log.
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -228,14 +229,16 @@ func lastAssistantText(path string) string {
 	if path == "" {
 		return ""
 	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
+	defer f.Close()
+	buf := bufio.NewScanner(f)
 	lastText := ""
-	for line := range strings.SplitSeq(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for buf.Scan() {
+		line := strings.TrimSpace(buf.Text())
+		if line == "" || buf.Err() != nil {
 			continue
 		}
 		var entry struct {
