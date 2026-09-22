@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"syscall"
 )
 
 // Workspace is one entry of VS Code's known-workspaces list.
@@ -307,9 +306,7 @@ func (o *Opener) Open(uri string) error {
 	}
 	o.log.Debug("workspaces: open", "uri", uri, "cli", o.cli)
 	cmd := exec.Command(o.cli, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow: true,
-	}
+	cmd.SysProcAttr = launchProcAttr()
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %s: %w", o.cli, err)
 	}
