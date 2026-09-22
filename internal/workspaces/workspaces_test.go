@@ -191,3 +191,53 @@ func TestSameURI(t *testing.T) {
 		t.Error("empty window URI must not match")
 	}
 }
+
+// TestNormalizeAuthority pins the authority decoding: %2B must decode to
+// '+' (net/url rejects it in the host), but a LITERAL '+' must survive —
+// url.PathUnescape would turn it into a space and corrupt the authority.
+func TestNormalizeAuthority(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d", "vscode-remote://ssh-remote+pve/etc/dnsmasq.d"},
+		{"vscode-remote://ssh-remote+pve/etc/dnsmasq.d", "vscode-remote://ssh-remote+pve/etc/dnsmasq.d"},
+		{"file:///c%3A/Users/deort/vscode-load-llama", "file:///c%3A/Users/deort/vscode-load-llama"},
+		{"not a uri", "not a uri"},
+	}
+	for _, c := range cases {
+		if got := normalizeAuthority(c.in); got != c.want {
+			t.Errorf("normalizeAuthority(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestParseWorkspaceLiteralPlus(t *testing.T) {
+	// An unencoded '+' in the remote authority must not be turned into a
+	// space (which would make the URI unparseable and drop the workspace).
+	ws, ok := parseWorkspace("vscode-remote://ssh-remote+pve/etc/dnsmasq.d")
+	if !ok {
+		t.Fatalf("parseWorkspace failed for literal '+': %+v", ws)
+	}
+	if ws.Remote != "ssh-remote+pve" || ws.Name != "pve:/etc/dnsmasq.d" {
+		t.Errorf("literal '+': %+v", ws)
+	}
+}
+
+func TestPercentDecode(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"ssh-remote%2Bpve", "ssh-remote+pve", true},
+		{"ssh-remote+pve", "ssh-remote+pve", true},
+		{"%41%42c", "ABc", true},
+		{"100%", "", false}, // dangling %
+		{"%2", "", false},   // truncated escape
+		{"%zz", "", false},  // non-hex digits
+	}
+	for _, c := range cases {
+		got, ok := percentDecode(c.in)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("percentDecode(%q) = (%q, %v), want (%q, %v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}

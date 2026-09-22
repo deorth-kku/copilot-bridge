@@ -63,8 +63,11 @@ func startMockPage(t *testing.T) (wsURL string, methods chan string) {
 					// startup snapshot: empty input (POC-observed behavior)
 					send(`{"input":"","model":"Qwen3.8 27B","effort":null,"mode":null}`)
 					send(`{"input":"hello","model":"Qwen3.8 27B","effort":"high","mode":"agent"}`)
-					// simulate workbench reload
-					conn.WriteJSON(map[string]any{"method": "Page.frameNavigated"})
+					// simulate workbench reload (main frame: no parentId)
+					conn.WriteJSON(map[string]any{
+						"method": "Page.frameNavigated",
+						"params": map[string]any{"frame": map[string]any{"id": "main", "url": "vscode-workbench://vscode-app/"}},
+					})
 				} else {
 					// re-injection after frameNavigated
 					send(`{"input":"final","model":"Qwen3.8 27B","effort":null,"mode":null}`)
@@ -246,5 +249,106 @@ func TestSessionTitleUpdateVisibleInEvents(t *testing.T) {
 	ev = readEvent(t, events)
 	if ev.Window != "Renamed" {
 		t.Fatalf("expected Window %q after SetTitle, got %q", "Renamed", ev.Window)
+	}
+}
+
+// TestSessionSubframeNavigationDoesNotReinject verifies that a
+// Page.frameNavigated for a SUBFRAME (webview/iframe: frame.parentId set)
+// does not queue a re-injection (the main frame's bindings survive a
+// subframe navigation), while a main-frame navigation still does.
+func TestSessionSubframeNavigationDoesNotReinject(t *testing.T) {
+	methods := make(chan string, 32)
+	events := make(chan Event, 10)
+	push := make(chan map[string]any, 16)
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Single writer goroutine: pushed events and id-matched responses.
+		responses := make(chan map[string]any, 16)
+		go func() {
+			for {
+				select {
+				case ev, ok := <-push:
+					if !ok {
+						return
+					}
+					conn.WriteJSON(ev)
+				case r := <-responses:
+					conn.WriteJSON(r)
+				}
+			}
+		}()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				continue
+			}
+			if method, ok := m["method"].(string); ok {
+				methods <- method
+			}
+			if id, ok := m["id"]; ok {
+				responses <- map[string]any{"id": id, "result": map[string]any{}}
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	s := NewSession("id", "W", wsURL, events, discardLog, defaultDebounceMs)
+	go s.Run(context.Background())
+	defer s.Stop()
+
+	// Handshake: enable both domains, install both bindings.
+	for _, want := range []string{
+		"Runtime.enable", "Page.enable",
+		"Runtime.addBinding", "Runtime.evaluate",
+		"Runtime.addBinding", "Runtime.evaluate",
+	} {
+		select {
+		case got := <-methods:
+			if got != want {
+				t.Fatalf("handshake: got %s, want %s", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for handshake command")
+		}
+	}
+
+	// A SUBFRAME navigation must not trigger a re-injection.
+	push <- map[string]any{
+		"method": "Page.frameNavigated",
+		"params": map[string]any{"frame": map[string]any{"id": "sub", "parentId": "main"}},
+	}
+	select {
+	case got := <-methods:
+		t.Fatalf("subframe navigation triggered a command: %s", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// A MAIN-frame navigation (no parentId) still does.
+	push <- map[string]any{
+		"method": "Page.frameNavigated",
+		"params": map[string]any{"frame": map[string]any{"id": "main", "url": "vscode-workbench://vscode-app/"}},
+	}
+	for _, want := range []string{
+		"Runtime.addBinding", "Runtime.evaluate",
+		"Runtime.addBinding", "Runtime.evaluate",
+	} {
+		select {
+		case got := <-methods:
+			if got != want {
+				t.Fatalf("re-injection: got %s, want %s", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for re-injection command")
+		}
 	}
 }

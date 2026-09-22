@@ -196,8 +196,15 @@ func (s *Session) Run(ctx context.Context) {
 		}
 	}()
 
+	// The ctx-waiter must not outlive Run: when the connection drops, Run
+	// returns and the discovery scan dials a NEW Session, so a waiter that
+	// keeps holding this one until process exit leaks one goroutine per
+	// reconnection. A child ctx cancelled on return bounds its lifetime to
+	// this run.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	go func() {
-		<-ctx.Done()
+		<-runCtx.Done()
 		s.Stop()
 	}()
 
@@ -302,6 +309,19 @@ func (s *Session) handle(raw []byte) {
 				s.log.Warn("event channel full, dropping", "window", s.Title())
 			}
 		case "Page.frameNavigated":
+			// Only the MAIN frame counts: a subframe (webview/iframe)
+			// navigation leaves the main frame's bindings intact, and
+			// re-injecting on every webview load would spam CDP traffic
+			// and the log. Re-injection is idempotent, so an event whose
+			// frame object cannot be read is treated as main-frame.
+			var p struct {
+				Frame struct {
+					ParentID string `json:"parentId"`
+				} `json:"frame"`
+			}
+			if m.Params != nil && json.Unmarshal(m.Params, &p) == nil && p.Frame.ParentID != "" {
+				continue
+			}
 			// workbench reload: both bindings are gone, reinstall. Queue the
 			// request for the Run goroutine: inject uses Call, which waits
 			// for responses the read loop is the only deliverer of, so it

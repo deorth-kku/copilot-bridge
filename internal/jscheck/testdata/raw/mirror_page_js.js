@@ -1044,7 +1044,10 @@
   function syncDrawnScrollbars() {
     var root = pane.firstElementChild;
     if (!root) return;
-    var target = lastScrollPath && lastScrollPath.length ? pathEl(lastScrollPath) : null;
+    // lastScrollPath is [] when the pane root ITSELF is the measured scroller
+    // (pathEl resolves an empty path to the root) and null when no scroller
+    // exists at all — so test only for null, like localScrollEl does.
+    var target = lastScrollPath ? pathEl(lastScrollPath) : null;
     var scrollers = root.querySelectorAll('.monaco-list > .monaco-scrollable-element');
     for (var i = 0; i < scrollers.length; i++) {
       var el = scrollers[i];

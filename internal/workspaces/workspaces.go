@@ -151,11 +151,48 @@ func normalizeAuthority(uri string) string {
 		auth, tail = rest[:j], rest[j:]
 	}
 	if strings.Contains(auth, "%") {
-		if dec, err := url.PathUnescape(auth); err == nil {
+		if dec, ok := percentDecode(auth); ok {
 			auth = dec
 		}
 	}
 	return uri[:i+3] + auth + tail
+}
+
+// percentDecode decodes only %XX sequences, leaving every other character
+// (notably a literal '+') untouched — unlike url.PathUnescape, which also
+// maps '+' to a space and would silently corrupt an authority that stores
+// an unencoded '+'. ok is false when s holds a malformed % sequence (the
+// caller then keeps the original).
+func percentDecode(s string) (string, bool) {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '%' {
+			b.WriteByte(s[i])
+			continue
+		}
+		if i+2 >= len(s) || !isHexDigit(s[i+1]) || !isHexDigit(s[i+2]) {
+			return "", false
+		}
+		b.WriteByte(hexVal(s[i+1])<<4 | hexVal(s[i+2]))
+		i += 2
+	}
+	return b.String(), true
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func hexVal(c byte) byte {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0'
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10
+	default:
+		return c - 'A' + 10
+	}
 }
 
 // parseWorkspace turns one storage.json workspace URI into a Workspace.

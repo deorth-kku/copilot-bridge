@@ -136,7 +136,10 @@ const workspacesHTML = `<!DOCTYPE html>
 
   list.addEventListener('click', function (ev) {
     var row = ev.target;
-    while (row && row !== list && !(row.className === 'row')) row = row.parentElement;
+    // classList.contains, not an exact className match: a row in its error
+    // state carries 'row err', and an exact match would walk straight to
+    // the list and leave the row unclickable until the next render.
+    while (row && row !== list && !row.classList.contains('row')) row = row.parentElement;
     if (!row || row === list) return;
     openRow(row);
   });

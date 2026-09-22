@@ -263,6 +263,10 @@ type snapState struct {
 	// cursorChar: the live cursor's character index (-1 = no cursor); the
 	// mirror re-seats the cursor by this index at its own (reflowed) width.
 	cursorChar int
+	// inputBreaks: hard-newline vs soft-wrap boundaries between the live
+	// input's view lines (see cdp.FingerprintState.InputBreaks); the mirror
+	// re-groups the view lines across soft wraps.
+	inputBreaks []bool
 	// popupHTML/popupFP capture the visible context view (popup menu) that
 	// renders outside the pane root; popupFP == "" means no popup is open.
 	popupHTML string
@@ -888,6 +892,7 @@ func (m *Mirror) sendFullState(c *client) {
 			RootStyle: s.rootStyle, ThemeVars: s.themeVars, ThemeVer: s.themeVer,
 			ThemeBg: s.themeBg, InputFocused: s.inputFocused, CursorChar: s.cursorChar,
 			Rect: s.rect, Scroll: s.scroll, ScrollPath: s.scrollPath,
+			ScrollRows: s.scrollRows, InputBreaks: s.inputBreaks,
 			NestedScrolls: s.nestedScrolls,
 			Window:        s.window, WindowID: s.windowID,
 		}
@@ -1258,7 +1263,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		rect: fpst.Rect, scroll: fpst.Scroll, scrollPath: fpst.ScrollPath, scrollRows: fpst.ScrollRows,
 		nestedScrolls: nestedScrolls,
 		window:        s.Title(), windowID: winID, fp: fpst.FP, inputFocused: fpst.InputFocused,
-		cursorChar: fpst.CursorChar,
+		cursorChar: fpst.CursorChar, inputBreaks: fpst.InputBreaks,
 	}
 	if newPopup != nil {
 		ns.popupHTML = newPopup.HTML
@@ -1345,8 +1350,13 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 				ns.cssVer = cssVer
 			}
 			m.snapMu.Unlock()
+			// Carry the input state too: CursorChar has no omitempty (0 is a
+			// valid caret position), so a follow without it would reset the
+			// mirror's caret to the start of the input, and a missing
+			// InputFocused would drop the blink class.
 			follow := stateMsg{
 				Type: "state", CSS: css, CSSVer: cssVer,
+				InputFocused: fpst.InputFocused, CursorChar: fpst.CursorChar, InputBreaks: fpst.InputBreaks,
 				Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
 				Window: s.Title(), WindowID: winID, Windows: wins,
 			}
