@@ -12,15 +12,24 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"copilot-bridge/internal/cdp"
 	"copilot-bridge/internal/config"
 	"copilot-bridge/internal/loader"
 	"copilot-bridge/internal/mirror"
+	"copilot-bridge/internal/shutdown"
 )
 
 func main() {
+	// Subcommand dispatch before the daemon's flag parsing: "hook" is
+	// invoked by VS Code agent hooks and has its own flag namespace
+	// (it always exits; it never falls through to the daemon).
+	if len(os.Args) > 1 && os.Args[1] == "hook" {
+		runHookCommand(os.Args[2:])
+	}
+
 	cdpAddr := flag.String("cdp", "127.0.0.1:9222", "CDP HTTP address")
 	settingsPath := flag.String("settings", defaultSettingsPath(), "path to VS Code settings.json")
 	cooldown := flag.Duration("cooldown", 30*time.Second, "per-model load cooldown")
@@ -32,24 +41,34 @@ func main() {
 	window := flag.String("window", "", "mirror this window (title substring; empty = first window)")
 	storagePath := flag.String("storage", defaultStoragePath(), "path to VS Code globalStorage storage.json (workspaces page)")
 	codePath := flag.String("code", "", "path to the code CLI (empty = auto-detect; workspaces page)")
+	stopGrace := flag.Duration("stop-grace", 10*time.Second, "grace window after a Stop hook event before the armed power-off fires (a new SessionStart inside it cancels this stop's pending power-off)")
 	flag.Parse()
 
-	if err := run(*cdpAddr, *settingsPath, *cooldown, *debounce, *logPath, *verbose, *web, *pane, *window, *storagePath, *codePath); err != nil {
+	poweredOff, err := run(*cdpAddr, *settingsPath, *cooldown, *debounce, *logPath, *verbose, *web, *pane, *window, *storagePath, *codePath, *stopGrace)
+	if err != nil {
 		// GUI builds have no console; the error is also in the log file
 		// (if it could be opened).
 		fmt.Fprintln(os.Stderr, err)
+	} else if poweredOff {
+		// The armed power-off trigger fired: the graceful shutdown above
+		// already ran, now power off the machine (no-op off-Windows).
+		if perr := shutdown.PowerOff(); perr != nil {
+			fmt.Fprintln(os.Stderr, "power off:", perr)
+		}
 	}
 }
 
-func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter, storagePath, codePath string) error {
+// run returns poweredOff: true when the armed power-off trigger fired
+// (the caller then powers off the machine after the graceful shutdown).
+func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter, storagePath, codePath string, stopGrace time.Duration) (bool, error) {
 	if dir := filepath.Dir(logPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("create log dir: %w", err)
+			return false, fmt.Errorf("create log dir: %w", err)
 		}
 	}
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return fmt.Errorf("open log file %s: %w", logPath, err)
+		return false, fmt.Errorf("open log file %s: %w", logPath, err)
 	}
 	defer f.Close()
 
@@ -65,7 +84,7 @@ func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath
 	// readers never take a lock.
 	store, err := config.NewStore(settingsPath, log)
 	if err != nil {
-		return fmt.Errorf("load settings: %w", err)
+		return false, fmt.Errorf("load settings: %w", err)
 	}
 	log.Info("settings loaded", "path", settingsPath, "models", len(store.Load().Models))
 
@@ -75,6 +94,19 @@ func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath
 		// Non-fatal: keep monitoring with the initial snapshot.
 		log.Error("start settings watcher", "err", err)
 	}
+
+	// Armed power-off: the user arms it from the workspaces page
+	// (POST /api/shutdown); the "hook" subcommand feeds Stop /
+	// SessionStart events to the mirror server (POST /api/hook), which
+	// drives the planner. The trigger cancels the main context (graceful
+	// shutdown of CDP and the web server); run() then reports poweredOff
+	// and main() calls shutdown.PowerOff() on the way out.
+	poweredOff := atomic.Bool{}
+	planner := shutdown.NewPlanner(stopGrace, func() {
+		log.Warn("shutdown trigger fired: shutting down, will power off")
+		poweredOff.Store(true)
+		stop()
+	})
 
 	// The loader resolves the proxy per-request from the current atomic
 	// snapshot, so http.proxy / http.noProxy changes hot-reload too.
@@ -86,6 +118,7 @@ func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath
 	// Optional: forward the Copilot pane to a browser page.
 	if webAddr != "" {
 		mir := mirror.New(disc, log, webAddr, splitSelectors(paneSel), windowFilter, storagePath, codePath)
+		mir.SetPlanner(planner)
 		go func() {
 			if err := mir.Run(ctx); err != nil {
 				log.Error("mirror server", "err", err)
@@ -99,7 +132,7 @@ func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath
 		select {
 		case <-ctx.Done():
 			log.Info("shutting down")
-			return nil
+			return poweredOff.Load(), nil
 		case ev := <-events:
 			processEvent(ev, store, ld, log)
 		}

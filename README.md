@@ -56,6 +56,7 @@ Enable the CDP debugging port in VS Code (one-time):
 | `-debounce` | `50ms` | page-side DOM-change debounce for the injected observers |
 | `-log` | `<tempdir>/copilot-bridge/app.log` | log file |
 | `-verbose` | `false` | debug-level logging |
+| `-stop-grace` | `10s` | grace window after a `Stop` hook event before the armed power-off fires (see **Power off at task end**) |
 
 Default `settings.json` location per platform:
 
@@ -65,6 +66,61 @@ Default `settings.json` location per platform:
 | Linux | `~/.config/Code/User/settings.json` |
 | macOS | `~/Library/Application Support/Code/User/settings.json` |
 
+
+## Power off at task end (hook subcommand)
+
+Optional feature: ask the machine to power off after the next agent task
+finishes. Arm it from the workspaces page
+(`http://<host>:9527/workspaces`, the **下次任务结束时关机** button). The
+bridge then powers the machine off when:
+
+1. a VS Code agent task ends (`Stop` hook event), and
+2. no new task starts (`SessionStart`) within the grace window
+   (`-stop-grace`, default 10s).
+
+A new task start inside the grace window cancels only that stop's pending
+power-off — the armed state is KEPT, so the NEXT stop (without a following
+start) still powers off. Disarm the toggle any time to cancel.
+
+### How it works
+- The `hook` subcommand is registered as a VS Code agent hook for the
+  `SessionStart` and `Stop` events. VS Code writes the hook's JSON payload
+  to the subcommand's stdin; it is forwarded verbatim to the bridge's
+  `POST /api/hook` endpoint (the mirror web server, default
+  `127.0.0.1:9527`).
+- The bridge's shutdown planner tracks the armed state plus the last
+  start/stop times. When the conditions above are met it cancels the main
+  context (graceful shutdown of CDP and the web server), then powers off
+  the machine.
+- Power-off is Windows-only (`ExitWindowsEx(EWX_POWEROFF)`); on Linux /
+  macOS it is a no-op.
+- The subcommand always exits 0 (a missing bridge must never disrupt the
+  agent); failures go to stderr and the app log.
+
+### Install the hook
+Create `shutdown.json` in the user-level hook folder with the ABSOLUTE
+path to `copilot-bridge.exe`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "type": "command", "command": "C:\\Users\\deort\\vscode-load-llama\\copilot-bridge.exe hook" }
+    ],
+    "Stop": [
+      { "type": "command", "command": "C:\\Users\\deort\\vscode-load-llama\\copilot-bridge.exe hook" }
+    ]
+  }
+}
+```
+
+- Windows user-level hook folder: `%USERPROFILE%\.copilot\hooks\`.
+- The command must be an absolute path — hooks run through a shell whose
+  PATH may not include the exe's directory.
+- The bridge must be running with the web server enabled (default
+  `0.0.0.0:9527`) for hook events to reach it.
+- Hook subcommand flag: `-bridge` (default `http://127.0.0.1:9527`) —
+  the bridge HTTP address to forward events to.
 
 ## Testing
 `go test ./internal/...` runs everything. The injected JavaScript is

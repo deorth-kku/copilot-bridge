@@ -32,16 +32,22 @@ const workspacesHTML = `<!DOCTYPE html>
   /* .monaco-inputbox look: 4px radius, focus border #0078d4. Mobile-first:
      full-width row and 16px font (no iOS zoom-on-focus); the desktop look
      is restored in the min-width:800px block below. */
-  #q { background: #313131; color: #cccccc; border: 1px solid #3c3c3c; height: 36px; box-sizing: border-box; border-radius: 4px; order: 2; flex: 1 1 100%; font: 16px "Segoe WPC", "Segoe UI", sans-serif; padding: 0 10px; }
+  #q { background: #313131; color: #cccccc; border: 1px solid #3c3c3c; height: 36px; box-sizing: border-box; border-radius: 4px; order: 3; flex: 1 1 100%; font: 16px "Segoe WPC", "Segoe UI", sans-serif; padding: 0 10px; }
   #q:focus { outline: none; border-color: #0078d4; }
   #q::placeholder { color: #989898; }
+  /* Power-off toggle: icon-only, same idiom as the back button (#nav).
+     The armed state glows in the error red (#f85149). */
+  /* margin-left:auto right-aligns the [power-off][count] group. */
+  #poweroff { order: 1; margin-left: auto; width: 36px; height: 36px; padding: 0; background: transparent; border: none; border-radius: 6px; color: #cccccc; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  #poweroff:hover { background: rgba(90,93,94,0.31); }
+  #poweroff.armed { color: #f85149; filter: drop-shadow(0 0 3px rgba(248, 81, 73, 0.8)) drop-shadow(0 0 8px rgba(248, 81, 73, 0.5)); }
   /* Back-button idiom, probed from the live chat view's "Go Back"
      toolbar action: icon-only, transparent, no border, 6px radius,
      hover bg rgba(90,93,94,0.31), 22x22 hit area (16px icon + 3px pad).
      Mobile keeps a 36px touch target with the same look. */
   #nav { width: 36px; height: 36px; padding: 0; background: transparent; border: none; border-radius: 6px; color: #cccccc; cursor: pointer; display: flex; align-items: center; justify-content: center; }
   #nav:hover { background: rgba(90,93,94,0.31); }
-  #count { order: 1; color: #9d9d9d; white-space: nowrap; font-size: 12px; margin-left: auto; }
+  #count { order: 2; color: #9d9d9d; white-space: nowrap; font-size: 12px; }
   /* Mobile bar is TWO wrapped rows (nav row + full-width search row):
      6 + 36 + 6 row-gap + 36 + 6 padding + 1px border = 91px. */
   #list { position: absolute; top: 91px; bottom: 0; left: 0; right: 0; overflow-y: auto; }
@@ -66,9 +72,10 @@ const workspacesHTML = `<!DOCTYPE html>
   .msg.err { color: #f85149; }
   @media (min-width: 800px) {
     #bar { flex-wrap: nowrap; height: 26px; padding: 0 8px; }
-    #q { height: 20px; font-size: 12px; order: 2; flex: 1 1 auto; padding: 0 8px; }
+    #q { height: 20px; font-size: 12px; order: 1; flex: 1 1 auto; padding: 0 8px; }
     #nav { width: 22px; height: 22px; }
-    #count { order: 3; margin-left: 0; }
+    #poweroff { order: 2; width: 22px; height: 22px; }
+    #count { order: 3; }
     #list { top: 27px; }
     .row { padding: 5px 10px; }
     .msg { padding: 8px 10px; font-size: 12px; }
@@ -79,6 +86,7 @@ const workspacesHTML = `<!DOCTYPE html>
 <div id="bar">
   <button id="nav" type="button" title="Mirror" aria-label="Mirror"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8H3.2M7.5 3.8 3.2 8l4.3 4.2"/></svg></button>
   <input id="q" placeholder="search workspaces…" autocomplete="off">
+  <button id="poweroff" type="button" title="下次任务结束时关机" aria-label="下次任务结束时关机"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round"><path d="M8 2v6"/><path d="M5.5 4.5a5 5 0 1 0 5 0"/></svg></button>
   <span id="count"></span>
 </div>
 <div id="list"><div class="msg">loading…</div></div>
@@ -88,10 +96,38 @@ const workspacesHTML = `<!DOCTYPE html>
   var q = document.getElementById('q');
   var list = document.getElementById('list');
   var count = document.getElementById('count');
+  var poweroff = document.getElementById('poweroff');
   var all = [];
+  var armed = false;
 
   nav.addEventListener('click', function () {
     location.href = '/';
+  });
+
+  // Power-off toggle: "power off at the end of the next task". The armed
+  // state is server-side (the shutdown planner), so a click only asks the
+  // server to flip it; the response (and the WS pushes) drive the button.
+  // The button is icon-only; the armed state glows and the tooltip carries
+  // the text.
+  function renderPoweroff() {
+    poweroff.classList.toggle('armed', armed);
+    var label = armed ? '已设置：下次任务结束时关机' : '下次任务结束时关机';
+    poweroff.title = label;
+    poweroff.setAttribute('aria-label', label);
+  }
+
+  poweroff.addEventListener('click', function () {
+    var next = !armed;
+    fetch('/api/shutdown', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ armed: next })
+    }).then(function (r) {
+      return r.json().then(function (j) { return { ok: r.ok, j: j }; });
+    }).then(function (res) {
+      if (res.ok) armed = res.j.armed;
+      renderPoweroff();
+    }).catch(function () { /* keep the current state */ });
   });
 
   function esc(s) {
@@ -188,6 +224,11 @@ const workspacesHTML = `<!DOCTYPE html>
     ws.onmessage = function (ev) {
       var m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type === 'shutdown') {
+        armed = !!m.armed;
+        renderPoweroff();
+        return;
+      }
       if (m.type !== 'workspaces' || !Array.isArray(m.workspaces)) return;
       all = m.workspaces;
       render();

@@ -30,6 +30,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"copilot-bridge/internal/cdp"
+	"copilot-bridge/internal/shutdown"
 	"copilot-bridge/internal/workspaces"
 )
 
@@ -154,6 +155,15 @@ type workspacesMsg struct {
 	Workspaces []workspaces.Workspace `json:"workspaces"`
 }
 
+// shutdownMsg is a server -> browser message for the workspaces page:
+// the current armed state of the "power off at the next task end" toggle.
+// Sent on connect and on every arm/disarm, so several open tabs stay in
+// sync.
+type shutdownMsg struct {
+	Type  string `json:"type"` // "shutdown"
+	Armed bool   `json:"armed"`
+}
+
 // imgEntry is one fetched image resource, cached by the hash of its source
 // URL (which doubles as the /img/<hash> path segment).
 type imgEntry struct {
@@ -235,6 +245,12 @@ type Mirror struct {
 	// clients; it drives change detection for the next push. Only the
 	// publish-loop goroutine touches it.
 	lastWsPush []workspaces.Workspace
+
+	// planner drives the armed power-off: the hook subcommand feeds Stop /
+	// SessionStart events via POST /api/hook, the workspaces page arms /
+	// disarms via POST /api/shutdown. Nil when not configured (the
+	// endpoints answer 503 then).
+	planner *shutdown.Planner
 }
 
 // snapState is one extracted pane snapshot.
@@ -414,6 +430,12 @@ func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string,
 	return m
 }
 
+// SetPlanner installs the armed power-off planner. It must be called
+// before Run (the hook/shutdown endpoints answer 503 while it is nil).
+func (m *Mirror) SetPlanner(p *shutdown.Planner) {
+	m.planner = p
+}
+
 // Run starts the web server and the publish loop. It blocks until ctx is
 // cancelled, then shuts everything down.
 func (m *Mirror) Run(ctx context.Context) error {
@@ -424,6 +446,8 @@ func (m *Mirror) Run(ctx context.Context) error {
 	mux.HandleFunc("/workspaces", m.handleWorkspacesPage)
 	mux.HandleFunc("/api/workspaces", m.handleWorkspaceList)
 	mux.HandleFunc("/api/workspaces/open", m.handleWorkspaceOpen)
+	mux.HandleFunc("/api/hook", m.handleHook)
+	mux.HandleFunc("/api/shutdown", m.handleShutdownArm)
 	srv := &http.Server{Addr: m.addr, Handler: mux}
 
 	if m.wsStore != nil {
@@ -531,6 +555,95 @@ func (m *Mirror) handleWorkspaceOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.MarshalWrite(w, map[string]bool{"ok": true})
+}
+
+// handleHook receives one VS Code agent hook event, forwarded verbatim by
+// the "hook" subcommand (its stdin payload becomes this request body),
+// and feeds the event name to the shutdown planner. The planner only acts
+// on "Stop" and "SessionStart"; everything else is accepted and ignored.
+func (m *Mirror) handleHook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	if m.planner == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.MarshalWrite(w, map[string]string{"err": "shutdown planner not configured"})
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.MarshalWrite(w, map[string]string{"err": err.Error()})
+		return
+	}
+	var ev struct {
+		Name string `json:"hook_event_name"`
+	}
+	if jerr := json.Unmarshal(body, &ev); jerr != nil {
+		// Not fatal: the hook subcommand always exits 0 anyway, but keep
+		// the log useful.
+		m.log.Warn("hook: bad payload", "err", jerr)
+	}
+	m.log.Info("hook event", "name", ev.Name)
+	m.planner.HookEvent(ev.Name)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.MarshalWrite(w, map[string]bool{"ok": true})
+}
+
+// armReq is the browser -> server request to arm or disarm the power-off.
+type armReq struct {
+	Armed bool `json:"armed"`
+}
+
+// handleShutdownArm arms or disarms the "power off at the next task end"
+// toggle and pushes the new state to the workspaces-page clients.
+func (m *Mirror) handleShutdownArm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	if m.planner == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.MarshalWrite(w, map[string]string{"err": "shutdown planner not configured"})
+		return
+	}
+	var req armReq
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err == nil {
+		err = json.Unmarshal(body, &req)
+	}
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.MarshalWrite(w, map[string]string{"err": err.Error()})
+		return
+	}
+	if req.Armed {
+		m.planner.Arm()
+	} else {
+		m.planner.Disarm()
+	}
+	armed := m.planner.Armed()
+	m.log.Info("power-off toggle", "armed", armed)
+	m.pushShutdown(armed)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.MarshalWrite(w, map[string]bool{"ok": true, "armed": armed})
+}
+
+// pushShutdown fans the armed state out to every connected
+// workspaces-page client (the mirror page does not show the toggle).
+// Non-blocking per client (sendTo drops for slow clients).
+func (m *Mirror) pushShutdown(armed bool) {
+	m.clients.All()(func(c *client, _ struct{}) bool {
+		if c.wsPage {
+			c.sendTo(shutdownMsg{Type: "shutdown", Armed: armed})
+		}
+		return true
+	})
 }
 
 // liveWorkspaces probes every live window for the workspace it has open
@@ -675,6 +788,11 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 		// The list arrives over the socket: once on connect, then after
 		// every successful storage.json reload.
 		m.sendWorkspaces(c)
+		// The armed state of the power-off toggle likewise arrives on
+		// connect (and on every change).
+		if m.planner != nil {
+			c.sendTo(shutdownMsg{Type: "shutdown", Armed: m.planner.Armed()})
+		}
 	} else {
 		// Render immediately with whatever we already have, then ask the
 		// publish loop for a fresh refresh: a just-connected tab has no
