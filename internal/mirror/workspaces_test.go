@@ -183,12 +183,12 @@ func TestNewWorkspacesStore(t *testing.T) {
 	disc := cdp.NewDiscovery("127.0.0.1:1", make(chan cdp.Event, 1), discardLog(), 50)
 	// Missing storage.json: the store must be nil (the HTTP API falls back
 	// to a fresh read per request).
-	m := New(disc, discardLog(), "127.0.0.1:0", nil, "", filepath.Join(t.TempDir(), "nope.json"), "")
+	m := New(disc, discardLog(), "127.0.0.1:0", nil, "", filepath.Join(t.TempDir(), "nope.json"), "", "")
 	if m.wsStore != nil {
 		t.Fatal("expected a nil store for a missing storage.json")
 	}
 	// Readable storage.json: the store is created with the initial list.
-	m = New(disc, discardLog(), "127.0.0.1:0", nil, "", writeStorage(t, minStorage), "")
+	m = New(disc, discardLog(), "127.0.0.1:0", nil, "", writeStorage(t, minStorage), "", "")
 	if m.wsStore == nil {
 		t.Fatal("expected a store for a readable storage.json")
 	}
@@ -309,7 +309,7 @@ func TestWorkspacesWSPushEndToEnd(t *testing.T) {
 	disc := cdp.NewDiscovery(strings.TrimPrefix(mock.url, "http://"), make(chan cdp.Event, 1), discardLog(), 50)
 	disc.Poll = 20 * time.Millisecond
 	addr := freeAddr(t)
-	m := New(disc, discardLog(), addr, nil, "", storage, "")
+	m := New(disc, discardLog(), addr, nil, "", storage, "", "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -384,7 +384,7 @@ func TestWorkspacesStoragePushEndToEnd(t *testing.T) {
 	}`)
 	disc := cdp.NewDiscovery("127.0.0.1:1", make(chan cdp.Event, 1), discardLog(), 50)
 	addr := freeAddr(t)
-	m := New(disc, discardLog(), addr, nil, "", storage, "")
+	m := New(disc, discardLog(), addr, nil, "", storage, "", "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

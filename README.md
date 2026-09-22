@@ -92,6 +92,13 @@ start) still powers off. Disarm the toggle any time to cancel.
   start/stop times. When the conditions above are met it cancels the main
   context (graceful shutdown of CDP and the web server), then powers off
   the machine.
+- When `-ntfy-topic` is set, a `Stop` event also pushes an ntfy.sh
+  notification: the agent's last message (parsed from the session
+  transcript, best effort, capped at 1500 characters) as the body, and
+  the mirror URL returned by `/api/hook` as the notification's `Click`
+  target, so tapping the phone notification opens the mirror of the
+  workspace the task ran in. The push is independent of the bridge (a
+  missing bridge still notifies, without the Click link).
 - Power-off is Windows-only (`ExitWindowsEx(EWX_POWEROFF)`); on Linux /
   macOS it is a no-op.
 - The subcommand always exits 0 (a missing bridge must never disrupt the
@@ -119,8 +126,10 @@ path to `copilot-bridge.exe`:
   PATH may not include the exe's directory.
 - The bridge must be running with the web server enabled (default
   `0.0.0.0:9527`) for hook events to reach it.
-- Hook subcommand flag: `-bridge` (default `http://127.0.0.1:9527`) —
-  the bridge HTTP address to forward events to.
+- Hook subcommand flags: `-bridge` (default `http://127.0.0.1:9527`) —
+  the bridge HTTP address to forward events to; `-ntfy-topic` (default
+  empty = no notification) — the ntfy.sh topic that receives the
+  task-finished notification (with the mirror URL as its Click link).
 
 ## Testing
 `go test ./internal/...` runs everything. The injected JavaScript is

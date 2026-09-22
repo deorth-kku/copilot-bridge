@@ -22,7 +22,7 @@ func newHookMirror(t *testing.T, planner *shutdown.Planner) (*Mirror, string) {
 	t.Helper()
 	disc := cdp.NewDiscovery("127.0.0.1:1", make(chan cdp.Event, 1), discardLog(), 50)
 	addr := freeAddr(t)
-	m := New(disc, discardLog(), addr, nil, "", filepath.Join(t.TempDir(), "nope.json"), "")
+	m := New(disc, discardLog(), addr, nil, "", filepath.Join(t.TempDir(), "nope.json"), "", "")
 	m.SetPlanner(planner)
 	return m, addr
 }

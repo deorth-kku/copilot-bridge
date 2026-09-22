@@ -187,6 +187,10 @@ type Mirror struct {
 	// storagePath is the VS Code globalStorage storage.json the workspaces
 	// page lists.
 	storagePath string
+	// sshConfigPath is the SSH client config (~/.ssh/config) the hook
+	// endpoint uses to map a remote request's source host to a machine
+	// (empty = no remote identification).
+	sshConfigPath string
 	// opener launches workspaces through the code CLI (workspaces page).
 	opener *workspaces.Opener
 	// wsStore is the hot-reloaded workspace list (storage.json, watched like
@@ -394,22 +398,24 @@ func lanIP() string {
 // New creates a Mirror. addr is the web bind address; selectors are the
 // candidate pane root selectors (tried in order); window is a title
 // substring used to pick the VS Code window (empty = first window);
-// storagePath/codePath back the workspaces page (list + launch).
-func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string, window, storagePath, codePath string) *Mirror {
+// storagePath/codePath back the workspaces page (list + launch);
+// sshConfigPath backs the hook endpoint's remote-machine identification.
+func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string, window, storagePath, codePath, sshConfigPath string) *Mirror {
 	m := &Mirror{
-		disc:        disc,
-		log:         log,
-		addr:        addr,
-		selectors:   selectors,
-		window:      window,
-		storagePath: storagePath,
-		opener:      workspaces.NewOpener(codePath, log),
-		fallback:    1 * time.Second,
-		snaps:       make(map[string]*snapState),
-		hub:         newWakeHub(),
-		refreshNow:  make(chan struct{}, 1),
-		wsRefresh:   make(chan struct{}, 1),
-		toggleTimes: make(map[string]time.Time),
+		disc:          disc,
+		log:           log,
+		addr:          addr,
+		selectors:     selectors,
+		window:        window,
+		storagePath:   storagePath,
+		sshConfigPath: sshConfigPath,
+		opener:        workspaces.NewOpener(codePath, log),
+		fallback:      1 * time.Second,
+		snaps:         make(map[string]*snapState),
+		hub:           newWakeHub(),
+		refreshNow:    make(chan struct{}, 1),
+		wsRefresh:     make(chan struct{}, 1),
+		toggleTimes:   make(map[string]time.Time),
 		upgrader: websocket.Upgrader{
 			// Local-only tool; accept any origin (127.0.0.1 / localhost).
 			CheckOrigin: func(*http.Request) bool { return true },
@@ -561,6 +567,9 @@ func (m *Mirror) handleWorkspaceOpen(w http.ResponseWriter, r *http.Request) {
 // the "hook" subcommand (its stdin payload becomes this request body),
 // and feeds the event name to the shutdown planner. The planner only acts
 // on "Stop" and "SessionStart"; everything else is accepted and ignored.
+// The response also carries the mirror URL of the workspace the event
+// belongs to (resolved from the request's source machine and the payload's
+// cwd), so the caller can jump straight to it.
 func (m *Mirror) handleHook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
@@ -581,6 +590,7 @@ func (m *Mirror) handleHook(w http.ResponseWriter, r *http.Request) {
 	}
 	var ev struct {
 		Name string `json:"hook_event_name"`
+		Cwd  string `json:"cwd"`
 	}
 	if jerr := json.Unmarshal(body, &ev); jerr != nil {
 		// Not fatal: the hook subcommand always exits 0 anyway, but keep
@@ -590,7 +600,7 @@ func (m *Mirror) handleHook(w http.ResponseWriter, r *http.Request) {
 	m.log.Info("hook event", "name", ev.Name)
 	m.planner.HookEvent(ev.Name)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.MarshalWrite(w, map[string]bool{"ok": true})
+	_ = json.MarshalWrite(w, map[string]any{"ok": true, "mirror": m.hookMirrorURL(r, ev.Cwd)})
 }
 
 // armReq is the browser -> server request to arm or disarm the power-off.

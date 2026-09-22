@@ -41,10 +41,11 @@ func main() {
 	window := flag.String("window", "", "mirror this window (title substring; empty = first window)")
 	storagePath := flag.String("storage", defaultStoragePath(), "path to VS Code globalStorage storage.json (workspaces page)")
 	codePath := flag.String("code", "", "path to the code CLI (empty = auto-detect; workspaces page)")
+	sshConfig := flag.String("ssh-config", defaultSSHConfigPath(), "path to the SSH client config (the hook endpoint maps a remote request's source host to a machine; empty disables it)")
 	stopGrace := flag.Duration("stop-grace", 10*time.Second, "grace window after a Stop hook event before the armed power-off fires (a new SessionStart inside it cancels this stop's pending power-off)")
 	flag.Parse()
 
-	poweredOff, err := run(*cdpAddr, *settingsPath, *cooldown, *debounce, *logPath, *verbose, *web, *pane, *window, *storagePath, *codePath, *stopGrace)
+	poweredOff, err := run(*cdpAddr, *settingsPath, *cooldown, *debounce, *logPath, *verbose, *web, *pane, *window, *storagePath, *codePath, *sshConfig, *stopGrace)
 	if err != nil {
 		// GUI builds have no console; the error is also in the log file
 		// (if it could be opened).
@@ -60,7 +61,7 @@ func main() {
 
 // run returns poweredOff: true when the armed power-off trigger fired
 // (the caller then powers off the machine after the graceful shutdown).
-func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter, storagePath, codePath string, stopGrace time.Duration) (bool, error) {
+func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter, storagePath, codePath, sshConfigPath string, stopGrace time.Duration) (bool, error) {
 	if dir := filepath.Dir(logPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return false, fmt.Errorf("create log dir: %w", err)
@@ -117,7 +118,7 @@ func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath
 
 	// Optional: forward the Copilot pane to a browser page.
 	if webAddr != "" {
-		mir := mirror.New(disc, log, webAddr, splitSelectors(paneSel), windowFilter, storagePath, codePath)
+		mir := mirror.New(disc, log, webAddr, splitSelectors(paneSel), windowFilter, storagePath, codePath, sshConfigPath)
 		mir.SetPlanner(planner)
 		go func() {
 			if err := mir.Run(ctx); err != nil {
@@ -205,6 +206,16 @@ func defaultLogPath() string {
 // location (vscodeUserDir + globalStorage/storage.json).
 func defaultStoragePath() string {
 	return filepath.Join(vscodeUserDir(), "globalStorage", "storage.json")
+}
+
+// defaultSSHConfigPath returns the SSH client config location
+// (~/.ssh/config); "" when the home directory cannot be resolved.
+func defaultSSHConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".ssh", "config")
 }
 
 // defaultPaneSelectors are the candidate Copilot pane root selectors, tried
