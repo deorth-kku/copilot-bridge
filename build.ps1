@@ -1,2 +1,3 @@
 # Build the console-free Windows GUI exe.
-go build -trimpath -ldflags "-H windowsgui" -o copilot-bridge.exe .
+New-Item -ItemType Directory -Force -Path build
+go build -trimpath -ldflags "-H windowsgui" -o build\copilot-bridge.exe .
