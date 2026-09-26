@@ -916,21 +916,51 @@ test('mirror: selecting the Workspaces entry navigates and remembers the window'
 });
 
 test('mirror: returning restores the remembered window exactly once', () => {
-  const { ws } = setup();
+  // The stub must exist BEFORE the page script runs: the remembered window
+  // is captured from localStorage at load time.
   const restoreLS = withLocalStorage({ mirrorWin: 'win-2' });
+  const { ws } = setup();
   try {
     state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-1' });
     assert.deepEqual(sent(ws).filter(m => m.type === 'window'), [{ type: 'window', id: 'win-2' }]);
-    assert.equal(globalThis.localStorage.getItem('mirrorWin'), null, 'remembered window consumed');
-    // A later state does not re-send it.
-    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-1' });
+    // The memory is persistent now: the state's own window is recorded
+    // until the server's switch lands.
+    assert.equal(globalThis.localStorage.getItem('mirrorWin'), 'win-1');
+    // The server's switch arrives: the memory follows it.
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-2' });
+    assert.equal(globalThis.localStorage.getItem('mirrorWin'), 'win-2');
+    // A later state does not re-send the restore.
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-2' });
     assert.equal(sent(ws).filter(m => m.type === 'window').length, 1);
   } finally { restoreLS(); uninstallGlobals(); }
 });
 
-test('mirror: a stale remembered window is dropped silently', () => {
+test('mirror: the current window is remembered for a refresh', () => {
   const { ws } = setup();
+  const restoreLS = withLocalStorage();
+  try {
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-1' });
+    assert.equal(globalThis.localStorage.getItem('mirrorWin'), 'win-1');
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-2' });
+    assert.equal(globalThis.localStorage.getItem('mirrorWin'), 'win-2');
+  } finally { restoreLS(); uninstallGlobals(); }
+});
+
+test('mirror: picking a window remembers it before the next state', () => {
+  const { status, ws } = setup();
+  const restoreLS = withLocalStorage();
+  try {
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-1' });
+    status.value = 'win-2';
+    status.dispatchEvent(new Event('change', status));
+    assert.equal(globalThis.localStorage.getItem('mirrorWin'), 'win-2');
+    assert.deepEqual(sent(ws).at(-1), { type: 'window', id: 'win-2' });
+  } finally { restoreLS(); uninstallGlobals(); }
+});
+
+test('mirror: a stale remembered window is dropped silently', () => {
   const restoreLS = withLocalStorage({ mirrorWin: 'gone' });
+  const { ws } = setup();
   try {
     state(ws, { windows: [{ id: 'win-1', title: 'A' }], windowId: 'win-1' });
     assert.equal(sent(ws).filter(m => m.type === 'window').length, 0);
@@ -946,8 +976,8 @@ test('mirror: ?win= is forwarded to the WS handshake URL', () => {
 });
 
 test('mirror: ?win= suppresses the remembered-window restore', () => {
-  const { ws } = setup({ search: '?win=' + encodeURIComponent('win-9') });
   const restoreLS = withLocalStorage({ mirrorWin: 'win-1' });
+  const { ws } = setup({ search: '?win=' + encodeURIComponent('win-9') });
   try {
     state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-1' });
     assert.equal(sent(ws).filter(m => m.type === 'window').length, 0, 'server already applied the ?win= selection');

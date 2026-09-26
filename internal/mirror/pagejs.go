@@ -10,10 +10,17 @@ const pageJS = `(function () {
   var lastCSSVer = '';
   var lastThemeVer = '';
   var lastWinVer = '';
-  // The window id last selected by (or following) this tab. Remembered in
-  // localStorage when the tab leaves for the workspaces page, so returning
-  // can restore the same window.
+  // The window id last selected by (or following) this tab. Persisted to
+  // localStorage on every change, so a refresh (or a round trip through
+  // the workspaces page) can restore the same window.
   var lastWinId = '';
+  // Record the current window. The early return keeps state-message
+  // storms from hammering localStorage.
+  function setLastWin(id) {
+    if (id === lastWinId) return;
+    lastWinId = id;
+    try { localStorage.setItem('mirrorWin', id); } catch (e) {}
+  }
   // Set once the remembered window (if any) has been restored after a
   // (re)connect: only the first good state message may re-send it.
   var restoredWin = false;
@@ -23,6 +30,12 @@ const pageJS = `(function () {
   // suppresses the remembered-window restore below.
   var pendingWin = '';
   try { pendingWin = new URLSearchParams(location.search).get('win') || ''; } catch (e) {}
+  // The window this tab had remembered before the page (re)loaded
+  // (localStorage 'mirrorWin'). Captured at load, BEFORE any state message
+  // can overwrite the record: the first good state re-sends it if it still
+  // exists.
+  var savedWin = '';
+  try { savedWin = localStorage.getItem('mirrorWin') || ''; } catch (e) {}
   // Last live scroll state (m.scroll: live scroller's h/scrollH/offset) and
   // the DOM path of the scroller the server measured (m.scrollPath). Used to
   // mirror the live-drawn scrollbar's position/size onto the mirror scroller.
@@ -107,7 +120,7 @@ const pageJS = `(function () {
     var ver = err + '|';
     for (var i = 0; i < wins.length; i++) ver += wins[i].id + ':' + wins[i].title + ';';
     if (ver === lastWinVer) {
-      if (m.windowId) { status.value = m.windowId; lastWinId = m.windowId; }
+      if (m.windowId) { status.value = m.windowId; setLastWin(m.windowId); }
       return;
     }
     lastWinVer = ver;
@@ -135,7 +148,7 @@ const pageJS = `(function () {
     wo.textContent = '— Workspaces…';
     status.appendChild(wo);
     if (err) status.value = '';
-    else if (m.windowId) { status.value = m.windowId; lastWinId = m.windowId; }
+    else if (m.windowId) { status.value = m.windowId; setLastWin(m.windowId); }
   }
 
   function connect() {
@@ -170,22 +183,23 @@ const pageJS = `(function () {
       lastNestedScrolls = m.nestedScrolls || null;
       lastCursorChar = (typeof m.cursorChar === 'number') ? m.cursorChar : -1;
       syncWindows(m);
-      // First good state after (re)connect: if this tab returned from the
-      // workspaces page with a remembered window that still exists, ask
-      // the server to mirror it again. A ?win= tab skips this: the server
-      // already applied that explicit selection at connect time.
+      // First good state after (re)connect: if this tab has a remembered
+      // window that still exists (from a refresh, or a round trip through
+      // the workspaces page), ask the server to mirror it again. A ?win=
+      // tab skips this: the server already applied that explicit selection
+      // at connect time.
       if (!restoredWin) {
         restoredWin = true;
-        if (!pendingWin) {
-          var saved = '';
-          try { saved = localStorage.getItem('mirrorWin') || ''; } catch (e) {}
-          if (saved) {
-            var wins2 = m.windows || [];
-            var found = false;
-            for (var i = 0; i < wins2.length; i++) {
-              if (wins2[i].id === saved) { found = true; break; }
-            }
-            if (found) send({ type: 'window', id: saved });
+        if (!pendingWin && savedWin) {
+          var wins2 = m.windows || [];
+          var found = false;
+          for (var i = 0; i < wins2.length; i++) {
+            if (wins2[i].id === savedWin) { found = true; break; }
+          }
+          if (found) send({ type: 'window', id: savedWin });
+          else {
+            // The remembered window no longer exists: drop the stale
+            // record (the next window change rewrites it).
             try { localStorage.removeItem('mirrorWin'); } catch (e) {}
           }
         }
@@ -1294,16 +1308,16 @@ const pageJS = `(function () {
 
   // Window picker: switching the option tells the server which VS Code
   // window to mirror from now on. The special Workspaces entry instead
-  // leaves the mirror page for the workspace list, remembering this tab's
-  // window so returning restores it.
+  // leaves the mirror page for the workspace list; the current window is
+  // already remembered, so returning restores it.
   status.addEventListener('change', function () {
     if (status.value === '__workspaces__') {
-      if (lastWinId) {
-        try { localStorage.setItem('mirrorWin', lastWinId); } catch (e) {}
-      }
       location.href = '/workspaces';
       return;
     }
+    // Persist immediately: a refresh before the next state message must
+    // not lose the pick.
+    setLastWin(status.value);
     send({ type: 'window', id: status.value });
   });
 
