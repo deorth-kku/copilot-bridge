@@ -72,6 +72,19 @@ func (m *Mirror) forwardMouse(s *cdp.Session, winID string, e mouseMsg) {
 	}
 	m.snapMu.Unlock()
 
+	// Without a live pane rect the pane-relative fallback below degenerates
+	// to the mirror's own coordinates interpreted as LIVE WINDOW
+	// coordinates (the zero-value rect): a click near the mirror pane's
+	// top-right then lands on the live window's title-bar close button. A
+	// window has no snapshot right after a connect / window-picker switch /
+	// bridge restart, and a window whose pane was never extracted (the
+	// "pane not found" state stores no snapshot) never has one. Never
+	// dispatch in that state — the next refresh re-syncs the mirror.
+	if rect.Width <= 0 || rect.Height <= 0 {
+		m.log.Debug("mirror forwardMouse: dropped, no live pane rect", "kind", e.Kind, "x", e.X, "y", e.Y)
+		return
+	}
+
 	x, y := rect.Left+e.X, rect.Top+e.Y
 	placed := false
 	// The browser only sends char for a caret position (>= 0), so a
@@ -92,6 +105,14 @@ func (m *Mirror) forwardMouse(s *cdp.Session, winID string, e mouseMsg) {
 		ecStart := time.Now()
 		if px, py, ok := cdp.EvalClickPoint(s, selectors, e.Path, e.RelX, e.RelY); ok {
 			x, y = px, py
+		} else if e.Kind == "pressed" || e.Kind == "released" {
+			// A click whose element identity no longer resolves in live
+			// (stale path: the live DOM re-rendered, a popup closed, the
+			// pane vanished) must not fall back to the pane-relative guess —
+			// that lands on whatever live element now sits at that spot.
+			// Drop it; the next refresh re-syncs the mirror.
+			m.log.Debug("mirror forwardMouse: dropped, click path unresolved", "kind", e.Kind, "path", e.Path)
+			return
 		}
 		m.log.Debug("forwardMouse: evalClickPoint", "ms", time.Since(ecStart).Milliseconds())
 	}

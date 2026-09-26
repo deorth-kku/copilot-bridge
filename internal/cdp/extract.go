@@ -863,6 +863,12 @@ func EvalClickPoint(s *Session, selectors []string, path []int, relX, relY float
 	if err != nil {
 		return 0, 0, false
 	}
+	// A null result means the path did not resolve (the pane root is gone,
+	// or a -1 popup path with no visible context view). Decoding null would
+	// silently yield (0,0) — the live window's top-left corner.
+	if isNullResult(raw) {
+		return 0, 0, false
+	}
 	v, err := decodeEval[struct {
 		X float64 `json:"x"`
 		Y float64 `json:"y"`
@@ -934,6 +940,12 @@ func EvalCharPoint(s *Session, selectors []string, char int) (float64, float64, 
 	args, _ := json.Marshal([]any{selectors, char})
 	raw, err := callExpr(s, charPointExpr, string(args))
 	if err != nil {
+		return 0, 0, false
+	}
+	// A null result means the input editor or its text did not resolve.
+	// Decoding null would silently yield (0,0) — the live window's
+	// top-left corner.
+	if isNullResult(raw) {
 		return 0, 0, false
 	}
 	v, err := decodeEval[struct {
@@ -1009,6 +1021,20 @@ func (r evalResp) exception() string {
 		return r.Exception.Obj.Description
 	}
 	return r.Exception.Text
+}
+
+// isNullResult reports whether a Runtime.evaluate response carries a null
+// value (the expression returned null). Decoding null into a struct is a
+// silent no-op, so a probe that returns null to signal failure would
+// otherwise look like a successful zero-value result — for the point
+// probes that means a click dispatched at (0,0), the live window's
+// top-left corner (the menu bar).
+func isNullResult(raw jsontext.Value) bool {
+	var resp evalResp
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return false
+	}
+	return resp.Result.Value == nil || string(resp.Result.Value) == "null"
 }
 
 // decodeEval unwraps a Runtime.evaluate response and decodes result.value
