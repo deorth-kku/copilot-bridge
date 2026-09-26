@@ -13,15 +13,15 @@ import (
 const fixtureStorage = `{
   "profileAssociations": {
     "workspaces": {
-      "file:///c%3A/Users/deort/vscode-load-llama": "__default__profile__",
+      "file:///c%3A/Users/user0/copilot-bridge": "__default__profile__",
       "file:///e%3A/": "__default__profile__",
-      "vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d": "__default__profile__"
+      "vscode-remote://ssh-remote%2Bdebian/etc/dnsmasq.d": "__default__profile__"
     }
   },
   "windowsState": {
     "lastActiveWindow": { "folder": "file:///e%3A/" },
     "openedWindows": [
-      { "folder": "file:///c%3A/Users/deort/vscode-load-llama" }
+      { "folder": "file:///c%3A/Users/user0/copilot-bridge" }
     ]
   }
 }`
@@ -43,25 +43,26 @@ func TestList(t *testing.T) {
 	if len(ws) != 3 {
 		t.Fatalf("got %d workspaces, want 3: %+v", len(ws), ws)
 	}
-	// Open workspaces first, then local before remote, each group sorted
-	// by name ("E:\" < "vscode-load-llama" case-insensitively).
-	if ws[0].URI != "file:///c%3A/Users/deort/vscode-load-llama" || ws[1].URI != "file:///e%3A/" || ws[2].URI != "vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d" {
+	// Open workspaces first (copilot-bridge is the open one), then local
+	// before remote, each group sorted by name ("copilot-bridge" < "E:\"
+	// case-insensitively).
+	if ws[0].URI != "file:///c%3A/Users/user0/copilot-bridge" || ws[1].URI != "file:///e%3A/" || ws[2].URI != "vscode-remote://ssh-remote%2Bdebian/etc/dnsmasq.d" {
 		t.Fatalf("wrong order: %+v", ws)
 	}
 	if runtime.GOOS == "windows" {
-		if ws[0].Name != "vscode-load-llama" || ws[0].Path != `C:\Users\deort\vscode-load-llama` {
+		if ws[0].Name != "copilot-bridge" || ws[0].Path != `C:\Users\user0\copilot-bridge` {
 			t.Errorf("local: name %q path %q", ws[0].Name, ws[0].Path)
 		}
 		if ws[1].Name != "E:\\" || ws[1].Path != "E:\\" {
 			t.Errorf("drive root: name %q path %q", ws[1].Name, ws[1].Path)
 		}
 	}
-	if ws[2].Remote != "ssh-remote+pve" || ws[2].Path != "/etc/dnsmasq.d" || ws[2].Name != "pve:/etc/dnsmasq.d" {
+	if ws[2].Remote != "ssh-remote+debian" || ws[2].Path != "/etc/dnsmasq.d" || ws[2].Name != "debian:/etc/dnsmasq.d" {
 		t.Errorf("remote: %+v", ws[2])
 	}
 	// Markers come from windowsState (exact URI match).
 	if !ws[0].Open {
-		t.Error("vscode-load-llama should be marked open")
+		t.Error("copilot-bridge should be marked open")
 	}
 	if ws[1].Open || ws[2].Open {
 		t.Error("only the opened workspace may be marked open")
@@ -92,8 +93,8 @@ func TestLaunchArgs(t *testing.T) {
 		uri  string
 		want []string
 	}{
-		{"file:///c%3A/Users/deort/vscode-load-llama", []string{"--folder-uri", "file:///c%3A/Users/deort/vscode-load-llama"}},
-		{"vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d", []string{"--folder-uri", "vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d"}},
+		{"file:///c%3A/Users/user0/copilot-bridge", []string{"--folder-uri", "file:///c%3A/Users/user0/copilot-bridge"}},
+		{"vscode-remote://ssh-remote%2Bdebian/etc/dnsmasq.d", []string{"--folder-uri", "vscode-remote://ssh-remote%2Bdebian/etc/dnsmasq.d"}},
 	}
 	for _, c := range cases {
 		got, err := LaunchArgs(c.uri)
@@ -118,11 +119,11 @@ func TestOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Live windows contradict storage.json: one window has the drive-root
-	// workspace open (storage says vscode-load-llama), and a second
+	// workspace open (storage says copilot-bridge), and a second
 	// window has a workspace storage.json does not know yet.
 	live := map[string]string{
 		"w1": "file:///e%3A/",
-		"w2": "file:///c%3A/Users/deort/newws",
+		"w2": "file:///c%3A/Users/user0/newws",
 	}
 	got := Overlay(known, live)
 	// The three known workspaces plus the live-only one.
@@ -130,25 +131,27 @@ func TestOverlay(t *testing.T) {
 		t.Fatalf("got %d workspaces, want 4: %+v", len(got), got)
 	}
 	// Open first (the live state wins over storage.json's openedWindows),
-	// local before remote, each group name-sorted.
+	// local before remote, each group name-sorted; the live window ids
+	// ride along (the workspaces page passes them to the mirror page).
 	want := []struct {
 		uri  string
 		open bool
+		win  string
 	}{
-		{"file:///e%3A/", true},
-		{"file:///c%3A/Users/deort/newws", true},
-		{"file:///c%3A/Users/deort/vscode-load-llama", false},
-		{"vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d", false},
+		{"file:///e%3A/", true, "w1"},
+		{"file:///c%3A/Users/user0/newws", true, "w2"},
+		{"file:///c%3A/Users/user0/copilot-bridge", false, ""},
+		{"vscode-remote://ssh-remote%2Bdebian/etc/dnsmasq.d", false, ""},
 	}
 	for i, w := range want {
-		if got[i].URI != w.uri || got[i].Open != w.open {
-			t.Fatalf("got[%d] = %+v, want uri %q open %v", i, got[i], w.uri, w.open)
+		if got[i].URI != w.uri || got[i].Open != w.open || got[i].Window != w.win {
+			t.Fatalf("got[%d] = %+v, want uri %q open %v win %q", i, got[i], w.uri, w.open, w.win)
 		}
 	}
-	// storage.json claimed vscode-load-llama open; the live probe must
+	// storage.json claimed copilot-bridge open; the live probe must
 	// have cleared it.
 	for _, w := range got {
-		if w.URI == "file:///c%3A/Users/deort/vscode-load-llama" && w.Open {
+		if w.URI == "file:///c%3A/Users/user0/copilot-bridge" && w.Open {
 			t.Fatal("stale storage.json open flag must be cleared by the live probe")
 		}
 	}
@@ -164,24 +167,31 @@ func TestOverlay(t *testing.T) {
 			t.Fatalf("no live window, but %q is open: %+v", w.URI, w)
 		}
 	}
-	if got[0].URI != "file:///e%3A/" || got[1].URI != "file:///c%3A/Users/deort/vscode-load-llama" || got[2].URI != "vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d" {
+	if got[0].URI != "file:///c%3A/Users/user0/copilot-bridge" || got[1].URI != "file:///e%3A/" || got[2].URI != "vscode-remote://ssh-remote%2Bdebian/etc/dnsmasq.d" {
 		t.Fatalf("wrong order: %+v", got)
 	}
 
 	// A live URI differing only in drive-letter case matches the known
 	// entry (SameURI semantics).
 	got = Overlay(known, map[string]string{"w1": "file:///E%3A/"})
-	if len(got) != 3 || !got[0].Open || got[0].URI != "file:///e%3A/" {
+	if len(got) != 3 || !got[0].Open || got[0].URI != "file:///e%3A/" || got[0].Window != "w1" {
 		t.Fatalf("case-insensitive match failed: %+v", got)
+	}
+
+	// Several windows sharing one workspace: the smallest id wins
+	// (deterministic, unlike map iteration order).
+	got = Overlay(known, map[string]string{"w9": "file:///e%3A/", "w2": "file:///e%3A/"})
+	if len(got) != 3 || !got[0].Open || got[0].Window != "w2" {
+		t.Fatalf("shared workspace: %+v", got)
 	}
 }
 
 func TestSameURI(t *testing.T) {
-	if !SameURI("file:///c%3A/Users/deort/vscode-load-llama", "file:///c%3A/Users/deort/vscode-load-llama") {
+	if !SameURI("file:///c%3A/Users/user0/copilot-bridge", "file:///c%3A/Users/user0/copilot-bridge") {
 		t.Error("exact match must be true")
 	}
 	// Windows drive letters may differ in case between the two sources.
-	if !SameURI("file:///c%3A/Users/deort/vscode-load-llama", "file:///C%3A/Users/deort/vscode-load-llama") {
+	if !SameURI("file:///c%3A/Users/user0/copilot-bridge", "file:///C%3A/Users/user0/copilot-bridge") {
 		t.Error("case-insensitive drive letter must match")
 	}
 	if SameURI("file:///c%3A/a", "file:///c%3A/b") {
@@ -197,9 +207,9 @@ func TestSameURI(t *testing.T) {
 // url.PathUnescape would turn it into a space and corrupt the authority.
 func TestNormalizeAuthority(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d", "vscode-remote://ssh-remote+pve/etc/dnsmasq.d"},
-		{"vscode-remote://ssh-remote+pve/etc/dnsmasq.d", "vscode-remote://ssh-remote+pve/etc/dnsmasq.d"},
-		{"file:///c%3A/Users/deort/vscode-load-llama", "file:///c%3A/Users/deort/vscode-load-llama"},
+		{"vscode-remote://ssh-remote%2Bdebian/etc/dnsmasq.d", "vscode-remote://ssh-remote+debian/etc/dnsmasq.d"},
+		{"vscode-remote://ssh-remote+debian/etc/dnsmasq.d", "vscode-remote://ssh-remote+debian/etc/dnsmasq.d"},
+		{"file:///c%3A/Users/user0/copilot-bridge", "file:///c%3A/Users/user0/copilot-bridge"},
 		{"not a uri", "not a uri"},
 	}
 	for _, c := range cases {
@@ -212,11 +222,11 @@ func TestNormalizeAuthority(t *testing.T) {
 func TestParseWorkspaceLiteralPlus(t *testing.T) {
 	// An unencoded '+' in the remote authority must not be turned into a
 	// space (which would make the URI unparseable and drop the workspace).
-	ws, ok := parseWorkspace("vscode-remote://ssh-remote+pve/etc/dnsmasq.d")
+	ws, ok := parseWorkspace("vscode-remote://ssh-remote+debian/etc/dnsmasq.d")
 	if !ok {
 		t.Fatalf("parseWorkspace failed for literal '+': %+v", ws)
 	}
-	if ws.Remote != "ssh-remote+pve" || ws.Name != "pve:/etc/dnsmasq.d" {
+	if ws.Remote != "ssh-remote+debian" || ws.Name != "debian:/etc/dnsmasq.d" {
 		t.Errorf("literal '+': %+v", ws)
 	}
 }
@@ -227,8 +237,8 @@ func TestPercentDecode(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"ssh-remote%2Bpve", "ssh-remote+pve", true},
-		{"ssh-remote+pve", "ssh-remote+pve", true},
+		{"ssh-remote%2Bdebian", "ssh-remote+debian", true},
+		{"ssh-remote+debian", "ssh-remote+debian", true},
 		{"%41%42c", "ABc", true},
 		{"100%", "", false}, // dangling %
 		{"%2", "", false},   // truncated escape

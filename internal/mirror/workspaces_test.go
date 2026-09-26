@@ -26,13 +26,13 @@ import (
 const minStorage = `{
   "profileAssociations": {
     "workspaces": {
-      "file:///c%3A/Users/deort/vscode-load-llama": "__default__profile__"
+      "file:///c%3A/Users/user0/copilot-bridge": "__default__profile__"
     }
   },
   "windowsState": {
-    "lastActiveWindow": { "folder": "file:///c%3A/Users/deort/vscode-load-llama" },
+    "lastActiveWindow": { "folder": "file:///c%3A/Users/user0/copilot-bridge" },
     "openedWindows": [
-      { "folder": "file:///c%3A/Users/deort/vscode-load-llama" }
+      { "folder": "file:///c%3A/Users/user0/copilot-bridge" }
     ]
   }
 }`
@@ -285,9 +285,9 @@ func TestGroupClientsExcludesWsPage(t *testing.T) {
 // (mockLiveCDP): the workspaces page's open flags follow the LIVE windows
 // (CDP probe), not storage.json's lagging windowsState.
 func TestWorkspacesWSPushEndToEnd(t *testing.T) {
-	uriA := "file:///c%3A/Users/deort/ws-a"
-	uriB := "file:///c%3A/Users/deort/ws-b"
-	uriC := "file:///c%3A/Users/deort/ws-c" // never in storage.json
+	uriA := "file:///c%3A/Users/user0/ws-a"
+	uriB := "file:///c%3A/Users/user0/ws-b"
+	uriC := "file:///c%3A/Users/user0/ws-c" // never in storage.json
 
 	// storage.json knows A and B and claims B is open — stale, because the
 	// live window actually has A.
@@ -341,11 +341,16 @@ func TestWorkspacesWSPushEndToEnd(t *testing.T) {
 
 	// The first message: the live window has A open, so A is open and B is
 	// closed — the CDP probe overrides storage.json's claim that B is open.
+	// The open entry carries the live window's CDP id (the workspaces page
+	// passes it to the mirror page for the jump).
 	first := readWorkspacesMsgUntil(t, conn, func(ws []workspaces.Workspace) bool {
 		return len(ws) == 2 && openURI(ws, uriA) && !openURI(ws, uriB)
 	})
 	if len(first) != 2 || !openURI(first, uriA) || openURI(first, uriB) {
 		t.Fatalf("unexpected initial list: %+v", first)
+	}
+	if windowOf(first, uriA) != "t1" || windowOf(first, uriB) != "" {
+		t.Fatalf("unexpected window ids: %+v", first)
 	}
 
 	// The window switches to a workspace storage.json does not know yet:
@@ -357,8 +362,12 @@ func TestWorkspacesWSPushEndToEnd(t *testing.T) {
 	if len(second) != 3 || !openURI(second, uriC) || openURI(second, uriA) || openURI(second, uriB) {
 		t.Fatalf("unexpected second list: %+v", second)
 	}
+	if windowOf(second, uriC) != "t2" {
+		t.Fatalf("unexpected window ids: %+v", second)
+	}
 
-	// All windows close: back to the known list, nothing open.
+	// All windows close: back to the known list, nothing open (and no
+	// window ids).
 	mock.set(true, nil)
 	third := readWorkspacesMsgUntil(t, conn, func(ws []workspaces.Workspace) bool {
 		return len(ws) == 2 && !openURI(ws, uriA) && !openURI(ws, uriB)
@@ -366,14 +375,19 @@ func TestWorkspacesWSPushEndToEnd(t *testing.T) {
 	if len(third) != 2 || openURI(third, uriA) || openURI(third, uriB) {
 		t.Fatalf("unexpected third list: %+v", third)
 	}
+	for _, w := range third {
+		if w.Window != "" {
+			t.Fatalf("closed workspace carries a window id: %+v", w)
+		}
+	}
 }
 
 // TestWorkspacesStoragePushEndToEnd runs the real server with NO live
 // windows: rewriting storage.json (a new known workspace appears) must
 // still push the updated list over the workspaces-page socket.
 func TestWorkspacesStoragePushEndToEnd(t *testing.T) {
-	uriA := "file:///c%3A/Users/deort/ws-a"
-	uriB := "file:///c%3A/Users/deort/ws-b"
+	uriA := "file:///c%3A/Users/user0/ws-a"
+	uriB := "file:///c%3A/Users/user0/ws-b"
 	storage := writeStorage(t, `{
 	  "profileAssociations": {
 	    "workspaces": {
@@ -435,8 +449,8 @@ func TestWorkspacesStoragePushEndToEnd(t *testing.T) {
 // TestResolveWindowURI checks the jump-to-window lookup: the live window
 // whose workbench reports the given workspace URI.
 func TestResolveWindowURI(t *testing.T) {
-	uriA := "file:///c%3A/Users/deort/ws-a"
-	uriB := "file:///c%3A/Users/deort/ws-b"
+	uriA := "file:///c%3A/Users/user0/ws-a"
+	uriB := "file:///c%3A/Users/user0/ws-b"
 	mock := newMockLiveCDP(t)
 	mock.set(true, map[string]string{"t1": uriA, "t2": uriB})
 	disc := cdp.NewDiscovery(strings.TrimPrefix(mock.url, "http://"), make(chan cdp.Event, 1), discardLog(), 50)
@@ -458,11 +472,11 @@ func TestResolveWindowURI(t *testing.T) {
 		t.Fatalf("resolveWindowURI(%q) = %q, %v; want t1, true", uriA, id, ok)
 	}
 	// Drive-letter case differences still match (SameURI semantics).
-	id, ok = m.resolveWindowURI("file:///C%3A/Users/deort/ws-b")
+	id, ok = m.resolveWindowURI("file:///C%3A/Users/user0/ws-b")
 	if !ok || id != "t2" {
 		t.Fatalf("resolveWindowURI(case variant) = %q, %v; want t2, true", id, ok)
 	}
-	if _, ok := m.resolveWindowURI("file:///c%3A/Users/deort/ws-none"); ok {
+	if _, ok := m.resolveWindowURI("file:///c%3A/Users/user0/ws-none"); ok {
 		t.Fatal("expected no match for an unknown workspace")
 	}
 }
@@ -519,4 +533,15 @@ func openURI(ws []workspaces.Workspace, uri string) bool {
 		}
 	}
 	return false
+}
+
+// windowOf returns the CDP window id carried by the workspace with the
+// given URI ("" when the workspace is absent or closed).
+func windowOf(ws []workspaces.Workspace, uri string) string {
+	for _, w := range ws {
+		if workspaces.SameURI(w.URI, uri) {
+			return w.Window
+		}
+	}
+	return ""
 }

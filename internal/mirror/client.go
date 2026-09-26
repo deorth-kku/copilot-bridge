@@ -21,16 +21,17 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 	// list pushes; it never mirrors a pane.
 	if r.URL.Query().Get("page") == "workspaces" {
 		c.wsPage = true
-	} else if wsURI := r.URL.Query().Get("ws"); wsURI != "" {
-		// A tab arriving from the mirror carries its target workspace
-		// (?ws=). Resolve it to the live window BEFORE the client is added,
+	} else if winID := r.URL.Query().Get("win"); winID != "" {
+		// A tab arriving from the workspaces page carries its target
+		// window's CDP id (?win=). Select it BEFORE the client is added,
 		// so the first snapshot is already the requested window (no flash
-		// of the default window).
-		if id, ok := m.resolveWindowURI(wsURI); ok {
-			c.selID.Store(&id)
-			m.log.Info("mirror: ws param resolved", "uri", wsURI, "id", id)
+		// of the default window). A stale id (the window closed since the
+		// list was rendered) is dropped: the tab follows the default.
+		if m.disc.SessionForID(winID) != nil {
+			c.selID.Store(&winID)
+			m.log.Info("mirror: win param selected", "id", winID)
 		} else {
-			m.log.Warn("mirror: ws param unresolved", "uri", wsURI)
+			m.log.Warn("mirror: win param unknown", "id", winID)
 		}
 	}
 	m.addClient(c)

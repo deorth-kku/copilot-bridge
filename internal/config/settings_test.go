@@ -63,7 +63,7 @@ func TestProxyFunc(t *testing.T) {
     {"id": "m1", "baseUrl": "http://127.0.0.1:8080"}
   ],
   "http.proxy": "http://proxy.lan:1080",
-  "http.noProxy": ["qwen.lan", ".chatapi.deorth.xyz"]
+  "http.noProxy": ["qwen.lan", ".chatapi.example.com"]
 }`
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -93,10 +93,10 @@ func TestProxyFunc(t *testing.T) {
 	// noProxy: exact host and subdomain (leading-dot entry too)
 	check("qwen.lan", "")
 	check("foo.qwen.lan", "")
-	check("chatapi.deorth.xyz", "")
-	check("a.chatapi.deorth.xyz", "")
+	check("chatapi.example.com", "")
+	check("a.chatapi.example.com", "")
 	// everything else goes through the proxy
-	check("33dank.com", "http://proxy.lan:1080")
+	check("amd.com", "http://proxy.lan:1080")
 	check("openrouter.ai", "http://proxy.lan:1080")
 }
 

@@ -15,16 +15,16 @@ import (
 const updatedStorage = `{
   "profileAssociations": {
     "workspaces": {
-      "file:///c%3A/Users/deort/vscode-load-llama": "__default__profile__",
+      "file:///c%3A/Users/user0/copilot-bridge": "__default__profile__",
       "file:///e%3A/": "__default__profile__",
-      "vscode-remote://ssh-remote%2Bpve/etc/dnsmasq.d": "__default__profile__"
+      "vscode-remote://ssh-remote%2Bdebian/etc/dnsmasq.d": "__default__profile__"
     }
   },
   "windowsState": {
     "lastActiveWindow": { "folder": "file:///e%3A/" },
     "openedWindows": [
       { "folder": "file:///e%3A/" },
-      { "folder": "file:///c%3A/Users/deort/vscode-load-llama" }
+      { "folder": "file:///c%3A/Users/user0/copilot-bridge" }
     ]
   }
 }`

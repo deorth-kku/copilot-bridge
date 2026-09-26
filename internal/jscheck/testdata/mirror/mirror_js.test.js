@@ -938,21 +938,19 @@ test('mirror: a stale remembered window is dropped silently', () => {
   } finally { restoreLS(); uninstallGlobals(); }
 });
 
-test('mirror: ?ws= is forwarded to the WS handshake URL', () => {
-  const uri = 'file:///c%3A/Users/deort/vscode-load-llama';
-  const { ws } = setup({ search: '?ws=' + encodeURIComponent(uri) });
+test('mirror: ?win= is forwarded to the WS handshake URL', () => {
+  const { ws } = setup({ search: '?win=' + encodeURIComponent('win-9') });
   try {
-    assert.equal(ws.url, 'ws://127.0.0.1:8123/ws?ws=' + encodeURIComponent(uri));
+    assert.equal(ws.url, 'ws://127.0.0.1:8123/ws?win=' + encodeURIComponent('win-9'));
   } finally { uninstallGlobals(); }
 });
 
-test('mirror: ?ws= suppresses the remembered-window restore', () => {
-  const uri = 'file:///c%3A/Users/deort/vscode-load-llama';
-  const { ws } = setup({ search: '?ws=' + encodeURIComponent(uri) });
+test('mirror: ?win= suppresses the remembered-window restore', () => {
+  const { ws } = setup({ search: '?win=' + encodeURIComponent('win-9') });
   const restoreLS = withLocalStorage({ mirrorWin: 'win-1' });
   try {
     state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-1' });
-    assert.equal(sent(ws).filter(m => m.type === 'window').length, 0, 'server already applied the ?ws= selection');
+    assert.equal(sent(ws).filter(m => m.type === 'window').length, 0, 'server already applied the ?win= selection');
     assert.equal(globalThis.localStorage.getItem('mirrorWin'), 'win-1', 'remembered window not consumed');
   } finally { restoreLS(); uninstallGlobals(); }
 });

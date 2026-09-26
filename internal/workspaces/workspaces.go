@@ -27,10 +27,15 @@ type Workspace struct {
 	// Path is the native local path (local workspaces only).
 	Path string `json:"path,omitempty"`
 	// Remote is the remote authority (remote workspaces only),
-	// e.g. "ssh-remote+pve".
+	// e.g. "ssh-remote+debian".
 	Remote string `json:"remote,omitempty"`
 	// Open reports whether a window for this workspace is currently open.
 	Open bool `json:"open,omitempty"`
+	// Window is the CDP window id of the live window that has this
+	// workspace open ("" when closed); the workspaces page passes it to
+	// the mirror page for the jump, so the mirror never re-resolves the
+	// workspace URI.
+	Window string `json:"window,omitempty"`
 	// LastActive reports whether this is the last active workspace.
 	LastActive bool `json:"lastActive,omitempty"`
 }
@@ -89,10 +94,12 @@ func List(storagePath string) ([]Workspace, error) {
 // windowsState (which lags: VS Code does not always rewrite it when a
 // window opens or closes). live maps window id -> workspace URI (the
 // storage.json key format, as reported by cdp.WorkspaceURI); Open is true
-// exactly for the workspaces some live window reports, and live
-// workspaces missing from the known list are appended, so a freshly
-// opened workspace shows up before storage.json catches up. The result
-// is sorted like List's output.
+// exactly for the workspaces some live window reports, Window carries
+// that window's CDP id (the smallest one when several windows share a
+// workspace, so the result is deterministic), and live workspaces missing
+// from the known list are appended, so a freshly opened workspace shows
+// up before storage.json catches up. The result is sorted like List's
+// output.
 func Overlay(known []Workspace, live map[string]string) []Workspace {
 	idx := make(map[string]int, len(known)+len(live))
 	out := make([]Workspace, len(known))
@@ -101,10 +108,19 @@ func Overlay(known []Workspace, live map[string]string) []Workspace {
 		out[i] = ws
 		idx[strings.ToLower(ws.URI)] = i
 	}
+	// Reverse the live map: workspace URI (lowercased) -> window id.
+	winFor := make(map[string]string, len(live))
+	for id, uri := range live {
+		k := strings.ToLower(uri)
+		if cur, ok := winFor[k]; !ok || id < cur {
+			winFor[k] = id
+		}
+	}
 	for _, uri := range live {
 		k := strings.ToLower(uri)
 		if i, ok := idx[k]; ok {
 			out[i].Open = true
+			out[i].Window = winFor[k]
 			continue
 		}
 		ws, ok := parseWorkspace(uri)
@@ -112,6 +128,7 @@ func Overlay(known []Workspace, live map[string]string) []Workspace {
 			continue
 		}
 		ws.Open = true
+		ws.Window = winFor[k]
 		idx[k] = len(out)
 		out = append(out, ws)
 	}
@@ -135,7 +152,7 @@ func sortWorkspaces(out []Workspace) {
 
 // normalizeAuthority percent-decodes the authority portion of a URI before
 // parsing: storage.json stores remote authorities with '+' encoded as %2B
-// (e.g. ssh-remote%2Bpve), which net/url rejects in the host.
+// (e.g. ssh-remote%2Bdebian), which net/url rejects in the host.
 func normalizeAuthority(uri string) string {
 	i := strings.Index(uri, "://")
 	if i < 0 {

@@ -170,13 +170,14 @@ func (m *Mirror) refreshWorkspaces() {
 
 // equalWorkspaces reports whether two workspace lists are identical (same
 // entries in the same order; Name/Path/Remote derive from the URI, so URI
-// + Open + LastActive fully describe an entry).
+// + Open + LastActive + Window fully describe an entry — Window must be
+// compared so a window that restarts (new CDP id) reaches the page).
 func equalWorkspaces(a, b []workspaces.Workspace) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i].URI != b[i].URI || a[i].Open != b[i].Open || a[i].LastActive != b[i].LastActive {
+		if a[i].URI != b[i].URI || a[i].Open != b[i].Open || a[i].LastActive != b[i].LastActive || a[i].Window != b[i].Window {
 			return false
 		}
 	}

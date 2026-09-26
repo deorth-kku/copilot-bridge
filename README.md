@@ -127,16 +127,16 @@ path to `copilot-bridge.exe`:
 {
   "hooks": {
     "SessionStart": [
-      { "type": "command", "command": "C:\\Users\\deort\\vscode-load-llama\\copilot-bridge.exe hook" }
+      { "type": "command", "command": "C:\\Users\\user0\\copilot-bridge\\copilot-bridge.exe hook" }
     ],
     "Stop": [
-      { "type": "command", "command": "C:\\Users\\deort\\vscode-load-llama\\copilot-bridge.exe hook" }
+      { "type": "command", "command": "C:\\Users\\user0\\copilot-bridge\\copilot-bridge.exe hook" }
     ],
     "PreToolUse": [
-      { "type": "command", "command": "C:\\Users\\deort\\vscode-load-llama\\copilot-bridge.exe hook" }
+      { "type": "command", "command": "C:\\Users\\user0\\copilot-bridge\\copilot-bridge.exe hook" }
     ],
     "PostToolUse": [
-      { "type": "command", "command": "C:\\Users\\deort\\vscode-load-llama\\copilot-bridge.exe hook" }
+      { "type": "command", "command": "C:\\Users\\user0\\copilot-bridge\\copilot-bridge.exe hook" }
     ]
   }
 }

@@ -182,12 +182,13 @@ const workspacesHTML = `<!DOCTYPE html>
 
   function openRow(row) {
     var uri = row.getAttribute('data-uri');
-    // Already open: jump this browser to the mirror of that window
-    // (the mirror page asks the server which live window it is) instead
-    // of launching anything.
+    // Already open: jump this browser to the mirror of that window by its
+    // CDP window id (the list carries it behind the green dot) instead of
+    // launching anything — the mirror selects the window directly, no
+    // workspace-URI re-resolution.
     for (var i = 0; i < all.length; i++) {
-      if (all[i].uri === uri && all[i].open) {
-        location.href = '/?ws=' + encodeURIComponent(uri);
+      if (all[i].uri === uri && all[i].open && all[i].window) {
+        location.href = '/?win=' + encodeURIComponent(all[i].window);
         return;
       }
     }

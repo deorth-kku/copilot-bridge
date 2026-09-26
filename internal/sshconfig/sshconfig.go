@@ -79,8 +79,8 @@ func Load(path string) (*Config, error) {
 // The names are the forward-DNS results of the request's source IP; each is
 // compared case-insensitively against every entry's Host alias and
 // HostName. It returns the ssh Host alias of the first matching entry — the
-// identifier VS Code uses in its ssh-remote authority (e.g. "pve" for
-// ssh-remote+pve) — not the DNS name itself. ok is false when no name is
+// identifier VS Code uses in its ssh-remote authority (e.g. "debian" for
+// ssh-remote+debian) — not the DNS name itself. ok is false when no name is
 // known.
 func (c *Config) Match(names []string) (string, bool) {
 	for _, n := range names {

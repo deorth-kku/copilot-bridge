@@ -15,12 +15,12 @@
   // Set once the remembered window (if any) has been restored after a
   // (re)connect: only the first good state message may re-send it.
   var restoredWin = false;
-  // Workspace URI this tab arrived with (?ws= from the workspaces page).
+  // CDP window id this tab arrived with (?win= from the workspaces page).
   // It is forwarded to the WS handshake so the server selects that window
   // BEFORE the first snapshot (no flash of the default window), and it
   // suppresses the remembered-window restore below.
-  var pendingWs = '';
-  try { pendingWs = new URLSearchParams(location.search).get('ws') || ''; } catch (e) {}
+  var pendingWin = '';
+  try { pendingWin = new URLSearchParams(location.search).get('win') || ''; } catch (e) {}
   // Last live scroll state (m.scroll: live scroller's h/scrollH/offset) and
   // the DOM path of the scroller the server measured (m.scrollPath). Used to
   // mirror the live-drawn scrollbar's position/size onto the mirror scroller.
@@ -138,11 +138,11 @@
 
   function connect() {
     var proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    // A ?ws= tab forwards its target workspace in the WS URL: the server
-    // resolves it to the live window before the first snapshot, so this
-    // tab's first paint is already the requested window.
+    // A ?win= tab forwards its target window in the WS URL: the server
+    // selects it before the first snapshot, so this tab's first paint is
+    // already the requested window.
     var wurl = proto + '://' + location.host + '/ws';
-    if (pendingWs) wurl += '?ws=' + encodeURIComponent(pendingWs);
+    if (pendingWin) wurl += '?win=' + encodeURIComponent(pendingWin);
     ws = new WebSocket(wurl);
     ws.onopen = function () { setStatus('connected'); };
     ws.onclose = function () { setStatus('disconnected, retrying…'); setTimeout(connect, 1000); };
@@ -170,11 +170,11 @@
       syncWindows(m);
       // First good state after (re)connect: if this tab returned from the
       // workspaces page with a remembered window that still exists, ask
-      // the server to mirror it again. A ?ws= tab skips this: the server
+      // the server to mirror it again. A ?win= tab skips this: the server
       // already applied that explicit selection at connect time.
       if (!restoredWin) {
         restoredWin = true;
-        if (!pendingWs) {
+        if (!pendingWin) {
           var saved = '';
           try { saved = localStorage.getItem('mirrorWin') || ''; } catch (e) {}
           if (saved) {
@@ -1170,6 +1170,13 @@
   // editor box (toolbar/attachment clicks keep the identity mapping).
   function inputCharAt(target, cx, cy) {
     var box = (target && target.closest) ? target.closest('.chat-input-container') : null;
+    // A click whose target is not inside a .chat-input-container is never a
+    // caret click. chatInputEditor(null) falls back to the pane's input, and
+    // popups anchored to the input toolbar (the send-button steer menu) sit
+    // in client coordinates that overlap the input's bounding box — without
+    // this guard their rows would be re-seated onto the live input's caret
+    // instead of the row, so the click missed the menu item entirely.
+    if (!box) return -1;
     var ed = chatInputEditor(box);
     if (!ed) return -1;
     var er = ed.getBoundingClientRect();
