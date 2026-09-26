@@ -1172,6 +1172,13 @@ const pageJS = `(function () {
   // editor box (toolbar/attachment clicks keep the identity mapping).
   function inputCharAt(target, cx, cy) {
     var box = (target && target.closest) ? target.closest('.chat-input-container') : null;
+    // A click whose target is not inside a .chat-input-container is never a
+    // caret click. chatInputEditor(null) falls back to the pane's input, and
+    // popups anchored to the input toolbar (the send-button steer menu) sit
+    // in client coordinates that overlap the input's bounding box — without
+    // this guard their rows would be re-seated onto the live input's caret
+    // instead of the row, so the click missed the menu item entirely.
+    if (!box) return -1;
     var ed = chatInputEditor(box);
     if (!ed) return -1;
     var er = ed.getBoundingClientRect();
