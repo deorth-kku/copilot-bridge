@@ -84,20 +84,20 @@ start) still powers off. Disarm the toggle any time to cancel.
 
 ### How it works
 - The `hook` subcommand is registered as a VS Code agent hook for the
-  `SessionStart`, `Stop`, and `PreToolUse` events. VS Code writes the hook's
-  JSON payload to the subcommand's stdin; it is forwarded verbatim to the
-  bridge's `POST /api/hook` endpoint (the mirror web server, default
-  `127.0.0.1:9527`).
+  `SessionStart`, `Stop`, `PreToolUse`, and `PostToolUse` events. VS Code
+  writes the hook's JSON payload to the subcommand's stdin; it is
+  forwarded verbatim to the bridge's `POST /api/hook` endpoint (the
+  mirror web server, default `127.0.0.1:9527`).
 - The bridge's shutdown planner tracks the armed state plus the last
   start/stop times. When the conditions above are met it cancels the main
   context (graceful shutdown of CDP and the web server), then powers off
   the machine.
-- When `-ntfy-topic` is set, two events also push an ntfy.sh notification,
-  each capped at 1500 characters and carrying the mirror URL returned by
-  `/api/hook` as the notification's `Click` target, so tapping the phone
-  notification opens the mirror of the workspace the task ran in. The push
-  is independent of the bridge (a missing bridge still notifies, without
-  the Click link):
+- When `-ntfy-topic` is set, three events also push an ntfy.sh
+  notification, each capped at 1500 characters and carrying the mirror
+  URL returned by `/api/hook` as the notification's `Click` target, so
+  tapping the phone notification opens the mirror of the workspace the
+  task ran in. The push is independent of the bridge (a missing bridge
+  still notifies, without the Click link):
   - `Stop`: the agent's last message (parsed from the session transcript,
     best effort) as the body.
   - `PreToolUse` of the ask-questions tool (`tool_name`
@@ -106,6 +106,14 @@ start) still powers off. Disarm the toggle any time to cancel.
     `PreToolUse` fires for every tool; only this tool notifies, and the
     hook never writes to stdout (no `hookSpecificOutput`), so the tool
     call itself is unaffected.
+  - `PostToolUse` of the task-complete tool (`tool_name`
+    `task_complete`): the `summary` from the tool call arguments as the
+    body.
+- `PostToolUse` of `task_complete` always writes `{"continue":false}`
+  with a `stopReason` to stdout, stopping the entire agent execution: VS
+  Code's default is to return to the agent once more after
+  `task_complete`, which is unnecessary — the tool call itself signals
+  completion.
 - Power-off is Windows-only (`ExitWindowsEx(EWX_POWEROFF)`); on Linux /
   macOS it is a no-op.
 - The subcommand always exits 0 (a missing bridge must never disrupt the
@@ -126,6 +134,9 @@ path to `copilot-bridge.exe`:
     ],
     "PreToolUse": [
       { "type": "command", "command": "C:\\Users\\deort\\vscode-load-llama\\copilot-bridge.exe hook" }
+    ],
+    "PostToolUse": [
+      { "type": "command", "command": "C:\\Users\\deort\\vscode-load-llama\\copilot-bridge.exe hook" }
     ]
   }
 }
@@ -139,8 +150,8 @@ path to `copilot-bridge.exe`:
 - Hook subcommand flags: `-bridge` (default `http://127.0.0.1:9527`) —
   the bridge HTTP address to forward events to; `-ntfy-topic` (default
   empty = no notification) — the ntfy.sh topic that receives the
-  task-finished and question notifications (with the mirror URL as their
-  Click link).
+  task-finished, question, and task-complete notifications (with the
+  mirror URL as their Click link).
 
 ## Testing
 `go test ./internal/...` runs everything. The injected JavaScript is

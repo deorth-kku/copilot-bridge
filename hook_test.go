@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"io"
@@ -113,6 +114,16 @@ func stubNtfy(t *testing.T, srv *httptest.Server) {
 	orig := ntfyBaseURL
 	ntfyBaseURL = srv.URL
 	t.Cleanup(func() { ntfyBaseURL = orig })
+}
+
+// stubHookStdout captures the hook's stdout JSON in a buffer.
+func stubHookStdout(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	orig := hookStdout
+	hookStdout = buf
+	t.Cleanup(func() { hookStdout = orig })
+	return buf
 }
 
 func TestRunHookNtfyPush(t *testing.T) {
@@ -459,5 +470,118 @@ func TestRunHookNtfyNoRetryOn4xx(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("ntfy attempts = %d, want 1 (4xx is not retried)", n)
+	}
+}
+
+func TestRunHookPostToolUseTaskCompleteStops(t *testing.T) {
+	out := stubHookStdout(t)
+	if err := runHook(okBridge(t).URL, "", strings.NewReader(
+		`{"hook_event_name":"PostToolUse","tool_name":"task_complete","tool_input":{"summary":"done"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Continue   bool   `json:"continue"`
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout %q is not JSON: %v", out.String(), err)
+	}
+	if got.Continue || got.StopReason == "" {
+		t.Fatalf("stdout = %q, want continue false with a stopReason", out.String())
+	}
+}
+
+func TestRunHookPostToolUseOtherToolNoBlock(t *testing.T) {
+	out := stubHookStdout(t)
+	if err := runHook(okBridge(t).URL, "", strings.NewReader(
+		`{"hook_event_name":"PostToolUse","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty for a non-task_complete tool", out.String())
+	}
+}
+
+func TestRunHookTaskCompleteNtfy(t *testing.T) {
+	var ntfyTitle, ntfyClick, ntfyBody string
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ntfyTitle = r.Header.Get("Title")
+		ntfyClick = r.Header.Get("Click")
+		b, _ := io.ReadAll(r.Body)
+		ntfyBody = string(b)
+	}))
+	defer ntfy.Close()
+	stubNtfy(t, ntfy)
+
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"mirror":"http://mirror.example/?ws=file:///x%2Fy"}`))
+	}))
+	defer bridge.Close()
+
+	if err := runHook(bridge.URL, "my-topic", strings.NewReader(
+		`{"hook_event_name":"PostToolUse","session_id":"01c86818-0239-4f9d-8a9c-375f7590bd28","tool_name":"task_complete","tool_input":{"summary":"Fixed the bug"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if ntfyTitle != "VS Code Copilot: task complete [01c86818]" {
+		t.Errorf("ntfy title = %q", ntfyTitle)
+	}
+	if ntfyClick != "http://mirror.example/?ws=file:///x%2Fy" {
+		t.Errorf("ntfy click = %q", ntfyClick)
+	}
+	if ntfyBody != "Fixed the bug" {
+		t.Errorf("ntfy body = %q", ntfyBody)
+	}
+}
+
+func TestRunHookTaskCompleteNtfyNoSummary(t *testing.T) {
+	var ntfyBody string
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		ntfyBody = string(b)
+	}))
+	defer ntfy.Close()
+	stubNtfy(t, ntfy)
+
+	if err := runHook(okBridge(t).URL, "my-topic", strings.NewReader(
+		`{"hook_event_name":"PostToolUse","tool_name":"task_complete","tool_input":{}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if ntfyBody != "Agent task complete (no summary captured)" {
+		t.Errorf("ntfy body = %q", ntfyBody)
+	}
+}
+
+func TestRunHookTaskCompleteNoNtfyWithoutTopic(t *testing.T) {
+	n := 0
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++ }))
+	defer ntfy.Close()
+	stubNtfy(t, ntfy)
+
+	out := stubHookStdout(t)
+	if err := runHook(okBridge(t).URL, "", strings.NewReader(
+		`{"hook_event_name":"PostToolUse","tool_name":"task_complete","tool_input":{"summary":"done"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("ntfy requests = %d, want 0 without a topic", n)
+	}
+	if out.Len() == 0 {
+		t.Fatal("expected the stop output even without a topic")
+	}
+}
+
+func TestTaskCompleteSummary(t *testing.T) {
+	if got := taskCompleteSummary(jsontext.Value(`{"summary":"done"}`)); got != "done" {
+		t.Fatalf("got %q", got)
+	}
+	if got := taskCompleteSummary(jsontext.Value(`{}`)); got != "" {
+		t.Fatalf("no summary: got %q", got)
+	}
+	if got := taskCompleteSummary(jsontext.Value(`nope`)); got != "" {
+		t.Fatalf("bad json: got %q", got)
+	}
+	if got := taskCompleteSummary(jsontext.Value("")); got != "" {
+		t.Fatalf("empty: got %q", got)
 	}
 }

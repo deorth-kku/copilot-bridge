@@ -1,12 +1,13 @@
 package main
 
 // The "hook" subcommand: invoked by VS Code agent hooks (SessionStart /
-// Stop). VS Code writes the hook's JSON payload to the process's stdin;
-// we forward it verbatim to the bridge's /api/hook endpoint, where the
-// shutdown planner decides what to do with the event.
+// Stop / PreToolUse / PostToolUse). VS Code writes the hook's JSON payload
+// to the process's stdin; we forward it verbatim to the bridge's
+// /api/hook endpoint, where the shutdown planner decides what to do with
+// the event.
 //
-// When -ntfy-topic is set, two events additionally push an ntfy.sh
-// notification, both carrying the bridge's mirror URL as the
+// When -ntfy-topic is set, three events additionally push an ntfy.sh
+// notification, all carrying the bridge's mirror URL as the
 // notification's Click target (tapping the phone notification opens the
 // mirror of the workspace the task ran in):
 //   - Stop: the agent's last message (parsed from the session transcript,
@@ -14,9 +15,14 @@ package main
 //   - PreToolUse of the ask-questions tool (tool_name
 //     "vscode_askQuestions"): the questions and their options as the body,
 //     so a phone notification arrives while the agent waits for an answer.
+//   - PostToolUse of the task_complete tool: the summary from the tool
+//     call arguments as the body.
 //
-// The hook only notifies: it never writes to stdout (no
-// hookSpecificOutput) and never influences the tool call.
+// PostToolUse of task_complete additionally ALWAYS writes
+// {"continue":false} with a stopReason to stdout, stopping the entire
+// agent execution: VS Code's default behavior is to return to the agent
+// once more after task_complete, which is unnecessary — the tool call
+// itself signals completion.
 //
 // The subcommand ALWAYS exits with status 0: VS Code treats exit code 2
 // as a blocking error (shown to the model) and other non-zero codes as
@@ -73,6 +79,19 @@ var ntfyRetryDelay = time.Second
 // hook stdin dump).
 const askQuestionsToolName = "vscode_askQuestions"
 
+// taskCompleteToolName is the tool_name VS Code puts in the PostToolUse
+// payload for the task-completion tool.
+const taskCompleteToolName = "task_complete"
+
+// taskCompleteStopOutput is the PostToolUse stdout JSON that stops the
+// entire agent execution after task_complete (the stopReason is shown
+// to the user).
+const taskCompleteStopOutput = `{"continue":false,"stopReason":"task_complete signals completion; no further processing is required."}`
+
+// hookStdout is where the hook's stdout JSON goes (a var so tests can
+// capture it).
+var hookStdout io.Writer = os.Stdout
+
 // runHookCommand is the entry point for the "hook" subcommand. It always
 // exits with status 0 (see the package comment).
 func runHookCommand(args []string) {
@@ -114,6 +133,14 @@ func runHook(bridge, ntfyTopic string, stdin io.Reader) error {
 
 	mirrorURL, bridgeErr := bridgeHook(bridge, body)
 
+	// PostToolUse of task_complete: always stop the agent execution.
+	// VS Code's default is to return to the agent once more after
+	// task_complete, which is unnecessary — the tool call itself signals
+	// completion.
+	if ev.Name == "PostToolUse" && ev.ToolName == taskCompleteToolName {
+		fmt.Fprintln(hookStdout, taskCompleteStopOutput)
+	}
+
 	if ntfyTopic != "" {
 		switch ev.Name {
 		case "Stop":
@@ -125,6 +152,12 @@ func runHook(bridge, ntfyTopic string, stdin io.Reader) error {
 			// gets a notification.
 			if ev.ToolName == askQuestionsToolName {
 				pushQuestionNtfy(ntfyTopic, ev.SessionID, ev.ToolInput, mirrorURL)
+			}
+		case "PostToolUse":
+			// PostToolUse fires for EVERY tool; only task_complete gets a
+			// notification.
+			if ev.ToolName == taskCompleteToolName {
+				pushTaskCompleteNtfy(ntfyTopic, ev.SessionID, ev.ToolInput, mirrorURL)
 			}
 		}
 	}
@@ -177,6 +210,27 @@ func pushNtfy(topic, sessionID, lastText, mirrorURL string) {
 func pushQuestionNtfy(topic, sessionID string, toolInput jsontext.Value, mirrorURL string) {
 	pushNtfyMessage(topic, ntfyTitle("question", sessionID),
 		fallback(formatQuestions(toolInput), "Agent asked a question (details unavailable)"), mirrorURL)
+}
+
+// pushTaskCompleteNtfy pushes one ntfy notification for a completed task
+// (a PostToolUse event of the task_complete tool): the summary from the
+// tool call arguments as the body, the mirror URL as the Click target.
+// Same best-effort contract as pushNtfy.
+func pushTaskCompleteNtfy(topic, sessionID string, toolInput jsontext.Value, mirrorURL string) {
+	pushNtfyMessage(topic, ntfyTitle("task complete", sessionID),
+		fallback(taskCompleteSummary(toolInput), "Agent task complete (no summary captured)"), mirrorURL)
+}
+
+// taskCompleteSummary extracts the summary field from the task_complete
+// tool call arguments.
+func taskCompleteSummary(toolInput jsontext.Value) string {
+	var in struct {
+		Summary string `json:"summary"`
+	}
+	if len(toolInput) == 0 || json.Unmarshal(toolInput, &in) != nil {
+		return ""
+	}
+	return in.Summary
 }
 
 // ntfyTitle builds the notification title with the short session id.
