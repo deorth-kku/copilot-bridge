@@ -985,6 +985,30 @@ test('mirror: ?win= suppresses the remembered-window restore', () => {
   } finally { restoreLS(); uninstallGlobals(); }
 });
 
+test('mirror: ?ws= is forwarded to the WS handshake URL', () => {
+  const { ws } = setup({ search: '?ws=' + encodeURIComponent('file:///x/y') });
+  try {
+    assert.equal(ws.url, 'ws://127.0.0.1:8123/ws?ws=' + encodeURIComponent('file:///x/y'));
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: ?win= wins over ?ws= when both are present', () => {
+  const { ws } = setup({ search: '?win=' + encodeURIComponent('win-9') + '&ws=' + encodeURIComponent('file:///x/y') });
+  try {
+    assert.equal(ws.url, 'ws://127.0.0.1:8123/ws?win=' + encodeURIComponent('win-9'));
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: ?ws= suppresses the remembered-window restore', () => {
+  const restoreLS = withLocalStorage({ mirrorWin: 'win-1' });
+  const { ws } = setup({ search: '?ws=' + encodeURIComponent('file:///x/y') });
+  try {
+    state(ws, { windows: [{ id: 'win-1', title: 'A' }, { id: 'win-2', title: 'B' }], windowId: 'win-1' });
+    assert.equal(sent(ws).filter(m => m.type === 'window').length, 0, 'server already applied the ?ws= selection');
+    assert.equal(globalThis.localStorage.getItem('mirrorWin'), 'win-1', 'remembered window not consumed');
+  } finally { restoreLS(); uninstallGlobals(); }
+});
+
 test('mirror: keydown forwards non-printable keys, suppresses plain typing and composition', () => {
   const { pane, ws } = setup();
   try {

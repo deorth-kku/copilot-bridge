@@ -140,7 +140,7 @@ func TestRunHookNtfyPush(t *testing.T) {
 
 	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"mirror":"http://mirror.example/?win=t1"}`))
+		_, _ = w.Write([]byte(`{"ok":true,"mirror":"http://mirror.example/?ws=file:///x%2Fy"}`))
 	}))
 	defer bridge.Close()
 
@@ -162,7 +162,7 @@ func TestRunHookNtfyPush(t *testing.T) {
 	if ntfyBody != "done with the task" {
 		t.Errorf("ntfy body = %q", ntfyBody)
 	}
-	if ntfyClick != "http://mirror.example/?win=t1" {
+	if ntfyClick != "http://mirror.example/?ws=file:///x%2Fy" {
 		t.Errorf("ntfy click = %q", ntfyClick)
 	}
 }
@@ -219,7 +219,7 @@ func TestRunHookQuestionNtfy(t *testing.T) {
 
 	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"mirror":"http://mirror.example/?win=t1"}`))
+		_, _ = w.Write([]byte(`{"ok":true,"mirror":"http://mirror.example/?ws=file:///x%2Fy"}`))
 	}))
 	defer bridge.Close()
 
@@ -252,7 +252,7 @@ func TestRunHookQuestionNtfy(t *testing.T) {
 	if ntfyTitle != "VS Code Copilot: question [01c86818]" {
 		t.Errorf("ntfy title = %q", ntfyTitle)
 	}
-	if ntfyClick != "http://mirror.example/?win=t1" {
+	if ntfyClick != "http://mirror.example/?ws=file:///x%2Fy" {
 		t.Errorf("ntfy click = %q", ntfyClick)
 	}
 	want := "1. Which files should the fix cover?\n   - all\n   - core only\n\n2. Keep the existing style?\n   - yes"
@@ -515,7 +515,7 @@ func TestRunHookTaskCompleteNtfy(t *testing.T) {
 
 	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"mirror":"http://mirror.example/?win=t1"}`))
+		_, _ = w.Write([]byte(`{"ok":true,"mirror":"http://mirror.example/?ws=file:///x%2Fy"}`))
 	}))
 	defer bridge.Close()
 
@@ -526,7 +526,7 @@ func TestRunHookTaskCompleteNtfy(t *testing.T) {
 	if ntfyTitle != "VS Code Copilot: task complete [01c86818]" {
 		t.Errorf("ntfy title = %q", ntfyTitle)
 	}
-	if ntfyClick != "http://mirror.example/?win=t1" {
+	if ntfyClick != "http://mirror.example/?ws=file:///x%2Fy" {
 		t.Errorf("ntfy click = %q", ntfyClick)
 	}
 	if ntfyBody != "Fixed the bug" {

@@ -33,6 +33,19 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 		} else {
 			m.log.Warn("mirror: win param unknown", "id", winID)
 		}
+	} else if wsURI := r.URL.Query().Get("ws"); wsURI != "" {
+		// A tab arriving from a hook notification carries its target
+		// workspace (?ws=). The hook does not probe CDP (the notification
+		// may never be clicked); the probe is deferred to here, where the
+		// tab is actually connecting. Resolve it to the live window
+		// BEFORE the client is added, so the first snapshot is already the
+		// requested window (no flash of the default window).
+		if id, ok := m.resolveWindowURI(wsURI); ok {
+			c.selID.Store(&id)
+			m.log.Info("mirror: ws param resolved", "uri", wsURI, "id", id)
+		} else {
+			m.log.Warn("mirror: ws param unresolved", "uri", wsURI)
+		}
 	}
 	m.addClient(c)
 	defer m.removeClient(c)

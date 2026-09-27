@@ -1,12 +1,12 @@
 package mirror
 
 import (
-	"context"
 	"encoding/json/v2"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,32 +89,16 @@ func TestHookMirrorURL(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	m := &Mirror{log: discardLog(), storagePath: storagePath, sshConfigPath: sshPath, wsStore: st}
+
 	localURI := "file:///c%3A/Users/tester/demo"
 	remoteURI := "vscode-remote://ssh-remote%2Balpha/home/tester/demo"
-
-	// The live windows: t1 has the local workspace, t2 the remote one —
-	// the hook URL must point at the window, not the workspace.
-	mock := newMockLiveCDP(t)
-	mock.set(true, map[string]string{"t1": localURI, "t2": remoteURI})
-	disc := cdp.NewDiscovery(strings.TrimPrefix(mock.url, "http://"), make(chan cdp.Event, 1), discardLog(), 50)
-	disc.Poll = 20 * time.Millisecond
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go disc.Run(ctx)
-	waitFor(t, "both windows probed", func() bool {
-		s1 := disc.SessionForID("t1")
-		s2 := disc.SessionForID("t2")
-		return s1 != nil && s2 != nil &&
-			cdp.WorkspaceURI(s1) == localURI && cdp.WorkspaceURI(s2) == remoteURI
-	})
-
-	m := &Mirror{log: discardLog(), disc: disc, storagePath: storagePath, sshConfigPath: sshPath, wsStore: st}
 
 	// Local request: loopback peer, no forwarded headers.
 	r := httptest.NewRequest(http.MethodPost, "/api/hook", nil)
 	r.Host = "mirror.lan:9527"
 	r.RemoteAddr = "127.0.0.1:54321"
-	if got := m.hookMirrorURL(r, `C:\Users\tester\demo`); got != "http://mirror.lan:9527/?win=t1" {
+	if got := m.hookMirrorURL(r, `C:\Users\tester\demo`); got != "http://mirror.lan:9527/?ws="+url.QueryEscape(localURI) {
 		t.Fatalf("local: got %q", got)
 	}
 
@@ -123,7 +107,7 @@ func TestHookMirrorURL(t *testing.T) {
 	r2 := httptest.NewRequest(http.MethodPost, "/api/hook", nil)
 	r2.Host = "mirror.lan:9527"
 	r2.RemoteAddr = "192.0.2.1:54322"
-	if got := m.hookMirrorURL(r2, "/home/tester/demo"); got != "http://mirror.lan:9527/?win=t2" {
+	if got := m.hookMirrorURL(r2, "/home/tester/demo"); got != "http://mirror.lan:9527/?ws="+url.QueryEscape(remoteURI) {
 		t.Fatalf("remote: got %q", got)
 	}
 
@@ -136,7 +120,7 @@ func TestHookMirrorURL(t *testing.T) {
 	r3.Header.Set("X-Forwarded-Host", "mirror.lan:8443")
 	r3.Header.Set("X-Forwarded-Proto", "https, http")
 	r3.Header.Set("X-Forwarded-For", "192.0.2.1, 127.0.0.1")
-	if got := m.hookMirrorURL(r3, "/home/tester/demo"); got != "https://mirror.lan:8443/?win=t2" {
+	if got := m.hookMirrorURL(r3, "/home/tester/demo"); got != "https://mirror.lan:8443/?ws="+url.QueryEscape(remoteURI) {
 		t.Fatalf("forwarded: got %q", got)
 	}
 
@@ -145,16 +129,8 @@ func TestHookMirrorURL(t *testing.T) {
 	r4 := httptest.NewRequest(http.MethodPost, "/api/hook", nil)
 	r4.Host = "mirror.lan:9527"
 	r4.RemoteAddr = "192.0.2.1:54324"
-	if got := m.hookMirrorURL(r4, `C:\Users\tester\demo`); got != "http://mirror.lan:9527/?win=t1" {
+	if got := m.hookMirrorURL(r4, `C:\Users\tester\demo`); got != "http://mirror.lan:9527/?ws="+url.QueryEscape(localURI) {
 		t.Fatalf("dns failure: got %q", got)
-	}
-
-	// The workspace matches but no live window has it open: the default
-	// mirror page.
-	mock.set(true, nil)
-	waitFor(t, "windows gone", func() bool { return len(disc.Windows()) == 0 })
-	if got := m.hookMirrorURL(r, `C:\Users\tester\demo`); got != "http://mirror.lan:9527/" {
-		t.Fatalf("no live window: got %q", got)
 	}
 
 	// No workspace match: the default mirror page.
@@ -164,33 +140,17 @@ func TestHookMirrorURL(t *testing.T) {
 }
 
 // TestHandleHookMirrorEndToEnd exercises the full endpoint: the response
-// carries the mirror URL of the live window whose workspace's cwd the
-// payload names, with the site/scheme of the request itself.
+// carries the mirror URL of the workspace whose cwd the payload names,
+// with the site/scheme of the request itself.
 func TestHandleHookMirrorEndToEnd(t *testing.T) {
 	storagePath, sshPath := writeHookurlFixtures(t)
-
-	localURI := "file:///c%3A/Users/tester/demo"
-	remoteURI := "vscode-remote://ssh-remote%2Balpha/home/tester/demo"
-
-	// The live windows: t1 has the local workspace, t2 the remote one.
-	mock := newMockLiveCDP(t)
-	mock.set(true, map[string]string{"t1": localURI, "t2": remoteURI})
-	disc := cdp.NewDiscovery(strings.TrimPrefix(mock.url, "http://"), make(chan cdp.Event, 1), discardLog(), 50)
-	disc.Poll = 20 * time.Millisecond
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go disc.Run(ctx)
-	waitFor(t, "both windows probed", func() bool {
-		s1 := disc.SessionForID("t1")
-		s2 := disc.SessionForID("t2")
-		return s1 != nil && s2 != nil &&
-			cdp.WorkspaceURI(s1) == localURI && cdp.WorkspaceURI(s2) == remoteURI
-	})
-
+	disc := cdp.NewDiscovery("127.0.0.1:1", make(chan cdp.Event, 1), discardLog(), 50)
 	m := New(disc, discardLog(), "127.0.0.1:0", nil, "", storagePath, "", sshPath)
 	m.SetPlanner(shutdown.NewPlanner(time.Second, nil))
 	stubLookupHosts(t, []string{"alpha.example"}, nil)
 
+	localURI := "file:///c%3A/Users/tester/demo"
+	remoteURI := "vscode-remote://ssh-remote%2Balpha/home/tester/demo"
 	localBody := `{"hook_event_name":"Stop","cwd":"C:\\Users\\tester\\demo"}`
 	remoteBody := `{"hook_event_name":"Stop","cwd":"/home/tester/demo"}`
 
@@ -233,14 +193,14 @@ func TestHandleHookMirrorEndToEnd(t *testing.T) {
 
 	// Local client: the URL keeps the request's site.
 	out := post(t, srv.URL+"/api/hook", localBody, nil)
-	if !out.OK || out.Mirror != srv.URL+"/?win=t1" {
+	if !out.OK || out.Mirror != srv.URL+"/?ws="+url.QueryEscape(localURI) {
 		t.Fatalf("local: got %+v", out)
 	}
 
 	// Remote client behind a proxy: XFF carries the client IP that DNS
 	// maps to the remote machine.
 	out = post(t, srv.URL+"/api/hook", remoteBody, http.Header{"X-Forwarded-For": []string{"192.0.2.1"}})
-	if !out.OK || out.Mirror != srv.URL+"/?win=t2" {
+	if !out.OK || out.Mirror != srv.URL+"/?ws="+url.QueryEscape(remoteURI) {
 		t.Fatalf("remote: got %+v", out)
 	}
 
@@ -272,7 +232,7 @@ func TestHandleHookMirrorEndToEnd(t *testing.T) {
 	if jerr := json.Unmarshal(data, &out2); jerr != nil {
 		t.Fatal(jerr)
 	}
-	if !out2.OK || out2.Mirror != tlsSrv.URL+"/?win=t1" {
+	if !out2.OK || out2.Mirror != tlsSrv.URL+"/?ws="+url.QueryEscape(localURI) {
 		t.Fatalf("tls: got %+v", out2)
 	}
 }

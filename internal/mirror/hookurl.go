@@ -12,10 +12,10 @@ import (
 	"copilot-bridge/internal/workspaces"
 )
 
-// hookMirrorURL resolves the mirror URL of the live window the hook event
+// hookMirrorURL resolves the mirror URL of the workspace the hook event
 // belongs to, so the /api/hook response can point the user straight at it:
 //
-//	<scheme>://<site>?win=<CDP window id>
+//	<scheme>://<site>?ws=<workspace URI>
 //
 // The site and scheme are the ones the REQUEST used (X-Forwarded-Host /
 // X-Forwarded-Proto when present, else r.Host / the TLS state), so the
@@ -24,9 +24,11 @@ import (
 // IP is forward-DNS'd and matched against the ssh client config's Host
 // aliases / HostName values (the same config VS Code uses for its
 // ssh-remote workspaces). The workspace is the one whose root path equals
-// the payload's cwd on that machine, and the window is the live one that
-// has it open. When nothing matches, the default mirror page (no win=)
-// is returned instead.
+// the payload's cwd on that machine. When nothing matches, the default
+// mirror page (no ws=) is returned instead. The workspace is NOT resolved
+// to a live window here: the notification may never be clicked, and the
+// CDP probe is deferred to the mirror page's WS connect (handleWS), where
+// it is actually needed.
 func (m *Mirror) hookMirrorURL(r *http.Request, cwd string) string {
 	scheme := "http"
 	if p := firstHeaderValue(r.Header.Get("X-Forwarded-Proto")); p != "" {
@@ -58,14 +60,10 @@ func (m *Mirror) hookMirrorURL(r *http.Request, cwd string) string {
 	}
 
 	if ws, ok := matchWorkspace(m.knownWorkspaces(), remoteHost, cwd); ok {
-		if id, ok := m.resolveWindowURI(ws.URI); ok {
-			m.log.Info("hook: mirror url", "peer", peer, "host", remoteHost, "id", id)
-			return base + "/?win=" + url.QueryEscape(id)
-		}
-		m.log.Info("hook: mirror url (no live window)", "peer", peer, "host", remoteHost, "uri", ws.URI)
-	} else {
-		m.log.Info("hook: mirror url (no workspace match)", "peer", peer, "host", remoteHost, "cwd", cwd)
+		m.log.Info("hook: mirror url", "peer", peer, "host", remoteHost, "uri", ws.URI)
+		return base + "/?ws=" + url.QueryEscape(ws.URI)
 	}
+	m.log.Info("hook: mirror url (no workspace match)", "peer", peer, "host", remoteHost, "cwd", cwd)
 	return base + "/"
 }
 

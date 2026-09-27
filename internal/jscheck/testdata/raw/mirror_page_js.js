@@ -22,12 +22,18 @@
   // Set once the remembered window (if any) has been restored after a
   // (re)connect: only the first good state message may re-send it.
   var restoredWin = false;
-  // CDP window id this tab arrived with (?win= from the workspaces page).
-  // It is forwarded to the WS handshake so the server selects that window
+  // CDP window id (?win= from the workspaces page) or workspace URI
+  // (?ws= from a hook notification) this tab arrived with. It is
+  // forwarded to the WS handshake so the server selects that window
   // BEFORE the first snapshot (no flash of the default window), and it
   // suppresses the remembered-window restore below.
   var pendingWin = '';
-  try { pendingWin = new URLSearchParams(location.search).get('win') || ''; } catch (e) {}
+  var pendingWs = '';
+  try {
+    var q = new URLSearchParams(location.search);
+    pendingWin = q.get('win') || '';
+    pendingWs = q.get('ws') || '';
+  } catch (e) {}
   // The window this tab had remembered before the page (re)loaded
   // (localStorage 'mirrorWin'). Captured at load, BEFORE any state message
   // can overwrite the record: the first good state re-sends it if it still
@@ -151,11 +157,12 @@
 
   function connect() {
     var proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    // A ?win= tab forwards its target window in the WS URL: the server
-    // selects it before the first snapshot, so this tab's first paint is
-    // already the requested window.
+    // A ?win=/ ?ws= tab forwards its target in the WS URL: the server
+    // selects the window before the first snapshot, so this tab's first
+    // paint is already the requested window.
     var wurl = proto + '://' + location.host + '/ws';
     if (pendingWin) wurl += '?win=' + encodeURIComponent(pendingWin);
+    else if (pendingWs) wurl += '?ws=' + encodeURIComponent(pendingWs);
     ws = new WebSocket(wurl);
     ws.onopen = function () { setStatus('connected'); };
     ws.onclose = function () { setStatus('disconnected, retrying…'); setTimeout(connect, 1000); };
@@ -183,12 +190,12 @@
       syncWindows(m);
       // First good state after (re)connect: if this tab has a remembered
       // window that still exists (from a refresh, or a round trip through
-      // the workspaces page), ask the server to mirror it again. A ?win=
-      // tab skips this: the server already applied that explicit selection
-      // at connect time.
+      // the workspaces page), ask the server to mirror it again. A
+      // ?win=/ ?ws= tab skips this: the server already applied that
+      // explicit selection at connect time.
       if (!restoredWin) {
         restoredWin = true;
-        if (!pendingWin && savedWin) {
+        if (!pendingWin && !pendingWs && savedWin) {
           var wins2 = m.windows || [];
           var found = false;
           for (var i = 0; i < wins2.length; i++) {
