@@ -172,8 +172,12 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 	}
 	if fpst.Err != "" {
 		// A missing pane is usually a closed chat view: click the window's
-		// title-bar "Toggle Chat" button to re-open it (throttled).
-		if fpst.Err == "pane not found" {
+		// title-bar "Toggle Chat" button to re-open it (throttled). Only do
+		// so when someone is actually watching: groupClients keeps the
+		// default window in the groups even with zero clients (so fresh
+		// tabs get a fresh snapshot), so an unwatched window must not
+		// trigger the auto-open click.
+		if fpst.Err == "pane not found" && len(group) > 0 {
 			m.autoOpenChat(s, winID)
 		}
 		m.sendErrToGroup(group, fpst.Err)
