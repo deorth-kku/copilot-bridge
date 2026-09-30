@@ -248,6 +248,32 @@ test('mirror: later HTML states patch in place, keeping unchanged node identity'
   } finally { uninstallGlobals(); }
 });
 
+test('mirror: escaped x-a/x-button/x-form tags are restored to real tags (nested <a> round-trip)', () => {
+  // The server escapes the HTML parser's structural hazards (nested <a>
+  // re-parents on re-parse); the mirror must rename the placeholders back so
+  // its tree is EXACTLY the live tree and DOM-path click mapping stays valid.
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root">' +
+        '<x-a class="monaco-button" aria-label="Collapse Todos">' +
+        '<div class="todo-clear-button-container">' +
+        '<x-a class="monaco-button" aria-label="Clear">×</x-a>' +
+        '</div></x-a></div>',
+    });
+    const root = pane.children[0];
+    const outer = root.children[0];
+    assert.equal(outer.tagName, 'A', 'outer x-a restored to <a>');
+    assert.equal(outer.getAttribute('aria-label'), 'Collapse Todos');
+    const container = outer.children[0];
+    assert.equal(container.getAttribute('class'), 'todo-clear-button-container');
+    const inner = container.children[0];
+    assert.equal(inner.tagName, 'A', 'inner x-a restored to <a>');
+    assert.equal(inner.getAttribute('aria-label'), 'Clear');
+    assert.equal(inner.children[0].data, '×');
+  } finally { uninstallGlobals(); }
+});
+
 test('mirror: rootStyle is applied to the pane except size properties', () => {
   const { pane, ws } = setup();
   try {

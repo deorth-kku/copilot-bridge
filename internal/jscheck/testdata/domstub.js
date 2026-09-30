@@ -105,8 +105,16 @@ class El {
     if (i >= 0) this.attributes.splice(i, 1);
     delete this.attributes[n];
   }
-  appendChild(c) { c.parentElement = this; this.children.push(c); return c; }
+  // Real-DOM move semantics: adopting a node detaches it from its old
+  // parent (appendChild/insertBefore are moves, not clones).
+  appendChild(c) {
+    if (c.parentElement) c.parentElement.removeChild(c);
+    c.parentElement = this;
+    this.children.push(c);
+    return c;
+  }
   insertBefore(c, ref) {
+    if (c.parentElement) c.parentElement.removeChild(c);
     const i = ref === null ? this.children.length : this.children.indexOf(ref);
     if (i < 0) { c.parentElement = this; this.children.push(c); return c; }
     c.parentElement = this;
@@ -224,7 +232,7 @@ function parseHTML(html) {
         if (stack[s]._tag === tag) { stack.length = s; break; }
       }
     } else {
-      const m = inner.match(/^([a-zA-Z][a-zA-Z0-9]*)([\s\S]*)$/);
+      const m = inner.match(/^([a-zA-Z][a-zA-Z0-9-]*)([\s\S]*)$/);
       if (m) {
         const tag = m[1].toLowerCase();
         const attrs = {};
@@ -267,7 +275,7 @@ class Template extends El {
 // --- selector engine (class / tag / [attr] with ' ', '>', ',' combinators) ---
 
 function parseSimple(part) {
-  const tag = (part.match(/^[a-zA-Z][a-zA-Z0-9]*/) || [null])[0];
+  const tag = (part.match(/^[a-zA-Z][a-zA-Z0-9-]*/) || [null])[0];
   const classes = [...part.matchAll(/\.([\w-]+)/g)].map(m => m[1]);
   const attrs = [...part.matchAll(/\[([\w-]+)(?:=["']([^"']*)["'])?\]/g)].map(m => [m[1], m[2]]);
   return { tag, classes, attrs };

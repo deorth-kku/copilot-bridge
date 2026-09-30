@@ -5,7 +5,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { El, makeDocument, makeWindow, makeGetComputedStyle, installGlobals, uninstallGlobals } = require('../domstub.js');
+const { El, Text, makeDocument, makeWindow, makeGetComputedStyle, installGlobals, uninstallGlobals } = require('../domstub.js');
 const htmlExpr = require('../modules/html_expr.js');
 
 // Pane with TWO monaco-lists: the chat list (expanded, scrollable room)
@@ -47,7 +47,9 @@ function buildPane({ popup = false } = {}) {
   sessList.appendChild(new El('div', { attrs: { class: 'monaco-scrollable-element' }, scrollHeight: 500, clientHeight: 500 }));
   pane.appendChild(sessList);
 
-  pane.appendChild(new El('a', { attrs: { class: 'model-picker-name' }, text: 'Qwen3.8 27B' }));
+  const picker = new El('a', { attrs: { class: 'model-picker-name' } });
+  picker.appendChild(new Text('Qwen3.8 27B'));
+  pane.appendChild(picker);
   root.appendChild(pane);
 
   if (popup) {
@@ -55,6 +57,7 @@ function buildPane({ popup = false } = {}) {
     hidden.outerHTML = '<div class="context-view hidden"></div>';
     const cv = new El('div', { attrs: { class: 'context-view' }, rect: { left: 110, top: 80, width: 120, height: 60 } });
     cv.outerHTML = '<div class="context-view">menu</div>';
+    cv.appendChild(new Text('menu'));
     root.appendChild(hidden);
     root.appendChild(cv);
   }
@@ -86,7 +89,44 @@ test('htmlExpr: selector list — first match wins, later ones tried on miss', (
   try {
     const r = htmlExpr(['.nope', '.chat-viewpane-container']);
     assert.equal(r.err, undefined);
-    assert.equal(r.html, '<div class="chat-viewpane-container">…</div>');
+    // safeHTML serializes the tree (a -> x-a, text as child nodes).
+    assert.equal(r.html,
+      '<div class="chat-viewpane-container">' +
+      '<div class="interactive-list"><div class="monaco-list">' +
+      '<div class="monaco-scrollable-element"><div class="monaco-list-rows">' +
+      '<div class="monaco-list-row"></div><div class="monaco-list-row"></div>' +
+      '</div></div></div></div>' +
+      '<div class="monaco-list"><div class="monaco-scrollable-element"></div></div>' +
+      '<x-a class="model-picker-name">Qwen3.8 27B</x-a>' +
+      '</div>');
+  } finally { uninstallGlobals(); }
+});
+
+test('htmlExpr: nested <a> serializes as nested x-a (parser-safe round-trip)', () => {
+  // The live "Collapse Todos" control is an <a> wrapping a div that
+  // contains a nested <a class="monaco-button">. The HTML parser re-parents
+  // that nesting on re-parse, so the serializer must escape both <a> tags.
+  const root = new El('div');
+  const pane = new El('div', { attrs: { class: 'chat-viewpane-container' } });
+  const outer = new El('a', { attrs: { class: 'monaco-button', 'aria-label': 'Collapse Todos' } });
+  const container = new El('div', { attrs: { class: 'todo-clear-button-container' } });
+  const inner = new El('a', { attrs: { class: 'monaco-button', 'aria-label': 'Clear' } });
+  inner.appendChild(new Text('×'));
+  container.appendChild(inner);
+  outer.appendChild(container);
+  pane.appendChild(outer);
+  root.appendChild(pane);
+  const doc = makeDocument(root);
+  installGlobals(doc, makeWindow(doc));
+  try {
+    const r = htmlExpr(['.chat-viewpane-container']);
+    assert.equal(r.err, undefined);
+    assert.equal(r.html,
+      '<div class="chat-viewpane-container">' +
+      '<x-a class="monaco-button" aria-label="Collapse Todos">' +
+      '<div class="todo-clear-button-container">' +
+      '<x-a class="monaco-button" aria-label="Clear">×</x-a>' +
+      '</div></x-a></div>');
   } finally { uninstallGlobals(); }
 });
 

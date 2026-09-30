@@ -341,14 +341,50 @@ module.exports = (selectors) => {
     if (cv) {
       const cr = cv.getBoundingClientRect();
       popup = {
-        html: cv.outerHTML,
+        html: safeHTML(cv),
         left: cr.left - r.left, top: cr.top - r.top,
         width: cr.width, height: cr.height,
       };
     }
   } catch (e) {}
+  // Serialize the pane subtree with the HTML parser's structural hazards
+  // escaped: <a>, <button> and <form> are emitted as x-a / x-button /
+  // x-form. The HTML parser re-parents nested <a> (adoption agency) and
+  // force-closes nested <button>/<form>, so a plain outerHTML round-trip
+  // does NOT reproduce the live tree whenever one of these tags is nested
+  // (VS Code's "Collapse Todos" <a> wraps a nested <a class="monaco-button">
+  // — the clear-all button). The mirror's click mapping resolves DOM paths
+  // against the LIVE tree, so the mirror's parsed tree must equal the live
+  // tree; custom element names have no special parsing rules and round-trip
+  // exactly. The mirror renames the placeholders back after parsing
+  // (restoreEscaped in the page JS).
+  function safeHTML(el) {
+    var out = '';
+    (function walk(n) {
+      if (n.nodeType === 1) {
+        var t = n.tagName.toLowerCase();
+        // Emit lowercase names (HTML source form): the parser's foreign-
+        // content adjustment table restores standard SVG/MathML casing.
+        var name = (t === 'a' || t === 'button' || t === 'form') ? 'x-' + t : t;
+        out += '<' + name;
+        for (var i = 0; i < n.attributes.length; i++) {
+          var a = n.attributes[i];
+          out += ' ' + a.name + '="' + String(a.value).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '"';
+        }
+        out += '>';
+        // <template> keeps its children in a separate content fragment.
+        var kids = (t === 'template') ? n.content : n;
+        var cs = kids.childNodes;
+        for (var ci = 0; ci < cs.length; ci++) walk(cs[ci]);
+        out += '</' + name + '>';
+      } else if (n.nodeType === 3) {
+        out += String(n.data).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+    })(el);
+    return out;
+  }
   return {
-    html: el.outerHTML,
+    html: safeHTML(el),
     rootStyle: rootStyle,
     themeVars: themeVars,
     themeBg: themeBg,

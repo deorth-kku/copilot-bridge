@@ -254,7 +254,29 @@
   function parseFragment(html) {
     var tpl = document.createElement('template');
     tpl.innerHTML = html;
-    return tpl.content.firstElementChild;
+    var root = tpl.content.firstElementChild;
+    if (root) restoreEscaped(root);
+    return root;
+  }
+
+  // The server escapes the HTML parser's structural hazards in the extracted
+  // html: <a>, <button> and <form> arrive as x-a / x-button / x-form (the
+  // parser re-parents nested <a> and force-closes nested <button>/<form>, so
+  // a plain round-trip would not reproduce the live tree). Rename the
+  // placeholders back to their real tag names so the mirror's tree is
+  // EXACTLY the live tree — the click mapping resolves DOM paths against
+  // live, so any tree-shape difference lands clicks on the wrong element.
+  function restoreEscaped(root) {
+    var es = root.querySelectorAll('x-a, x-button, x-form');
+    for (var i = 0; i < es.length; i++) {
+      var el = es[i];
+      var real = document.createElement(el.tagName.toLowerCase().replace(/^x-/, ''));
+      for (var j = 0; j < el.attributes.length; j++) {
+        real.setAttribute(el.attributes[j].name, el.attributes[j].value);
+      }
+      while (el.childNodes.length) real.appendChild(el.childNodes[0]);
+      el.replaceWith(real);
+    }
   }
 
   function patchNode(oldEl, newEl) {
@@ -404,6 +426,8 @@
       } catch (err) {
         // Defensive: a full rebuild is always correct.
         pane.innerHTML = m.html;
+        var fr = pane.firstElementChild;
+        if (fr) restoreEscaped(fr);
       }
     } else if (newRoot) {
       pane.appendChild(newRoot);
