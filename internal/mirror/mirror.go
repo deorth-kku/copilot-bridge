@@ -273,6 +273,17 @@ func New(disc *cdp.Discovery, log *slog.Logger, addr string, selectors []string,
 		upgrader: websocket.Upgrader{
 			// Local-only tool; accept any origin (127.0.0.1 / localhost).
 			CheckOrigin: func(*http.Request) bool { return true },
+			// The first state frame carries the extracted workbench CSS
+			// (~2.5MB of highly repetitive rules) plus the pane HTML, which
+			// deflate ~6x. Browsers negotiate permessage-deflate by default,
+			// so this is the single biggest win on a weak network: the
+			// initial frame drops from ~2.8MB to well under 500KB. Clients
+			// that do not offer the extension are unaffected.
+			EnableCompression: true,
+			// 64KB instead of the 4KB default: a multi-hundred-KB frame is
+			// then emitted as a handful of frames instead of ~120, cutting
+			// write syscalls on the hot broadcast path.
+			WriteBufferSize: 64 << 10,
 		},
 	}
 	// The workspace list is loaded once up front, then hot-reloaded via
@@ -352,8 +363,7 @@ func (m *Mirror) handlePage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(pageHTML))
+	writeStaticHTML(w, r, pageHTML, mirrorPageGz)
 }
 
 // memReporter logs process memory and the image-cache size every 30s.

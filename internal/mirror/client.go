@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"compress/flate"
 	"encoding/json/v2"
 	"net/http"
 	"strings"
@@ -16,6 +17,12 @@ func (m *Mirror) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// Level 6 rather than gorilla's default level 1: the CSS frame is
+	// megabytes of repetitive rules, and the extra ~20% ratio (2.8MB ->
+	// 470KB instead of 590KB) is worth ~7ms of CPU on a payload this size.
+	// Small streaming frames pay well under a millisecond either way.
+	// A no-op when the client did not negotiate permessage-deflate.
+	_ = conn.SetCompressionLevel(flate.DefaultCompression)
 	c := &client{conn: conn, send: make(chan any, 64), done: make(chan struct{}), logger: m.log.With("remote", r.RemoteAddr)}
 	// A workspaces-page tab (?page=workspaces) only consumes the workspace
 	// list pushes; it never mirrors a pane.

@@ -23,7 +23,10 @@ func (m *Mirror) handleImage(w http.ResponseWriter, r *http.Request) {
 	}
 	m.log.Debug("image: serve hit", "key", key, "bytes", len(e.data), "type", e.contentType)
 	w.Header().Set("Content-Type", e.contentType)
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	// The path segment is the hash of the source URL, so the bytes at a
+	// given /img/<hash> can never change: cache them for a year and skip
+	// revalidation entirely on reloads.
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	_, _ = w.Write(e.data)
 }
 
