@@ -32,11 +32,11 @@ func TestLoadPostsToServerRoot(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	l := New(30*time.Second, discardLog, nil)
+	l := New(30*time.Second, discardLog, nil, false)
 	// baseUrl carries a path that must be STRIPPED: the load endpoint
 	// is relative to the server root, not to baseUrl.
 	m := config.Model{ID: "Qwen3.8-27B", BaseURL: srv.URL + "/v1"}
-	l.Load(m)
+	l.Load(m, nil)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -60,10 +60,10 @@ func TestLoadCooldownSkips(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	l := New(30*time.Second, discardLog, nil)
+	l := New(30*time.Second, discardLog, nil, false)
 	m := config.Model{ID: "m1", BaseURL: srv.URL}
-	l.Load(m)
-	l.Load(m) // within cooldown -> skipped
+	l.Load(m, nil)
+	l.Load(m, nil) // within cooldown -> skipped
 	if n != 1 {
 		t.Fatalf("expected 1 request after cooldown skip, got %d", n)
 	}
@@ -77,9 +77,9 @@ func TestLoadDifferentModelsIndependent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	l := New(30*time.Second, discardLog, nil)
-	l.Load(config.Model{ID: "m1", BaseURL: srv.URL})
-	l.Load(config.Model{ID: "m2", BaseURL: srv.URL})
+	l := New(30*time.Second, discardLog, nil, false)
+	l.Load(config.Model{ID: "m1", BaseURL: srv.URL}, nil)
+	l.Load(config.Model{ID: "m2", BaseURL: srv.URL}, nil)
 	if n != 2 {
 		t.Fatalf("expected 2 requests for different models, got %d", n)
 	}
@@ -100,11 +100,11 @@ func TestLoadSameIDDifferentServersIndependent(t *testing.T) {
 	}))
 	defer srv2.Close()
 
-	l := New(30*time.Second, discardLog, nil)
+	l := New(30*time.Second, discardLog, nil, false)
 	// Same model id on two different servers: the (server, id) keys differ,
 	// so each server gets its own load (no cross-server cooldown sharing).
-	l.Load(config.Model{ID: "m1", BaseURL: srv1.URL})
-	l.Load(config.Model{ID: "m1", BaseURL: srv2.URL})
+	l.Load(config.Model{ID: "m1", BaseURL: srv1.URL}, nil)
+	l.Load(config.Model{ID: "m1", BaseURL: srv2.URL}, nil)
 	if n1 != 1 || n2 != 1 {
 		t.Fatalf("expected 1 request per server, got srv1=%d srv2=%d", n1, n2)
 	}
@@ -121,11 +121,11 @@ func TestLoadAlreadyRunningIsNormal(t *testing.T) {
 
 	// short cooldown: if "already running" wrongly marked the endpoint
 	// as non-llama, the 2nd call would be skipped and n would stay 1.
-	l := New(10*time.Millisecond, discardLog, nil)
+	l := New(10*time.Millisecond, discardLog, nil, false)
 	m := config.Model{ID: "m1", BaseURL: srv.URL}
-	l.Load(m)
+	l.Load(m, nil)
 	time.Sleep(20 * time.Millisecond)
-	l.Load(m)
+	l.Load(m, nil)
 	if n != 2 {
 		t.Fatalf("expected 2 requests (already running is normal), got %d", n)
 	}
@@ -158,8 +158,8 @@ func TestLoadRespectsProxy(t *testing.T) {
 	defer proxy.Close()
 
 	proxyURL, _ := url.Parse(proxy.URL)
-	l := New(30*time.Second, discardLog, func(*http.Request) (*url.URL, error) { return proxyURL, nil })
-	l.Load(config.Model{ID: "m1", BaseURL: target.URL})
+	l := New(30*time.Second, discardLog, func(*http.Request) (*url.URL, error) { return proxyURL, nil }, false)
+	l.Load(config.Model{ID: "m1", BaseURL: target.URL}, nil)
 
 	if proxyN != 1 {
 		t.Fatalf("expected request to go through the proxy, proxy saw %d", proxyN)
@@ -192,8 +192,8 @@ func TestLoadClassifiesResponsesStrictly(t *testing.T) {
 			defer srv.Close()
 
 			var buf bytes.Buffer
-			l := New(30*time.Second, slog.New(slog.NewTextHandler(&buf, nil)), nil)
-			l.Load(config.Model{ID: "m1", BaseURL: srv.URL})
+			l := New(30*time.Second, slog.New(slog.NewTextHandler(&buf, nil)), nil, false)
+			l.Load(config.Model{ID: "m1", BaseURL: srv.URL}, nil)
 			if !strings.Contains(buf.String(), tc.wantLog) {
 				t.Fatalf("expected %q in log, got: %s", tc.wantLog, buf.String())
 			}
@@ -231,10 +231,10 @@ func TestLoadCooldownOnlyOnCorrectResponse(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			l := New(30*time.Second, discardLog, nil)
+			l := New(30*time.Second, discardLog, nil, false)
 			m := config.Model{ID: "m1", BaseURL: srv.URL}
-			l.Load(m)
-			l.Load(m) // immediately, still inside the 30s cooldown window
+			l.Load(m, nil)
+			l.Load(m, nil) // immediately, still inside the 30s cooldown window
 
 			want := 1
 			if tc.wantSecond {
@@ -244,5 +244,69 @@ func TestLoadCooldownOnlyOnCorrectResponse(t *testing.T) {
 				t.Fatalf("expected %d requests, got %d", want, n)
 			}
 		})
+	}
+}
+
+// TestLoadUnloadsOthers pins the unload-others feature: when the loader is
+// created with unloadOthers, Load sends a /models/unload request to each
+// other llama.cpp model (at the server ROOT) before the load. When disabled,
+// no unload request is sent.
+func TestLoadUnloadsOthers(t *testing.T) {
+	var mu sync.Mutex
+	var unloads, loads int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		switch r.URL.Path {
+		case "/models/unload":
+			unloads++
+		case "/models/load":
+			loads++
+		}
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success": true}`))
+	}))
+	defer srv.Close()
+
+	// Two other models: one at the root, one with a baseUrl path that must
+	// be stripped back to the root for the unload endpoint.
+	others := []config.Model{
+		{ID: "other1", BaseURL: srv.URL},
+		{ID: "other2", BaseURL: srv.URL + "/v1"},
+	}
+	m := config.Model{ID: "target", BaseURL: srv.URL}
+
+	// Enabled: one unload per other model, then the load.
+	l := New(30*time.Second, discardLog, nil, true)
+	l.Load(m, others)
+
+	mu.Lock()
+	if unloads != 2 {
+		t.Fatalf("expected 2 unload requests, got %d", unloads)
+	}
+	if loads != 1 {
+		t.Fatalf("expected 1 load request, got %d", loads)
+	}
+	mu.Unlock()
+
+	// Disabled: no unload requests, only the load.
+	var u2, l2 int
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models/unload":
+			u2++
+		case "/models/load":
+			l2++
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv2.Close()
+	ld2 := New(30*time.Second, discardLog, nil, false)
+	ld2.Load(config.Model{ID: "target", BaseURL: srv2.URL}, others)
+	if u2 != 0 {
+		t.Fatalf("expected 0 unload requests when disabled, got %d", u2)
+	}
+	if l2 != 1 {
+		t.Fatalf("expected 1 load request, got %d", l2)
 	}
 }

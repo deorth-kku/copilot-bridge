@@ -42,7 +42,7 @@ func TestProcessEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ld := loader.New(30*time.Second, discardLog, nil)
+	ld := loader.New(30*time.Second, discardLog, nil, false)
 	log := discardLog
 
 	// startup empty snapshot (POC-observed behavior) -> no load

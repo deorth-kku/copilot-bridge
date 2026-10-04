@@ -43,9 +43,10 @@ func main() {
 	codePath := flag.String("code", "", "path to the code CLI (empty = auto-detect; workspaces page)")
 	sshConfig := flag.String("ssh-config", defaultSSHConfigPath(), "path to the SSH client config (the hook endpoint maps a remote request's source host to a machine; empty disables it)")
 	stopGrace := flag.Duration("stop-grace", 10*time.Second, "grace window after a Stop hook event before the armed power-off fires (a new SessionStart inside it cancels this stop's pending power-off)")
+	unloadOthers := flag.Bool("unload-others", false, "before loading a llama.cpp model, send /models/unload to every other llama.cpp model (default off)")
 	flag.Parse()
 
-	poweredOff, err := run(*cdpAddr, *settingsPath, *cooldown, *debounce, *logPath, *verbose, *web, *pane, *window, *storagePath, *codePath, *sshConfig, *stopGrace)
+	poweredOff, err := run(*cdpAddr, *settingsPath, *cooldown, *debounce, *logPath, *verbose, *web, *pane, *window, *storagePath, *codePath, *sshConfig, *stopGrace, *unloadOthers)
 	if err != nil {
 		// GUI builds have no console; the error is also in the log file
 		// (if it could be opened).
@@ -61,7 +62,7 @@ func main() {
 
 // run returns poweredOff: true when the armed power-off trigger fired
 // (the caller then powers off the machine after the graceful shutdown).
-func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter, storagePath, codePath, sshConfigPath string, stopGrace time.Duration) (bool, error) {
+func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath string, verbose bool, webAddr, paneSel, windowFilter, storagePath, codePath, sshConfigPath string, stopGrace time.Duration, unloadOthers bool) (bool, error) {
 	if dir := filepath.Dir(logPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return false, fmt.Errorf("create log dir: %w", err)
@@ -111,7 +112,7 @@ func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath
 
 	// The loader resolves the proxy per-request from the current atomic
 	// snapshot, so http.proxy / http.noProxy changes hot-reload too.
-	ld := loader.New(cooldown, log, store.ProxyFunc)
+	ld := loader.New(cooldown, log, store.ProxyFunc, unloadOthers)
 	events := make(chan cdp.Event, 256)
 	disc := cdp.NewDiscovery(cdpAddr, events, log, int(debounce.Milliseconds()))
 	go disc.Run(ctx)
@@ -169,11 +170,25 @@ func processEvent(ev cdp.Event, store *config.Store, ld *loader.Loader, log *slo
 	}
 	log.Info("input event", "window", ev.Window, "model", ev.Model,
 		"effort", ev.Effort, "mode", ev.Mode, "inputLen", len(input))
+	// When the loader is configured to unload others, gather every other
+	// llama.cpp model so Load can send /models/unload to each before loading
+	// this one. The settings table keys each model by both its id and its
+	// display name, so dedupe by id to avoid duplicate unload requests.
+	var others []config.Model
+	if seen := make(map[string]bool); ld.UnloadOthers() {
+		for _, om := range store.Load().Models {
+			if om.Optimization != "llama.cpp" || om.ID == m.ID || seen[om.ID] {
+				continue
+			}
+			seen[om.ID] = true
+			others = append(others, om)
+		}
+	}
 	// Async: Load does a blocking HTTP POST (up to the client timeout).
 	// A goroutine keeps the event loop responsive for all windows; the
 	// mutex-gated cooldown inside the loader still dedupes concurrent
 	// requests per model.
-	go ld.Load(m)
+	go ld.Load(m, others)
 }
 
 // vscodeUserDir returns the VS Code user data directory for the current
