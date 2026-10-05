@@ -175,12 +175,15 @@ func processEvent(ev cdp.Event, store *config.Store, ld *loader.Loader, log *slo
 	// this one. The settings table keys each model by both its id and its
 	// display name, so dedupe by id to avoid duplicate unload requests.
 	var others []config.Model
-	if seen := make(map[string]bool); ld.UnloadOthers() {
+	if ld.UnloadOthers() {
+		seen := make(map[string]struct{})
 		for _, om := range store.Load().Models {
-			if om.Optimization != "llama.cpp" || om.ID == m.ID || seen[om.ID] {
+			if _, ok := seen[om.BaseURL]; ok ||
+				(om.ID == m.ID && om.BaseURL == m.BaseURL) ||
+				om.Optimization != "llama.cpp" {
 				continue
 			}
-			seen[om.ID] = true
+			seen[om.BaseURL] = struct{}{}
 			others = append(others, om)
 		}
 	}
