@@ -121,18 +121,109 @@ func (c *client) writeMsg(msg any) error {
 	return nil
 }
 
+// writePump drains the client's send queue and writes the frames to the
+// connection. Before writing, the pending backlog is COALESCED into the
+// smallest frame set that carries the same end state (coalesce): a slow
+// client (throttled background tab, slow network) then catches up on the
+// LATEST state in one frame instead of replaying every intermediate frame
+// the publisher queued while it was falling behind.
 func (c *client) writePump() {
 	for {
 		select {
 		case <-c.done:
 			return
-		case msg := <-c.send:
-			err := c.writeMsg(msg)
-			if err != nil {
-				return
+		case first := <-c.send:
+			frames, drained := c.coalesce(first)
+			if drained > 1 {
+				c.logger.Debug("writePump: coalesced backlog", "frames", drained, "sent", len(frames))
+			}
+			for _, f := range frames {
+				if err := c.writeMsg(f); err != nil {
+					return
+				}
 			}
 		}
 	}
+}
+
+// coalesce folds the client's pending frames (the first plus everything
+// still queued) into the smallest set that carries the same end state: the
+// LATEST frame of each message type, with stateMsg frames merged field-wise
+// (mergeState). Server -> browser frames are all latest-wins snapshots — a
+// state frame's rect/scroll/windows/... fields describe the pane at send
+// time, and its HTML/CSS/popup payloads are full snapshots the browser
+// patches onto its current DOM — so an intermediate frame carries no
+// information the merged frame lacks.
+func (c *client) coalesce(first any) ([]any, int) {
+	var out []any
+	drained := 0
+	keep := func(msg any) {
+		drained++
+		for i, f := range out {
+			switch f := f.(type) {
+			case stateMsg:
+				if n, ok := msg.(stateMsg); ok {
+					out[i] = mergeState(f, n)
+					return
+				}
+			case workspacesMsg:
+				if n, ok := msg.(workspacesMsg); ok {
+					out[i] = n
+					return
+				}
+			case shutdownMsg:
+				if n, ok := msg.(shutdownMsg); ok {
+					out[i] = n
+					return
+				}
+			}
+		}
+		out = append(out, msg)
+	}
+	keep(first)
+	for {
+		select {
+		case next := <-c.send:
+			keep(next)
+		default:
+			return out, drained
+		}
+	}
+}
+
+// mergeState folds a newer state frame over an older one. The newer frame's
+// always-present fields (rect, scroll, windows, err, ...) win; its full
+// payloads fall back to the older frame's when absent, so a payload-less
+// follow-up (a scroll-only update, or a position-only popup follow) stays
+// applicable on top of the older frame's payloads. Two payload invariants
+// make this safe on the browser side: a changed cssVersion/themeVer always
+// arrives WITH its payload (the phase-2 CSS follow, a theme change), and
+// the browser patches HTML onto its CURRENT DOM (a full-snapshot diff), so
+// skipping intermediate HTML changes nothing about the end state.
+func mergeState(old, new stateMsg) stateMsg {
+	if new.HTML == "" {
+		new.HTML = old.HTML
+	}
+	if new.CSS == "" {
+		new.CSS = old.CSS
+	}
+	if new.ThemeVars == "" {
+		new.ThemeVars = old.ThemeVars
+		new.ThemeBg = old.ThemeBg
+	}
+	if new.Windows == nil {
+		new.Windows = old.Windows
+	}
+	// A nil popup in the NEWER frame means "the popup closed" — that is
+	// intentional and must not be resurrected from the older frame. A
+	// position-only popup (its HTML changed earlier) inherits the latest
+	// payload from the older frame.
+	if new.Popup != nil && new.Popup.HTML == "" && old.Popup != nil && old.Popup.HTML != "" {
+		p := *new.Popup
+		p.HTML = old.Popup.HTML
+		new.Popup = &p
+	}
+	return new
 }
 
 func (m *Mirror) addClient(c *client) {
