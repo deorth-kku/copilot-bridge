@@ -195,6 +195,17 @@ const pageCSS = `  html, body {
       var(--vscode-chat-thinkingShimmer) 50%,
       var(--vscode-descriptionForeground) 70%,
       var(--vscode-descriptionForeground) 100%) !important;
+    background-size: 400% 100% !important;
+    -webkit-background-clip: text !important;
+    background-clip: text !important;
+    -webkit-text-fill-color: transparent !important;
+    color: transparent !important;
+    animation: chat-thinking-shimmer 2s linear infinite !important;
+    will-change: background-position;
+  }
+  @keyframes chat-thinking-shimmer {
+    0% { background-position: 120% 0; }
+    100% { background-position: -120% 0; }
   }
   /* The live chat-input cursor blinks via a 500ms JS timer that toggles the
      cursor element's inline visibility (Monaco ViewCursors, default 'blink'
