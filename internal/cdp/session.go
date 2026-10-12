@@ -90,8 +90,9 @@ type Session struct {
 	// pending maps a command id to the channel its Call is waiting on.
 	pending map[int]chan callResult
 
-	done atomic.Bool
-	last string // dedupe: last payload JSON already emitted
+	done    atomic.Bool
+	emitted atomic.Bool // false while the next event is an (re)inject-time snapshot
+	last    string      // dedupe: last payload JSON already emitted
 
 	// CDP traffic accounting for the per-5s summary in noteMsg: a sudden
 	// rise in message rate (binding floods, console spam, event storms)
@@ -292,6 +293,16 @@ func (s *Session) handle(raw []byte) {
 				continue
 			}
 			s.last = p.Payload
+			// The first event after (re)injection is the attach-time
+			// snapshot of the page's current state (VS Code may have
+			// restored text from the previous session). The user hasn't
+			// typed anything yet, so it must not trigger a model load.
+			// The guard is reset by frameNavigated (re-injection) and by
+			// reconnection (a fresh Session).
+			if !s.emitted.Swap(true) {
+				s.log.Debug("skip: startup snapshot", "window", s.Title())
+				continue
+			}
 			var st pageState
 			if err := json.Unmarshal([]byte(p.Payload), &st); err != nil {
 				continue
@@ -326,6 +337,11 @@ func (s *Session) handle(raw []byte) {
 			// request for the Run goroutine: inject uses Call, which waits
 			// for responses the read loop is the only deliverer of, so it
 			// must not run here, and it must not race other injections.
+			// The re-injected script always emits the current state at the
+			// end (restored chat text included), so the first event after
+			// this reload is another attach-time snapshot: reset the guard
+			// so it is skipped too.
+			s.emitted.Store(false)
 			s.log.Info("frame navigated, re-injecting", "window", s.Title())
 			select {
 			case s.nav <- struct{}{}:

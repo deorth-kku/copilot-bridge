@@ -45,7 +45,7 @@ func TestProcessEvent(t *testing.T) {
 	ld := loader.New(30*time.Second, discardLog, nil, false)
 	log := discardLog
 
-	// startup empty snapshot (POC-observed behavior) -> no load
+	// empty input -> no load
 	processEvent(cdp.Event{Window: "w", Input: "", Model: "Qwen3.8 27B"}, settings, ld, log)
 	// nbsp/whitespace only -> no load
 	processEvent(cdp.Event{Window: "w", Input: "  \u00a0 ", Model: "Qwen3.8 27B"}, settings, ld, log)

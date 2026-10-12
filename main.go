@@ -144,9 +144,14 @@ func run(cdpAddr, settingsPath string, cooldown, debounce time.Duration, logPath
 // processEvent handles one chat input event: skip empty input / missing
 // model, look the model up in the settings table, then request a load
 // (cooldown-gated inside the loader).
+//
+// Note: the attach-time startup snapshot (restored state from the previous
+// session) is already filtered out per-session inside cdp.Session, so the
+// first event that reaches here is real user input.
 func processEvent(ev cdp.Event, store *config.Store, ld *loader.Loader, log *slog.Logger) {
 	// Monaco inserts nbsp; normalize before the emptiness check.
 	input := strings.TrimSpace(strings.ReplaceAll(ev.Input, "\u00a0", " "))
+
 	if input == "" {
 		log.Debug("skip: empty input", "window", ev.Window)
 		return

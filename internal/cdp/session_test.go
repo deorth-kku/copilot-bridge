@@ -23,7 +23,8 @@ import (
 //     then a real input event,
 //     then Page.frameNavigated (workbench reload),
 //  3. client: addBinding + evaluate for both bindings (re-injection)
-//  4. page:   bindingCalled with final input
+//  4. page:   bindingCalled with RESTORED input (post-reload snapshot,
+//     must be skipped), then a real input event
 func startMockPage(t *testing.T) (wsURL string, methods chan string) {
 	t.Helper()
 	methods = make(chan string, 32)
@@ -69,7 +70,10 @@ func startMockPage(t *testing.T) (wsURL string, methods chan string) {
 						"params": map[string]any{"frame": map[string]any{"id": "main", "url": "vscode-workbench://vscode-app/"}},
 					})
 				} else {
-					// re-injection after frameNavigated
+					// re-injection after frameNavigated: the script always
+					// emits the current state first (restored text — must be
+					// skipped), then a real input event.
+					send(`{"input":"restored","model":"Qwen3.8 27B","effort":null,"mode":null}`)
 					send(`{"input":"final","model":"Qwen3.8 27B","effort":null,"mode":null}`)
 				}
 			}
@@ -113,22 +117,17 @@ func TestSessionHandshakeAndEvents(t *testing.T) {
 		}
 	}
 
-	// 2. startup empty-input snapshot is forwarded (the POC-verified case)
+	// 2. startup empty-input snapshot is SKIPPED (attach-time restored
+	//    state); the first forwarded event is the real input, with all fields.
 	ev := readEvent(t, events)
-	if ev.Input != "" {
-		t.Errorf("first event should be the startup empty snapshot, got %q", ev.Input)
+	if ev.Input != "hello" || ev.Model != "Qwen3.8 27B" || ev.Window != "Test Window" {
+		t.Errorf("unexpected first forwarded event: %+v", ev)
 	}
-	if ev.Model != "Qwen3.8 27B" || ev.Window != "Test Window" {
-		t.Errorf("unexpected first event: %+v", ev)
-	}
-
-	// 3. real input event forwarded with all fields
-	ev = readEvent(t, events)
-	if ev.Input != "hello" || ev.Effort != "high" || ev.Mode != "agent" {
-		t.Errorf("unexpected second event: %+v", ev)
+	if ev.Effort != "high" || ev.Mode != "agent" {
+		t.Errorf("unexpected first forwarded event fields: %+v", ev)
 	}
 
-	// 4. frameNavigated triggers re-injection of BOTH bindings
+	// 3. frameNavigated triggers re-injection of BOTH bindings
 	for _, want := range []string{
 		"Runtime.addBinding", "Runtime.evaluate",
 		"Runtime.addBinding", "Runtime.evaluate",
@@ -143,10 +142,11 @@ func TestSessionHandshakeAndEvents(t *testing.T) {
 		}
 	}
 
-	// 5. event after re-injection is delivered
+	// 4. the post-reload snapshot ("restored") is skipped; the real
+	// event after re-injection is delivered
 	ev = readEvent(t, events)
 	if ev.Input != "final" {
-		t.Errorf("unexpected third event: %+v", ev)
+		t.Errorf("unexpected second forwarded event: %+v", ev)
 	}
 
 	s.Stop()
@@ -234,6 +234,9 @@ func TestSessionTitleUpdateVisibleInEvents(t *testing.T) {
 	go s.Run(context.Background())
 	defer s.Stop()
 
+	// The first event a session emits is the attach-time snapshot and is
+	// skipped, so push a warmup before the events under test.
+	push <- `{"input":"","model":"M"}`
 	push <- `{"input":"a","model":"M"}`
 	ev := readEvent(t, events)
 	if ev.Window != "Original" {
