@@ -369,9 +369,22 @@ module.exports = (selectors) => {
         out += '<' + name;
         for (var i = 0; i < n.attributes.length; i++) {
           var a = n.attributes[i];
+          // <input>'s live value is a property, not an attribute: emit it
+          // once below (the attribute may be stale), so skip it here.
+          if (t === 'input' && a.name === 'value') continue;
           out += ' ' + a.name + '="' + String(a.value).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '"';
         }
+        // <input>/<textarea> carry their text in the value property, which
+        // attributes do not reflect: emit it so the mirror's copy shows the
+        // typed text (the askQuestion custom-answer box is a <textarea>;
+        // without this the mirror's copy is always empty).
+        if (t === 'input' && n.value) {
+          out += ' value="' + String(n.value).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '"';
+        }
         out += '>';
+        if (t === 'textarea' && n.value) {
+          out += String(n.value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
         // <template> keeps its children in a separate content fragment.
         var kids = (t === 'template') ? n.content : n;
         var cs = kids.childNodes;

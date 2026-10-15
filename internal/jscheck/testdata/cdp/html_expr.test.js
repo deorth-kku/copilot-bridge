@@ -130,6 +130,36 @@ test('htmlExpr: nested <a> serializes as nested x-a (parser-safe round-trip)', (
   } finally { uninstallGlobals(); }
 });
 
+test('htmlExpr: <textarea>/<input> values are emitted (askQuestion freeform box)', () => {
+  // The askQuestion custom-answer box is a plain <textarea> whose value is a
+  // property, not text content: safeHTML must emit it so the mirror's copy
+  // shows the typed text. <input> values are emitted as a value attribute.
+  const root = new El('div');
+  const pane = new El('div', { attrs: { class: 'chat-viewpane-container' } });
+  const qcontainer = new El('div', { attrs: { class: 'chat-question-input-container' } });
+  const ta = new El('textarea', { attrs: { class: 'chat-question-freeform-textarea' } });
+  ta.value = 'hello & <world>';
+  qcontainer.appendChild(ta);
+  const inp = new El('input', { attrs: { type: 'text' } });
+  inp.value = 'abc"def';
+  pane.appendChild(qcontainer);
+  pane.appendChild(inp);
+  root.appendChild(pane);
+  const doc = makeDocument(root);
+  installGlobals(doc, makeWindow(doc));
+  try {
+    const r = htmlExpr(['.chat-viewpane-container']);
+    assert.equal(r.err, undefined);
+    assert.equal(r.html,
+      '<div class="chat-viewpane-container">' +
+      '<div class="chat-question-input-container">' +
+      '<textarea class="chat-question-freeform-textarea">hello &amp; &lt;world&gt;</textarea>' +
+      '</div>' +
+      '<input type="text" value="abc&quot;def"></input>' +
+      '</div>');
+  } finally { uninstallGlobals(); }
+});
+
 test('htmlExpr: rect, cssFP, rootStyle', () => {
   buildPane();
   try {

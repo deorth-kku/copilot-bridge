@@ -432,28 +432,32 @@
     } else if (newRoot) {
       pane.appendChild(newRoot);
     }
-    // The live chat input's textarea (Monaco's ime-text-area) is readonly. In
-    // the mirror it must be editable, otherwise: focusing it does not bring
-    // up the mobile soft keyboard, and IME composition (e.g. Chinese pinyin)
-    // never starts, so compositionend never fires.
-    var box = pane.querySelector('.chat-input-container');
-    if (box) {
-      var inputs = box.querySelectorAll('textarea, [contenteditable="true"]');
+    // The live chat input's textarea (Monaco's ime-text-area) is readonly, and
+    // the askQuestion custom-answer box is a plain <textarea>. In the mirror
+    // both must be editable, otherwise: focusing them does not bring up the
+    // mobile soft keyboard, and IME composition (e.g. Chinese pinyin) never
+    // starts, so compositionend never fires. The freeform box is not readonly
+    // in live, but the shared handling is harmless.
+    var editBoxes = pane.querySelectorAll('.chat-input-container, .chat-question-input-container');
+    for (var bi = 0; bi < editBoxes.length; bi++) {
+      var inputs = editBoxes[bi].querySelectorAll('textarea, [contenteditable="true"]');
       for (var i = 0; i < inputs.length; i++) {
         inputs[i].removeAttribute('readonly');
         inputs[i].removeAttribute('aria-hidden');
         if (inputs[i].getAttribute('tabindex') === '-1') inputs[i].setAttribute('tabindex', '0');
       }
-      // If the patch replaced the previously focused input element (a large
-      // restructure), focus would be dropped (killing the soft keyboard /
-      // IME session); restore it. Usually the input survives in place and
-      // this is a no-op.
-      if (inputFocusWanted) {
-        var el = findInputIn(box);
-        if (el) {
-          inputFocusWanted = true;
-          try { el.focus({ preventScroll: true }); } catch (err) { el.focus(); }
-        }
+    }
+    // If the patch replaced the previously focused input element (a large
+    // restructure), focus would be dropped (killing the soft keyboard / IME
+    // session); restore it to the SAME container the user last focused.
+    // Usually the input survives in place and this is a no-op.
+    if (inputFocusWanted) {
+      var fbox = pane.querySelector(inputFocusWanted);
+      var el = fbox ? findInputIn(fbox) : null;
+      if (el) {
+        try { el.focus({ preventScroll: true }); } catch (err) { el.focus(); }
+      } else {
+        inputFocusWanted = '';
       }
     }
     // Re-apply the live content paddings BEFORE the scroll is restored:
@@ -1355,7 +1359,13 @@
   // browsers only show the soft keyboard when such an element is focused, so
   // on tap we focus the mirror's copy of it (the tap is also forwarded as
   // mouse events, which focuses the live input in VS Code).
-  var inputFocusWanted = false;
+  // The container class the user last focused ('.chat-input-container' or
+  // '.chat-question-input-container'), so a DOM patch can restore focus to the
+  // SAME input (a large restructure replaces the node and drops focus). '' =
+  // no input focused. The chat input and the askQuestion custom-answer box
+  // are separate containers that can both be present, so the specific one is
+  // remembered, not just a boolean.
+  var inputFocusWanted = '';
   var composing = false;
   function findInputIn(box) {
     if (!box) return null;
@@ -1367,11 +1377,24 @@
     }
     return null;
   }
+  // The editable input container for a click target: the chat input
+  // (.chat-input-container) OR the askQuestion custom-answer box
+  // (.chat-question-input-container). Both need the mirror's focus + editable
+  // handling, which is otherwise chat-input-only — without it the freeform
+  // box is never focused (mousedown's preventDefault blocks native focus) and
+  // the user cannot type a custom answer.
+  function inputContainer(target) {
+    return (target && target.closest)
+      ? target.closest('.chat-input-container, .chat-question-input-container')
+      : null;
+  }
   function focusInputAt(target) {
-    var box = (target && target.closest) ? target.closest('.chat-input-container') : null;
+    var box = inputContainer(target);
     var el = findInputIn(box);
     if (!el) return false;
-    inputFocusWanted = true;
+    inputFocusWanted = (box.className || '').indexOf('chat-question-input-container') >= 0
+      ? '.chat-question-input-container'
+      : '.chat-input-container';
     try { el.focus({ preventScroll: true }); } catch (err) { el.focus(); }
     return true;
   }
@@ -1623,7 +1646,7 @@
   pane.addEventListener('click', function (e) {
     if (touchMoved > 10) { touchMoved = 0; return; }
     if (!focusInputAt(e.target)) {
-      inputFocusWanted = false;
+      inputFocusWanted = '';
       pane.focus();
     }
   });

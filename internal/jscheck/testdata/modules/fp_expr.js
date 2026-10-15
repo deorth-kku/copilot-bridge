@@ -318,7 +318,16 @@ module.exports = (selectors) => {
         '|' + (inputFocused ? 1 : 0);
     }
   } catch (e) {}
-  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP + ':' + curFP + ':' + inputFP;
+  // The askQuestion custom-answer box is a plain <textarea> whose value is a
+  // property, not text content: fold its value into the fp so typing in it
+  // triggers a re-extract (the chat input's text is already in innerText, but
+  // the freeform box's is not — without this the mirror's copy stays empty).
+  let valFP = '';
+  try {
+    const qtas = el.querySelectorAll('.chat-question-freeform-textarea');
+    for (const q of qtas) valFP += (q.value || '') + '\u0001';
+  } catch (e) {}
+  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP + ':' + curFP + ':' + inputFP + ':' + valFP;
   return {
     fp: fp,
     cssFP: cssFP,

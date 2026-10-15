@@ -446,9 +446,22 @@ const htmlExpr = `(selectors) => {
         out += '<' + name;
         for (var i = 0; i < n.attributes.length; i++) {
           var a = n.attributes[i];
+          // <input>'s live value is a property, not an attribute: emit it
+          // once below (the attribute may be stale), so skip it here.
+          if (t === 'input' && a.name === 'value') continue;
           out += ' ' + a.name + '="' + String(a.value).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '"';
         }
+        // <input>/<textarea> carry their text in the value property, which
+        // attributes do not reflect: emit it so the mirror's copy shows the
+        // typed text (the askQuestion custom-answer box is a <textarea>;
+        // without this the mirror's copy is always empty).
+        if (t === 'input' && n.value) {
+          out += ' value="' + String(n.value).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '"';
+        }
         out += '>';
+        if (t === 'textarea' && n.value) {
+          out += String(n.value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
         // <template> keeps its children in a separate content fragment.
         var kids = (t === 'template') ? n.content : n;
         var cs = kids.childNodes;
@@ -669,7 +682,16 @@ const fpExpr = `(selectors) => {
         '|' + (inputFocused ? 1 : 0);
     }
   } catch (e) {}
-  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP + ':' + curFP + ':' + inputFP;
+  // The askQuestion custom-answer box is a plain <textarea> whose value is a
+  // property, not text content: fold its value into the fp so typing in it
+  // triggers a re-extract (the chat input's text is already in innerText, but
+  // the freeform box's is not — without this the mirror's copy stays empty).
+  let valFP = '';
+  try {
+    const qtas = el.querySelectorAll('.chat-question-freeform-textarea');
+    for (const q of qtas) valFP += (q.value || '') + '\u0001';
+  } catch (e) {}
+  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP + ':' + curFP + ':' + inputFP + ':' + valFP;
   return {
     fp: fp,
     cssFP: cssFP,

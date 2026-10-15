@@ -12,6 +12,7 @@ const {
   Event,
   makeDocument,
   makeWindow,
+  makeGetComputedStyle,
   installGlobals,
   uninstallGlobals,
   WebSocketStub,
@@ -42,7 +43,9 @@ function setup(opts = {}) {
   const doc = makeDocument(root);
   const win = makeWindow(doc, { host: '127.0.0.1:8123', search: opts.search });
   WebSocketStub.instances.length = 0;
-  installGlobals(doc, win);
+  // findInputIn checks getComputedStyle(el).display/visibility; an empty map
+  // (neither 'none' nor 'hidden') keeps every candidate input visible.
+  installGlobals(doc, win, { getComputedStyle: makeGetComputedStyle(() => ({})) });
   new Function(src)();
   const ws = WebSocketStub.instances.at(-1);
   ws.fireOpen();
@@ -1058,6 +1061,45 @@ test('mirror: input events forward text and clear the local textarea', () => {
     ta.dispatchEvent({ type: 'input', target: ta, data: 'hello', inputType: 'insertText' });
     assert.deepEqual(sent(ws).at(-1), { type: 'key', kind: 'insert', text: 'hello' });
     assert.equal(ta.value, '');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: mousedown on the askQuestion freeform box focuses it (custom answer)', () => {
+  // The custom-answer box is a <textarea> in .chat-question-input-container
+  // (NOT .chat-input-container). The chat-input-only focus handling used to
+  // miss it, so mousedown's preventDefault left it unfocused and typing did
+  // nothing. It must now be focused so keyboard events route to it.
+  const { pane, doc, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="chat-question-input-container">' +
+        '<textarea class="chat-question-freeform-textarea"></textarea>' +
+        '</div></div>',
+    });
+    const ta = pane.querySelector('.chat-question-freeform-textarea');
+    assert.ok(ta);
+    ta.rect = { left: 10, top: 100, width: 200, height: 24 };
+    ta.dispatchEvent({ type: 'mousedown', target: ta, clientX: 20, clientY: 110, button: 0, buttons: 1, detail: 1, preventDefault() {} });
+    assert.equal(doc.activeElement, ta, 'freeform box is focused after mousedown');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: clicking outside the freeform box drops its focus', () => {
+  const { pane, doc, ws } = setup();
+  try {
+    state(ws, {
+      html: '<div class="root"><div class="chat-question-input-container">' +
+        '<textarea class="chat-question-freeform-textarea"></textarea>' +
+        '</div><div class="elsewhere"></div></div>',
+    });
+    const ta = pane.querySelector('.chat-question-freeform-textarea');
+    ta.rect = { left: 10, top: 100, width: 200, height: 24 };
+    ta.dispatchEvent({ type: 'mousedown', target: ta, clientX: 20, clientY: 110, button: 0, buttons: 1, detail: 1, preventDefault() {} });
+    assert.equal(doc.activeElement, ta);
+    const other = pane.querySelector('.elsewhere');
+    other.rect = { left: 10, top: 200, width: 100, height: 20 };
+    other.dispatchEvent({ type: 'click', target: other, clientX: 20, clientY: 210, button: 0, buttons: 1, detail: 1, preventDefault() {} });
+    assert.notEqual(doc.activeElement, ta, 'focus left the freeform box');
   } finally { uninstallGlobals(); }
 });
 

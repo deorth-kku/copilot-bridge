@@ -255,6 +255,24 @@ function parseHTML(html) {
     }
     i = gt + 1;
   }
+  // Real-DOM form-element values: <input value="x"> sets the value property
+  // from its attribute, and <textarea>x</textarea> takes its value from the
+  // text content. The El constructor leaves value '' for both, so apply the
+  // parsed source here (the mirror's syncAttrs then copies it onto the live
+  // node; safeHTML emits the value the same way).
+  (function setValues(n) {
+    for (const c of n) {
+      if (c.nodeType !== 1) continue;
+      if (c.tagName === 'INPUT') {
+        if (c.attributes.value !== undefined) c.value = c.attributes.value;
+      } else if (c.tagName === 'TEXTAREA') {
+        let s = '';
+        for (const k of c.children) if (k.nodeType === 3) s += k.data;
+        c.value = s;
+      }
+      if (c.children) setValues(c.children);
+    }
+  })(root);
   return root;
 }
 
@@ -556,6 +574,9 @@ function installGlobals(doc, win, opts = {}) {
   globalThis.window = win;
   globalThis.location = win.location;
   globalThis.getComputedStyle = opts.getComputedStyle || makeGetComputedStyle(null);
+  // Real browsers expose getComputedStyle on window too (the mirror's
+  // findInputIn calls window.getComputedStyle).
+  win.getComputedStyle = globalThis.getComputedStyle;
   globalThis.MutationObserver = MutationObserver;
   if (savedWebSocket === undefined) savedWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = opts.WebSocket || WebSocketStub;
