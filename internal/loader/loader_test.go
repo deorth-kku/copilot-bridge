@@ -2,6 +2,7 @@ package loader
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -248,44 +249,71 @@ func TestLoadCooldownOnlyOnCorrectResponse(t *testing.T) {
 }
 
 // TestLoadUnloadsOthers pins the unload-others feature: when the loader is
-// created with unloadOthers, Load sends a /models/unload request to each
-// other llama.cpp model (at the server ROOT) before the load. When disabled,
+// created with unloadOthers, Load queries each other llama.cpp server via
+// GET /models, finds which models are actually loaded, and sends
+// /models/unload only for those (excluding the target model). When disabled,
 // no unload request is sent.
 func TestLoadUnloadsOthers(t *testing.T) {
 	var mu sync.Mutex
-	var unloads, loads int
+	var unloads, loads, lists int
+	var unloadedIDs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		switch r.URL.Path {
+		case "/models":
+			lists++
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":[{"id":"other1","status":{"value":"loaded"}},{"id":"other2","status":{"value":"loaded"}},{"id":"idle","status":{"value":"idle"}}]}`))
 		case "/models/unload":
 			unloads++
+			b, _ := io.ReadAll(r.Body)
+			var m map[string]string
+			json.Unmarshal(b, &m)
+			unloadedIDs = append(unloadedIDs, m["model"])
 		case "/models/load":
 			loads++
 		}
 		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"success": true}`))
+		if r.URL.Path == "/models/load" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"success": true}`))
+		}
 	}))
 	defer srv.Close()
 
-	// Two other models: one at the root, one with a baseUrl path that must
-	// be stripped back to the root for the unload endpoint.
-	others := []config.Model{
-		{ID: "other1", BaseURL: srv.URL},
-		{ID: "other2", BaseURL: srv.URL + "/v1"},
+	// Two BaseURLs pointing to the same server root (deduped in main.go by
+	// BaseURL, but here we test the loader directly with both).
+	others := map[string]struct{}{
+		srv.URL:         {},
+		srv.URL + "/v1": {},
 	}
 	m := config.Model{ID: "target", BaseURL: srv.URL}
 
-	// Enabled: one unload per other model, then the load.
+	// Enabled: queries /models, unloads only loaded models (other1, other2),
+	// skips idle, then loads target.
 	l := New(30*time.Second, discardLog, nil, true)
 	l.Load(m, others)
 
 	mu.Lock()
-	if unloads != 2 {
-		t.Fatalf("expected 2 unload requests, got %d", unloads)
+	// Two BaseURLs share the same root, so /models is called twice.
+	if lists != 2 {
+		t.Fatalf("expected 2 list requests, got %d", lists)
+	}
+	// other1 and other2 are loaded; idle is not; target is excluded.
+	if unloads != 4 { // 2 server roots x 2 loaded models
+		t.Fatalf("expected 4 unload requests, got %d", unloads)
 	}
 	if loads != 1 {
 		t.Fatalf("expected 1 load request, got %d", loads)
+	}
+	// Verify "target" was never unloaded.
+	for _, id := range unloadedIDs {
+		if id == "target" {
+			t.Fatalf("target model should not be unloaded")
+		}
+		if id == "idle" {
+			t.Fatalf("idle model should not be unloaded")
+		}
 	}
 	mu.Unlock()
 
@@ -302,7 +330,7 @@ func TestLoadUnloadsOthers(t *testing.T) {
 	}))
 	defer srv2.Close()
 	ld2 := New(30*time.Second, discardLog, nil, false)
-	ld2.Load(config.Model{ID: "target", BaseURL: srv2.URL}, others)
+	ld2.Load(config.Model{ID: "target", BaseURL: srv2.URL}, nil)
 	if u2 != 0 {
 		t.Fatalf("expected 0 unload requests when disabled, got %d", u2)
 	}

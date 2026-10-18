@@ -87,10 +87,12 @@ func (l *Loader) UnloadOthers() bool { return l.unloadOthers }
 // caller that arrives while it is in flight waits for it and shares the
 // outcome rather than firing a duplicate request.
 //
-// `others` is the list of the other llama.cpp models to unload before this
-// load, when the loader was created with unloadOthers enabled. It is empty
-// (or ignored) otherwise.
-func (l *Loader) Load(m config.Model, others []config.Model) {
+// `others` is a set of other llama.cpp server BaseURLs to query before this
+// load, when the loader was created with unloadOthers enabled. For each
+// server, the loader GETs /models to discover which models are actually
+// loaded, then unloads those (excluding the target model). It is nil
+// (or empty) otherwise.
+func (l *Loader) Load(m config.Model, others map[string]struct{}) {
 	// The load endpoint is relative to the server ROOT, not to baseUrl:
 	// baseUrl http://abc.com/v1 -> POST http://abc.com/models/load
 	u, err := url.Parse(m.BaseURL)
@@ -113,12 +115,27 @@ func (l *Loader) Load(m config.Model, others []config.Model) {
 	// runs at most once per in-flight window; its return value is ignored
 	// (logging happens inside), only the dedup matters.
 	_, _, _ = l.sf.Do(key, func() (any, error) {
-		// Best-effort: before loading this model, unload every other
-		// llama.cpp model so only the requested one occupies the server.
-		// Failures are logged inside unload and never block the load.
+		// Best-effort: before loading this model, query each other llama.cpp
+		// server for its currently-loaded models and unload them (excluding
+		// the target). Failures are logged and never block the load.
 		if l.unloadOthers {
-			for _, om := range others {
-				l.unload(om)
+			for baseURL := range others {
+				omU, err := url.Parse(baseURL)
+				if err != nil {
+					continue
+				}
+				omRoot := omU.Scheme + "://" + omU.Host
+				loadedIDs := l.listLoadedModels(omRoot)
+				for _, id := range loadedIDs {
+					// Skip only the target on the target's own server: the same
+					// model id can be served by several servers, so a loaded
+					// model with the target's id on a *different* server is a
+					// distinct model and must still be unloaded.
+					if omRoot == root && id == m.ID {
+						continue
+					}
+					l.unload(omRoot, id)
+				}
 			}
 		}
 		body, _ := json.Marshal(map[string]string{"model": m.ID})
@@ -144,36 +161,73 @@ func (l *Loader) Load(m config.Model, others []config.Model) {
 	})
 }
 
-// unload requests a model unload on the server root for m. It mirrors the
-// load request (endpoint relative to the server ROOT, not baseUrl) and is
-// best-effort: any failure is logged but never propagated to the caller, so
-// a dead or non-llama server cannot block the load that follows it.
-func (l *Loader) unload(m config.Model) {
-	u, err := url.Parse(m.BaseURL)
+// listLoadedModels queries GET {root}/models and returns the IDs of models
+// whose status is "loaded". Best-effort: any failure returns nil.
+func (l *Loader) listLoadedModels(root string) []string {
+	listURL := root + "/models"
+	req, err := http.NewRequest(http.MethodGet, listURL, nil)
 	if err != nil {
-		l.log.Error("unload: parse baseUrl", "model", m.ID, "err", err)
-		return
+		l.log.Error("list models: build request failed", "url", listURL, "err", err)
+		return nil
 	}
-	root := u.Scheme + "://" + u.Host
+	resp, err := l.client.Do(req)
+	if err != nil {
+		l.log.Error("list models: request failed", "url", listURL, "err", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		l.log.Warn("list models: unexpected status", "url", listURL, "status", resp.StatusCode)
+		return nil
+	}
+
+	var parsed struct {
+		Data []struct {
+			ID     string `json:"id"`
+			Status struct {
+				Value string `json:"value"`
+			} `json:"status"`
+		} `json:"data"`
+	}
+	// Stream-parse directly from the response body so a large model list is
+	// not truncated by a fixed read cap.
+	if err := json.UnmarshalRead(resp.Body, &parsed); err != nil {
+		l.log.Error("list models: parse failed", "url", listURL, "err", err)
+		return nil
+	}
+
+	var loaded []string
+	for _, item := range parsed.Data {
+		if item.Status.Value == "loaded" {
+			loaded = append(loaded, item.ID)
+		}
+	}
+	return loaded
+}
+
+// unload requests a model unload on the server root for the given model ID.
+// It is best-effort: any failure is logged but never propagated to the
+// caller, so a dead or non-llama server cannot block the load that follows.
+func (l *Loader) unload(root, modelID string) {
 	unloadURL := root + "/models/unload"
-	body, _ := json.Marshal(map[string]string{"model": m.ID})
+	body, _ := json.Marshal(map[string]string{"model": modelID})
 	req, err := http.NewRequest(http.MethodPost, unloadURL, bytes.NewReader(body))
 	if err != nil {
-		l.log.Error("unload: build request failed", "model", m.ID, "err", err)
+		l.log.Error("unload: build request failed", "model", modelID, "err", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := l.client.Do(req)
 	if err != nil {
-		l.log.Error("models/unload failed", "model", m.ID, "url", unloadURL, "err", err)
+		l.log.Error("models/unload failed", "model", modelID, "url", unloadURL, "err", err)
 		return
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	if status := resp.StatusCode; status >= 200 && status < 300 {
-		l.log.Info("model unloaded", "model", m.ID, "url", unloadURL)
+		l.log.Info("model unloaded", "model", modelID, "url", unloadURL)
 	} else {
-		l.log.Warn("models/unload unexpected response", "model", m.ID, "url", unloadURL,
+		l.log.Warn("models/unload unexpected response", "model", modelID, "url", unloadURL,
 			"status", status, "resp", string(b))
 	}
 }

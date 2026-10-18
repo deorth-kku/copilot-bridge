@@ -176,20 +176,19 @@ func processEvent(ev cdp.Event, store *config.Store, ld *loader.Loader, log *slo
 	log.Info("input event", "window", ev.Window, "model", ev.Model,
 		"effort", ev.Effort, "mode", ev.Mode, "inputLen", len(input))
 	// When the loader is configured to unload others, gather every other
-	// llama.cpp model so Load can send /models/unload to each before loading
-	// this one. The settings table keys each model by both its id and its
-	// display name, so dedupe by id to avoid duplicate unload requests.
-	var others []config.Model
+	// llama.cpp server (deduped by BaseURL) so Load can query GET /models
+	// on each to discover which models are actually loaded, then unload
+	// those before loading this one.
+	var others map[string]struct{}
 	if ld.UnloadOthers() {
-		seen := make(map[string]struct{})
+		others = make(map[string]struct{})
 		for _, om := range store.Load().Models {
-			if _, ok := seen[om.BaseURL]; ok ||
+			if _, ok := others[om.BaseURL]; ok ||
 				(om.ID == m.ID && om.BaseURL == m.BaseURL) ||
 				om.Optimization != "llama.cpp" {
 				continue
 			}
-			seen[om.BaseURL] = struct{}{}
-			others = append(others, om)
+			others[om.BaseURL] = struct{}{}
 		}
 	}
 	// Async: Load does a blocking HTTP POST (up to the client timeout).
