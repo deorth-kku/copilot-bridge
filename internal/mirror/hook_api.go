@@ -24,18 +24,11 @@ func (m *Mirror) handleHook(w http.ResponseWriter, r *http.Request) {
 		_ = json.MarshalWrite(w, map[string]string{"err": "shutdown planner not configured"})
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.MarshalWrite(w, map[string]string{"err": err.Error()})
-		return
-	}
 	var ev struct {
 		Name string `json:"hook_event_name"`
 		Cwd  string `json:"cwd"`
 	}
-	if jerr := json.Unmarshal(body, &ev); jerr != nil {
+	if jerr := json.UnmarshalRead(io.LimitReader(r.Body, 1<<20), &ev); jerr != nil {
 		// Not fatal: the hook subcommand always exits 0 anyway, but keep
 		// the log useful.
 		m.log.Warn("hook: bad payload", "err", jerr)
@@ -65,11 +58,7 @@ func (m *Mirror) handleShutdownArm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req armReq
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err == nil {
-		err = json.Unmarshal(body, &req)
-	}
-	if err != nil {
+	if err := json.UnmarshalRead(io.LimitReader(r.Body, 1<<20), &req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.MarshalWrite(w, map[string]string{"err": err.Error()})

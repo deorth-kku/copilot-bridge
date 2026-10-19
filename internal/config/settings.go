@@ -40,10 +40,11 @@ type rawModel struct {
 // with "__provider__" are provider group headers and are skipped.
 // Entries without a displayName are keyed by id only.
 func Load(path string) (*Settings, error) {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("read settings: %w", err)
 	}
+	defer f.Close()
 	// VS Code settings.json uses the FLAT key "oaicopilot.models"
 	// (a single top-level string key), not a nested object.
 	var raw struct {
@@ -51,7 +52,7 @@ func Load(path string) (*Settings, error) {
 		Proxy   string     `json:"http.proxy"`
 		NoProxy []string   `json:"http.noProxy"`
 	}
-	if err := json.Unmarshal(b, &raw); err != nil {
+	if err := json.UnmarshalRead(f, &raw); err != nil {
 		return nil, fmt.Errorf("parse settings: %w", err)
 	}
 	s := &Settings{

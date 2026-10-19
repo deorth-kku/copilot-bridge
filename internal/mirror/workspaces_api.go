@@ -48,11 +48,7 @@ func (m *Mirror) handleWorkspaceOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req openReq
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err == nil {
-		err = json.Unmarshal(body, &req)
-	}
-	if err != nil {
+	if err := json.UnmarshalRead(io.LimitReader(r.Body, 1<<20), &req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.MarshalWrite(w, map[string]string{"err": "bad request: " + err.Error()})

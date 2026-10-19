@@ -174,17 +174,13 @@ func bridgeHook(bridge string, body []byte) (string, error) {
 		return "", fmt.Errorf("post to %s/api/hook: %w", bridge, err)
 	}
 	defer resp.Body.Close()
-	rb, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if rerr != nil {
-		return "", fmt.Errorf("read bridge response: %w", rerr)
-	}
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("bridge returned %s", resp.Status)
 	}
 	var out struct {
 		Mirror string `json:"mirror"`
 	}
-	if jerr := json.Unmarshal(rb, &out); jerr != nil {
+	if jerr := json.UnmarshalRead(io.LimitReader(resp.Body, 1<<20), &out); jerr != nil {
 		// 2xx but unexpected shape: the event was accepted, there is just
 		// no mirror URL to report.
 		return "", nil

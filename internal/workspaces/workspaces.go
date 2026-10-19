@@ -61,12 +61,13 @@ type storage struct {
 // ones first, then local before remote, each group sorted
 // case-insensitively by name.
 func List(storagePath string) ([]Workspace, error) {
-	data, err := os.ReadFile(storagePath)
+	f, err := os.Open(storagePath)
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
 	var st storage
-	if err := json.Unmarshal(data, &st); err != nil {
+	if err := json.UnmarshalRead(f, &st); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", storagePath, err)
 	}
 	open := make(map[string]bool, len(st.WindowsState.OpenedWindows))
