@@ -114,6 +114,24 @@ start) still powers off. Disarm the toggle any time to cancel.
   Code's default is to return to the agent once more after
   `task_complete`, which is unnecessary — the tool call itself signals
   completion.
+- **Auto-approval** (opt-in, via a config file): for a `PreToolUse`, the
+  hook walks the config's `rules` in order and applies the first whose
+  `match` glob matches the `tool_name`. A rule is either:
+  - a **local policy** (`"policy": "allow" | "deny" | "ask"`) — decides
+    directly with no model call, or
+  - a **model rule** (`"server": "<name>"` + `"thresholds": [t1,t2]`) —
+    asks the named llama.cpp `/v1/systemone` server a single `noul`
+    question ("is this tool call safe?"), reads back the 0–1 `noul`
+    probability, and maps it: `< t1` → `deny`, `< t2` → `ask`, else
+    `allow`.
+  The decision is written to stdout as
+  `{"permissionDecision":"allow|deny|ask","permissionDecisionReason":"..."}`
+  (the reason is always included; it is required for `deny`). An `ask`
+  also pushes an ntfy notification (when `-ntfy-topic` is set) with the
+  mirror URL as its Click target. A non-matching tool, or any model /
+  config failure, leaves stdout empty so VS Code's own permission flow
+  decides (fail-open). Disabled by default: with no `-approve-config` the
+  hook never calls a model and never writes a decision.
 - Power-off is Windows-only (`ExitWindowsEx(EWX_POWEROFF)`); on Linux /
   macOS it is a no-op.
 - The subcommand always exits 0 (a missing bridge must never disrupt the
@@ -152,6 +170,29 @@ path to `copilot-bridge.exe`:
   empty = no notification) — the ntfy.sh topic that receives the
   task-finished, question, and task-complete notifications (with the
   mirror URL as their Click link).
+- Auto-approval flag: `-approve-config` (default empty = disabled) — the
+  path to a JSON config file with two parts:
+  - `servers` — named `/v1/systemone` endpoints, each with `model`, `url`,
+    `key` (Bearer, optional), and `timeout` (a duration like `5s`;
+    default 8s).
+  - `rules` — an ordered list; the first rule whose `match` glob matches
+    the tool name wins. Each rule is either a local
+    `{"match": "<glob>", "policy": "allow|deny|ask"}` (no model) or a
+    model rule `{"match": "<glob>", "server": "<name>", "thresholds":
+    [t1,t2]}` with `0 <= t1 < t2 <= 1`.
+
+  Example:
+  ```json
+  {
+    "servers": {
+      "server0": { "model": "modelname", "url": "https://test.com/v1/systemone", "key": "no-key", "timeout": "5s" }
+    },
+    "rules": [
+      { "match": "vscode_*", "policy": "allow" },
+      { "match": "mcp_*", "server": "server0", "thresholds": [0.1, 0.5] }
+    ]
+  }
+  ```
 
 ## Testing
 `go test ./internal/...` runs everything. The injected JavaScript is

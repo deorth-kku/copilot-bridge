@@ -32,14 +32,18 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
+	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -52,6 +56,46 @@ const hookMaxBody = 1 << 20
 // hookTimeout bounds the round trip to the bridge. VS Code's default hook
 // timeout is 30s; we stay far inside it.
 const hookTimeout = 5 * time.Second
+
+// systemOneTimeout is the DEFAULT per-call bound for a /v1/systemone
+// decision-model call (a server can override it with its own "timeout"). A
+// decision model answers in well under a second; 8s leaves headroom while
+// keeping the worst-case hook budget (8s + ntfyMaxAttempts*ntfyTimeout +
+// ntfyRetryDelay = 8s + 12s + 1s = 21s) close to the 20s hook timeout in
+// the install doc. A slow model is treated as a failure (fail-open).
+const systemOneTimeout = 8 * time.Second
+
+// systemOneQuestionID is the id of the single noul question the hook asks
+// the decision model.
+const systemOneQuestionID = "safe"
+
+// systemOneQuestion is the noul question text sent to the model.
+const systemOneQuestion = "Is this tool call safe to execute?"
+
+// approveConfig is the on-disk auto-approval config (-approve-config JSON).
+// A zero value (no rules) disables the feature entirely.
+type approveConfig struct {
+	Servers map[string]approveServer `json:"servers"`
+	Rules   []approveRule            `json:"rules"`
+}
+
+// approveServer names one /v1/systemone decision-model endpoint.
+type approveServer struct {
+	Model   string        `json:"model"`
+	URL     string        `json:"url"`
+	Key     string        `json:"key"`
+	Timeout time.Duration `json:"timeout"` // duration string; default systemOneTimeout
+}
+
+// approveRule gates one set of tools by a glob match. It is EITHER a local
+// Policy (no model call) OR a model rule (Server + Thresholds) — not both.
+// Rules are evaluated in order; the first match wins.
+type approveRule struct {
+	Match      string     `json:"match"`
+	Policy     string     `json:"policy"`     // "allow" | "deny" | "ask" (local)
+	Server     string     `json:"server"`     // server name (model rule)
+	Thresholds [2]float64 `json:"thresholds"` // [t1, t2]
+}
 
 // ntfyBaseURL is the ntfy server base (a variable so tests can point it
 // at a local test server).
@@ -98,10 +142,17 @@ func runHookCommand(args []string) {
 	fs := flag.NewFlagSet("hook", flag.ContinueOnError)
 	bridge := fs.String("bridge", "http://127.0.0.1:9527", "bridge HTTP address (the mirror web server)")
 	ntfyTopic := fs.String("ntfy-topic", "", "ntfy.sh topic for the task-finished notification (empty = no notification)")
+	approveCfg := fs.String("approve-config", "", "path to the auto-approval config JSON (servers + rules); empty = disabled")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(0)
 	}
-	if err := runHook(*bridge, *ntfyTopic, os.Stdin); err != nil {
+	approve, _ := loadApproveConfig(*approveCfg)
+	// The hook's lifetime is bounded by the process signals: a SIGTERM (or
+	// Ctrl+C) cancels the context, which in turn cancels every in-flight
+	// HTTP request below.
+	ctx, stop := signal.NotifyContext(context.Background(), signals...)
+	defer stop()
+	if err := runHook(ctx, hookParams{Bridge: *bridge, NtfyTopic: *ntfyTopic, Stdin: os.Stdin, Approve: approve}); err != nil {
 		fmt.Fprintln(os.Stderr, "hook:", err)
 		logHookError(err)
 	}
@@ -115,11 +166,27 @@ func runHookCommand(args []string) {
 // carrying the bridge's mirror URL as the Click target. The ntfy push is
 // independent of the bridge: a missing bridge still notifies (without the
 // mirror Click link).
-func runHook(bridge, ntfyTopic string, stdin io.Reader) error {
-	body, err := io.ReadAll(io.LimitReader(stdin, hookMaxBody))
-	if err != nil {
-		return fmt.Errorf("read stdin: %w", err)
-	}
+//
+// When the approve config has rules, a PreToolUse event is gated by the
+// first rule whose glob matches the tool_name: a local policy rule decides
+// directly (allow/deny/ask, no model call); a model rule asks the named
+// /v1/systemone server one noul question ("is this tool call safe?") and
+// maps the 0..1 answer to allow/ask/deny via the rule's thresholds. An
+// "ask" also pushes an ntfy notification. A non-matching tool, or any model
+// failure, leaves stdout empty so VS Code's own permission flow decides
+// (fail-open). ctx bounds every inner HTTP request: each derives a
+// timeout child context, so a cancelled ctx (e.g. SIGTERM) aborts them.
+type hookParams struct {
+	Bridge    string
+	NtfyTopic string
+	Stdin     io.Reader
+	Approve   approveConfig
+}
+
+func runHook(ctx context.Context, p hookParams) error {
+	cfg := p.Approve
+	body := new(bytes.Buffer)
+	tr := io.TeeReader(io.LimitReader(p.Stdin, hookMaxBody), body)
 	var ev struct {
 		Name           string         `json:"hook_event_name"`
 		SessionID      string         `json:"session_id"`
@@ -129,9 +196,9 @@ func runHook(bridge, ntfyTopic string, stdin io.Reader) error {
 	}
 	// Not fatal: the payload is forwarded verbatim regardless; the fields
 	// are only needed for the ntfy notifications.
-	_ = json.Unmarshal(body, &ev)
+	_ = json.UnmarshalRead(tr, &ev)
 
-	mirrorURL, bridgeErr := bridgeHook(bridge, body)
+	mirrorURL, bridgeErr := bridgeHook(ctx, p.Bridge, body)
 
 	// PostToolUse of task_complete: always stop the agent execution.
 	// VS Code's default is to return to the agent once more after
@@ -141,35 +208,311 @@ func runHook(bridge, ntfyTopic string, stdin io.Reader) error {
 		fmt.Fprintln(hookStdout, taskCompleteStopOutput)
 	}
 
-	if ntfyTopic != "" {
+	// PreToolUse auto-approval via the systemone decision model. Runs
+	// after bridgeHook so an "ask" can carry the mirror URL as its ntfy
+	// Click target. Independent of bridgeErr (a missing bridge must not
+	// block the decision).
+	if ev.Name == "PreToolUse" && len(cfg.Rules) > 0 {
+		cfg.approveToolCall(ctx, p.NtfyTopic, ev.SessionID, ev.ToolName, ev.ToolInput, mirrorURL)
+	}
+
+	if p.NtfyTopic != "" {
 		switch ev.Name {
 		case "Stop":
 			// Best effort: the last assistant message of the session
 			// transcript (VS Code's transcript format is not a stable API).
-			pushNtfy(ntfyTopic, ev.SessionID, lastAssistantText(ev.TranscriptPath), mirrorURL)
+			pushNtfy(ctx, p.NtfyTopic, ev.SessionID, lastAssistantText(ev.TranscriptPath), mirrorURL)
 		case "PreToolUse":
 			// PreToolUse fires for EVERY tool; only the ask-questions tool
 			// gets a notification.
 			if ev.ToolName == askQuestionsToolName {
-				pushQuestionNtfy(ntfyTopic, ev.SessionID, ev.ToolInput, mirrorURL)
+				pushQuestionNtfy(ctx, p.NtfyTopic, ev.SessionID, ev.ToolInput, mirrorURL)
 			}
 		case "PostToolUse":
 			// PostToolUse fires for EVERY tool; only task_complete gets a
 			// notification.
 			if ev.ToolName == taskCompleteToolName {
-				pushTaskCompleteNtfy(ntfyTopic, ev.SessionID, ev.ToolInput, mirrorURL)
+				pushTaskCompleteNtfy(ctx, p.NtfyTopic, ev.SessionID, ev.ToolInput, mirrorURL)
 			}
 		}
 	}
 	return bridgeErr
 }
 
+func parseTime(data []byte, t *time.Duration) error {
+	var str string
+	err := json.Unmarshal(data, &str)
+	if err != nil {
+		return err
+	}
+	t0, err := time.ParseDuration(str)
+	if err != nil {
+		return err
+	}
+	*t = t0
+	return nil
+}
+
+// approveToolCall auto-approves one PreToolUse call via the systemone
+// decision model. For a matching tool it writes a permissionDecision to
+// stdout and (on "ask") pushes an ntfy notification. A non-matching tool or
+// any failure leaves stdout untouched (fail-open: VS Code decides).
+// loadApproveConfig reads and validates the auto-approval config file. ok is
+// false when the path is empty (disabled) or the file cannot be read/parsed/
+// validated — the caller then runs with the feature disabled (fail-open).
+func loadApproveConfig(path string) (approveConfig, bool) {
+	var cfg approveConfig
+	if path == "" {
+		return cfg, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		reportApproveError(fmt.Errorf("open approve config: %w", err))
+		return approveConfig{}, false
+	}
+	defer f.Close()
+	if err := json.UnmarshalRead(f, &cfg, json.WithUnmarshalers(json.UnmarshalFunc(parseTime))); err != nil {
+		reportApproveError(fmt.Errorf("parse approve config %s: %w", path, err))
+		return approveConfig{}, false
+	}
+	if err := cfg.validate(); err != nil {
+		reportApproveError(err)
+		return approveConfig{}, false
+	}
+	return cfg, true
+}
+
+// validate checks the config is internally consistent: every rule has a
+// match and exactly one of a local policy or a model rule (server +
+// thresholds); a model rule references a known server with url + model.
+func (c approveConfig) validate() error {
+	for i, r := range c.Rules {
+		if r.Match == "" {
+			return fmt.Errorf("rules[%d]: missing match", i)
+		}
+		hasPolicy := r.Policy != ""
+		hasModel := r.Server != ""
+		if hasPolicy == hasModel {
+			return fmt.Errorf("rules[%d]: needs exactly one of policy or server", i)
+		}
+		if hasPolicy {
+			if r.Policy != "allow" && r.Policy != "deny" && r.Policy != "ask" {
+				return fmt.Errorf("rules[%d]: invalid policy %q", i, r.Policy)
+			}
+			continue
+		}
+		srv, ok := c.Servers[r.Server]
+		if !ok {
+			return fmt.Errorf("rules[%d]: unknown server %q", i, r.Server)
+		}
+		if srv.URL == "" || srv.Model == "" {
+			return fmt.Errorf("rules[%d]: server %q needs url and model", i, r.Server)
+		}
+		if !validThresholds(r.Thresholds) {
+			return fmt.Errorf("rules[%d]: thresholds must be [t1,t2] with 0<=t1<t2<=1", i)
+		}
+	}
+	return nil
+}
+
+// validThresholds reports whether [t1,t2] is a valid deny/ask/allow split.
+func validThresholds(t [2]float64) bool {
+	return t[0] >= 0 && t[1] <= 1 && t[0] < t[1]
+}
+
+// toolMatchesOne reports whether name matches the single glob pattern
+// (path.Match semantics: * matches any run of characters). An invalid
+// pattern matches nothing.
+func toolMatchesOne(name, pattern string) bool {
+	ok, _ := path.Match(pattern, name)
+	return ok
+}
+
+// approveToolCall gates one PreToolUse call. It walks the rules in order and
+// applies the first whose glob matches the tool_name: a local policy rule
+// decides directly (no model call); a model rule asks the named server one
+// noul question and maps the 0..1 answer to allow/ask/deny. An "ask" pushes
+// an ntfy notification. A non-matching tool, or any model failure, leaves
+// stdout empty (fail-open: VS Code decides).
+func (cfg approveConfig) approveToolCall(ctx context.Context, ntfyTopic, sessionID, toolName string, toolInput jsontext.Value, mirrorURL string) {
+	for _, r := range cfg.Rules {
+		if !toolMatchesOne(toolName, r.Match) {
+			continue
+		}
+		if r.Policy != "" {
+			// Local rule: decide without calling the model.
+			emitPermissionDecision(r.Policy, "local rule: "+r.Policy)
+			if r.Policy == "ask" && ntfyTopic != "" {
+				pushAskNtfy(ctx, ntfyTopic, sessionID, toolName, toolInput, mirrorURL)
+			}
+			return
+		}
+		srv := cfg.Servers[r.Server]
+		v, ok := srv.callSystemOne(ctx, toolName, toolInput)
+		if !ok {
+			// Model unreachable / bad response: fail-open.
+			return
+		}
+		decision := noulDecision(v, r.Thresholds[0], r.Thresholds[1])
+		emitPermissionDecision(decision, noulReason(v, r.Thresholds[0], r.Thresholds[1]))
+		if decision == "ask" && ntfyTopic != "" {
+			pushAskNtfy(ctx, ntfyTopic, sessionID, toolName, toolInput, mirrorURL)
+		}
+		return
+	}
+	// No rule matched: keep the current behavior (no decision).
+}
+
+// noulDecision maps a 0..1 noul value to a permission decision using the two
+// thresholds: <t1 deny, <t2 ask, else allow.
+func noulDecision(v, t1, t2 float64) string {
+	switch {
+	case v < t1:
+		return "deny"
+	case v < t2:
+		return "ask"
+	default:
+		return "allow"
+	}
+}
+
+// noulReason builds the permissionDecisionReason shown to the agent.
+func noulReason(v, t1, t2 float64) string {
+	switch noulDecision(v, t1, t2) {
+	case "deny":
+		return fmt.Sprintf("systemone noul %.2f < %.2f", v, t1)
+	case "ask":
+		return fmt.Sprintf("systemone noul %.2f in [%.2f, %.2f)", v, t1, t2)
+	default:
+		return fmt.Sprintf("systemone noul %.2f >= %.2f", v, t2)
+	}
+}
+
+// systemOneRequest is the /v1/systemone request body: one noul question about
+// the safety of a tool call.
+type systemOneRequest struct {
+	Model     string `json:"model"`
+	State     string `json:"state"`
+	Questions struct {
+		Safe struct {
+			Type         string `json:"type"`
+			Instructions string `json:"instructions"`
+		} `json:"safe"`
+	} `json:"questions"`
+}
+
+// callSystemOne asks the /v1/systemone decision model the single noul
+// question "is this tool call safe?" and returns the 0..1 noul probability.
+// ok is false on any transport/HTTP/parse failure or a missing noul value
+// (the caller then fails open).
+func (srv approveServer) callSystemOne(ctx context.Context, toolName string, toolInput jsontext.Value) (float64, bool) {
+	// state = the tool call as JSON text, so the model sees name + args.
+	state, err := json.Marshal(struct {
+		ToolName  string         `json:"tool_name"`
+		ToolInput jsontext.Value `json:"tool_input"`
+	}{ToolName: toolName, ToolInput: toolInput})
+	if err != nil {
+		reportApproveError(fmt.Errorf("marshal state: %w", err))
+		return 0, false
+	}
+	req := systemOneRequest{Model: srv.Model, State: string(state)}
+	req.Questions.Safe.Type = "noul"
+	req.Questions.Safe.Instructions = systemOneQuestion
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		reportApproveError(fmt.Errorf("marshal request: %w", err))
+		return 0, false
+	}
+
+	// Derive a per-call timeout child context instead of relying on the
+	// http.Client timeout field.
+	if srv.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, srv.Timeout)
+		defer cancel()
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, bytes.NewReader(reqBody))
+	if err != nil {
+		reportApproveError(fmt.Errorf("build systemone request: %w", err))
+		return 0, false
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if srv.Key != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+srv.Key)
+	}
+	resp, err := new(http.Client).Do(httpReq)
+	if err != nil {
+		reportApproveError(fmt.Errorf("systemone call: %w", err))
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		reportApproveError(fmt.Errorf("systemone returned %s", resp.Status))
+		return 0, false
+	}
+	var out struct {
+		Answers struct {
+			Safe struct {
+				Noul float64 `json:"noul"`
+			} `json:"safe"`
+		} `json:"answers"`
+	}
+	out.Answers.Safe.Noul = math.NaN()
+	if err := json.UnmarshalRead(io.LimitReader(resp.Body, 1<<20), &out); err != nil {
+		reportApproveError(fmt.Errorf("parse systemone response: %w", err))
+		return 0, false
+	}
+	if math.IsNaN(out.Answers.Safe.Noul) {
+		reportApproveError(fmt.Errorf("systemone response has no answers.%s.noul", systemOneQuestionID))
+		return 0, false
+	}
+	return out.Answers.Safe.Noul, true
+}
+
+// emitPermissionDecision writes the single-line preToolUse decision JSON to
+// stdout. The reason is always included (required for "deny").
+func emitPermissionDecision(decision, reason string) {
+	out, err := json.Marshal(struct {
+		PermissionDecision       string `json:"permissionDecision"`
+		PermissionDecisionReason string `json:"permissionDecisionReason"`
+	}{PermissionDecision: decision, PermissionDecisionReason: reason})
+	if err != nil {
+		reportApproveError(fmt.Errorf("marshal decision: %w", err))
+		return
+	}
+	fmt.Fprintln(hookStdout, string(out))
+}
+
+// pushAskNtfy pushes one ntfy notification for a tool call the model scored
+// as "ask": the tool name and its input as the body, the mirror URL as the
+// Click target. Same best-effort contract as the other ntfy pushes.
+func pushAskNtfy(ctx context.Context, topic, sessionID, toolName string, toolInput jsontext.Value, mirrorURL string) {
+	toolInput.Indent(jsontext.WithIndent("  "))
+	body := fmt.Sprintf("Tool %s needs approval\n%s", toolName, string(toolInput))
+	pushNtfyMessage(ctx, topic, ntfyTitle("tool approval needed", sessionID), body, mirrorURL)
+}
+
+// reportApproveError reports a systemone approval failure on stderr and in
+// the app log. Failures are fail-open: they never write a decision to stdout.
+func reportApproveError(err error) {
+	fmt.Fprintln(os.Stderr, "hook:", err)
+	logHookError(err)
+}
+
 // bridgeHook forwards the payload to the bridge's /api/hook endpoint and
 // returns the mirror URL from the response ("" when the bridge is
 // unreachable or the response does not carry one).
-func bridgeHook(bridge string, body []byte) (string, error) {
-	client := &http.Client{Timeout: hookTimeout}
-	resp, err := client.Post(bridge+"/api/hook", "application/json", bytes.NewReader(body))
+func bridgeHook(ctx context.Context, bridge string, body io.Reader) (string, error) {
+	// Derive a per-call timeout child context instead of relying on the
+	// http.Client timeout field.
+	ctx, cancel := context.WithTimeout(ctx, hookTimeout)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, bridge+"/api/hook", body)
+	if err != nil {
+		return "", fmt.Errorf("build bridge request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := new(http.Client).Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("post to %s/api/hook: %w", bridge, err)
 	}
@@ -194,8 +537,8 @@ func bridgeHook(bridge string, body []byte) (string, error) {
 // open the mirror URL when tapped. Transient failures (transport errors,
 // 5xx) are retried once — a missed task-finished notification is worse
 // than one more attempt.
-func pushNtfy(topic, sessionID, lastText, mirrorURL string) {
-	pushNtfyMessage(topic, ntfyTitle("task finished", sessionID),
+func pushNtfy(ctx context.Context, topic, sessionID, lastText, mirrorURL string) {
+	pushNtfyMessage(ctx, topic, ntfyTitle("task finished", sessionID),
 		fallback(lastText, "Agent task finished (no last message captured)"), mirrorURL)
 }
 
@@ -203,8 +546,8 @@ func pushNtfy(topic, sessionID, lastText, mirrorURL string) {
 // PreToolUse event of the ask-questions tool): the questions and their
 // options as the body, the mirror URL as the Click target. Same
 // best-effort contract as pushNtfy.
-func pushQuestionNtfy(topic, sessionID string, toolInput jsontext.Value, mirrorURL string) {
-	pushNtfyMessage(topic, ntfyTitle("question", sessionID),
+func pushQuestionNtfy(ctx context.Context, topic, sessionID string, toolInput jsontext.Value, mirrorURL string) {
+	pushNtfyMessage(ctx, topic, ntfyTitle("question", sessionID),
 		fallback(formatQuestions(toolInput), "Agent asked a question (details unavailable)"), mirrorURL)
 }
 
@@ -212,8 +555,8 @@ func pushQuestionNtfy(topic, sessionID string, toolInput jsontext.Value, mirrorU
 // (a PostToolUse event of the task_complete tool): the summary from the
 // tool call arguments as the body, the mirror URL as the Click target.
 // Same best-effort contract as pushNtfy.
-func pushTaskCompleteNtfy(topic, sessionID string, toolInput jsontext.Value, mirrorURL string) {
-	pushNtfyMessage(topic, ntfyTitle("task complete", sessionID),
+func pushTaskCompleteNtfy(ctx context.Context, topic, sessionID string, toolInput jsontext.Value, mirrorURL string) {
+	pushNtfyMessage(ctx, topic, ntfyTitle("task complete", sessionID),
 		fallback(taskCompleteSummary(toolInput), "Agent task complete (no summary captured)"), mirrorURL)
 }
 
@@ -252,17 +595,21 @@ func fallback(msg, def string) string {
 
 // pushNtfyMessage performs the (truncating, retrying) ntfy push for a
 // pre-built title/body pair.
-func pushNtfyMessage(topic, title, msg, mirrorURL string) {
+func pushNtfyMessage(ctx context.Context, topic, title, msg, mirrorURL string) {
 	if r := []rune(msg); len(r) > ntfyMaxLen {
 		msg = string(r[:ntfyMaxLen]) + " ...[truncated]"
 	}
-	client := &http.Client{Timeout: ntfyTimeout}
 	var lastErr error
 	for attempt := 1; attempt <= ntfyMaxAttempts; attempt++ {
 		if attempt > 1 {
-			time.Sleep(ntfyRetryDelay)
+			// Honor cancellation during the retry delay.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(ntfyRetryDelay):
+			}
 		}
-		lastErr = ntfyPushOnce(client, topic, title, msg, mirrorURL)
+		lastErr = ntfyPushOnce(ctx, topic, title, msg, mirrorURL)
 		if lastErr == nil || !ntfyRetryable(lastErr) {
 			break
 		}
@@ -305,8 +652,12 @@ func formatQuestions(toolInput jsontext.Value) string {
 }
 
 // ntfyPushOnce performs a single ntfy push attempt.
-func ntfyPushOnce(client *http.Client, topic, title, msg, mirrorURL string) error {
-	req, err := http.NewRequest(http.MethodPost, ntfyBaseURL+"/"+topic, strings.NewReader(msg))
+func ntfyPushOnce(ctx context.Context, topic, title, msg, mirrorURL string) error {
+	// Derive a per-attempt timeout child context instead of relying on the
+	// http.Client timeout field.
+	ctx, cancel := context.WithTimeout(ctx, ntfyTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ntfyBaseURL+"/"+topic, strings.NewReader(msg))
 	if err != nil {
 		return fmt.Errorf("build ntfy request: %w", err)
 	}
@@ -315,7 +666,7 @@ func ntfyPushOnce(client *http.Client, topic, title, msg, mirrorURL string) erro
 	if mirrorURL != "" {
 		req.Header.Set("Click", mirrorURL)
 	}
-	resp, err := client.Do(req)
+	resp, err := new(http.Client).Do(req)
 	if err != nil {
 		return fmt.Errorf("ntfy push: %w", err)
 	}

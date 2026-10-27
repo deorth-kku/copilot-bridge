@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +26,7 @@ func TestRunHookForwardsStdin(t *testing.T) {
 	defer srv.Close()
 
 	payload := `{"hook_event_name":"Stop","session_id":"abc","cwd":"/x"}`
-	if err := runHook(srv.URL, "", strings.NewReader(payload)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: srv.URL, Stdin: strings.NewReader(payload)}); err != nil {
 		t.Fatal(err)
 	}
 	if gotPath != "/api/hook" {
@@ -45,7 +46,7 @@ func TestRunHookForwardsStdin(t *testing.T) {
 func TestRunHookBridgeDown(t *testing.T) {
 	// Nothing listens on 127.0.0.1:1: the error must be returned (the
 	// caller decides to exit 0 anyway).
-	if err := runHook("http://127.0.0.1:1", "", strings.NewReader(`{"hook_event_name":"Stop"}`)); err == nil {
+	if err := runHook(t.Context(), hookParams{Bridge: "http://127.0.0.1:1", Stdin: strings.NewReader(`{"hook_event_name":"Stop"}`)}); err == nil {
 		t.Fatal("expected an error when the bridge is unreachable")
 	}
 }
@@ -55,7 +56,7 @@ func TestRunHookNon2xxIsError(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
-	if err := runHook(srv.URL, "", strings.NewReader(`{}`)); err == nil {
+	if err := runHook(t.Context(), hookParams{Bridge: srv.URL, Stdin: strings.NewReader(`{}`)}); err == nil {
 		t.Fatal("expected an error for a non-2xx bridge response")
 	}
 }
@@ -150,7 +151,7 @@ func TestRunHookNtfyPush(t *testing.T) {
 		"session_id":      "01c86818-0239-4f9d-8a9c-375f7590bd28",
 		"transcript_path": transcript,
 	})
-	if err := runHook(bridge.URL, "my-topic", strings.NewReader(string(payload))); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: bridge.URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(string(payload))}); err != nil {
 		t.Fatal(err)
 	}
 	if ntfyPath != "/my-topic" {
@@ -178,7 +179,7 @@ func TestRunHookNoNtfyWithoutTopic(t *testing.T) {
 	}))
 	defer bridge.Close()
 
-	if err := runHook(bridge.URL, "", strings.NewReader(`{"hook_event_name":"Stop"}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: bridge.URL, Stdin: strings.NewReader(`{"hook_event_name":"Stop"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
@@ -197,7 +198,7 @@ func TestRunHookNoNtfyOnSessionStart(t *testing.T) {
 	}))
 	defer bridge.Close()
 
-	if err := runHook(bridge.URL, "my-topic", strings.NewReader(`{"hook_event_name":"SessionStart"}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: bridge.URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(`{"hook_event_name":"SessionStart"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
@@ -243,7 +244,7 @@ func TestRunHookQuestionNtfy(t *testing.T) {
 			},
 		},
 	})
-	if err := runHook(bridge.URL, "my-topic", strings.NewReader(string(payload))); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: bridge.URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(string(payload))}); err != nil {
 		t.Fatal(err)
 	}
 	if ntfyPath != "/my-topic" {
@@ -271,8 +272,8 @@ func TestRunHookQuestionNtfyBridgeDown(t *testing.T) {
 	defer ntfy.Close()
 	stubNtfy(t, ntfy)
 
-	if err := runHook("http://127.0.0.1:1", "my-topic", strings.NewReader(
-		`{"hook_event_name":"PreToolUse","tool_name":"vscode_askQuestions","tool_input":{"questions":[{"question":"q?"}]}}`)); err == nil {
+	if err := runHook(t.Context(), hookParams{Bridge: "http://127.0.0.1:1", NtfyTopic: "my-topic", Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"vscode_askQuestions","tool_input":{"questions":[{"question":"q?"}]}}`)}); err == nil {
 		t.Fatal("expected an error when the bridge is unreachable")
 	}
 	if ntfyClick != "" {
@@ -289,8 +290,8 @@ func TestRunHookPreToolUseOtherToolNoNtfy(t *testing.T) {
 	defer ntfy.Close()
 	stubNtfy(t, ntfy)
 
-	if err := runHook(okBridge(t).URL, "my-topic", strings.NewReader(
-		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
@@ -304,8 +305,8 @@ func TestRunHookQuestionNoNtfyWithoutTopic(t *testing.T) {
 	defer ntfy.Close()
 	stubNtfy(t, ntfy)
 
-	if err := runHook(okBridge(t).URL, "", strings.NewReader(
-		`{"hook_event_name":"PreToolUse","tool_name":"vscode_askQuestions","tool_input":{"questions":[{"question":"q?"}]}}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"vscode_askQuestions","tool_input":{"questions":[{"question":"q?"}]}}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
@@ -341,7 +342,7 @@ func TestRunHookNtfyBridgeDown(t *testing.T) {
 	defer ntfy.Close()
 	stubNtfy(t, ntfy)
 
-	if err := runHook("http://127.0.0.1:1", "my-topic", strings.NewReader(`{"hook_event_name":"Stop"}`)); err == nil {
+	if err := runHook(t.Context(), hookParams{Bridge: "http://127.0.0.1:1", NtfyTopic: "my-topic", Stdin: strings.NewReader(`{"hook_event_name":"Stop"}`)}); err == nil {
 		t.Fatal("expected an error when the bridge is unreachable")
 	}
 	if ntfyClick != "" {
@@ -372,7 +373,7 @@ func TestRunHookNtfyTruncatesLongText(t *testing.T) {
 		"hook_event_name": "Stop",
 		"transcript_path": transcript,
 	})
-	if err := runHook(bridge.URL, "my-topic", strings.NewReader(string(payload))); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: bridge.URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(string(payload))}); err != nil {
 		t.Fatal(err)
 	}
 	want := strings.Repeat("x", ntfyMaxLen) + " ...[truncated]"
@@ -425,7 +426,7 @@ func TestRunHookNtfyRetriesTransportError(t *testing.T) {
 	defer ntfy.Close()
 	stubNtfy(t, ntfy)
 
-	if err := runHook(okBridge(t).URL, "my-topic", strings.NewReader(`{"hook_event_name":"Stop"}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(`{"hook_event_name":"Stop"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
@@ -446,7 +447,7 @@ func TestRunHookNtfyRetries5xx(t *testing.T) {
 	defer ntfy.Close()
 	stubNtfy(t, ntfy)
 
-	if err := runHook(okBridge(t).URL, "my-topic", strings.NewReader(`{"hook_event_name":"Stop"}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(`{"hook_event_name":"Stop"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
@@ -465,7 +466,7 @@ func TestRunHookNtfyNoRetryOn4xx(t *testing.T) {
 	defer ntfy.Close()
 	stubNtfy(t, ntfy)
 
-	if err := runHook(okBridge(t).URL, "my-topic", strings.NewReader(`{"hook_event_name":"Stop"}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(`{"hook_event_name":"Stop"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -475,8 +476,8 @@ func TestRunHookNtfyNoRetryOn4xx(t *testing.T) {
 
 func TestRunHookPostToolUseTaskCompleteStops(t *testing.T) {
 	out := stubHookStdout(t)
-	if err := runHook(okBridge(t).URL, "", strings.NewReader(
-		`{"hook_event_name":"PostToolUse","tool_name":"task_complete","tool_input":{"summary":"done"}}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PostToolUse","tool_name":"task_complete","tool_input":{"summary":"done"}}`)}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -493,8 +494,8 @@ func TestRunHookPostToolUseTaskCompleteStops(t *testing.T) {
 
 func TestRunHookPostToolUseOtherToolNoBlock(t *testing.T) {
 	out := stubHookStdout(t)
-	if err := runHook(okBridge(t).URL, "", strings.NewReader(
-		`{"hook_event_name":"PostToolUse","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PostToolUse","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -519,8 +520,8 @@ func TestRunHookTaskCompleteNtfy(t *testing.T) {
 	}))
 	defer bridge.Close()
 
-	if err := runHook(bridge.URL, "my-topic", strings.NewReader(
-		`{"hook_event_name":"PostToolUse","session_id":"01c86818-0239-4f9d-8a9c-375f7590bd28","tool_name":"task_complete","tool_input":{"summary":"Fixed the bug"}}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: bridge.URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(
+		`{"hook_event_name":"PostToolUse","session_id":"01c86818-0239-4f9d-8a9c-375f7590bd28","tool_name":"task_complete","tool_input":{"summary":"Fixed the bug"}}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if ntfyTitle != "VS Code Copilot: task complete [01c86818]" {
@@ -543,8 +544,8 @@ func TestRunHookTaskCompleteNtfyNoSummary(t *testing.T) {
 	defer ntfy.Close()
 	stubNtfy(t, ntfy)
 
-	if err := runHook(okBridge(t).URL, "my-topic", strings.NewReader(
-		`{"hook_event_name":"PostToolUse","tool_name":"task_complete","tool_input":{}}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(
+		`{"hook_event_name":"PostToolUse","tool_name":"task_complete","tool_input":{}}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if ntfyBody != "Agent task complete (no summary captured)" {
@@ -559,8 +560,8 @@ func TestRunHookTaskCompleteNoNtfyWithoutTopic(t *testing.T) {
 	stubNtfy(t, ntfy)
 
 	out := stubHookStdout(t)
-	if err := runHook(okBridge(t).URL, "", strings.NewReader(
-		`{"hook_event_name":"PostToolUse","tool_name":"task_complete","tool_input":{"summary":"done"}}`)); err != nil {
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PostToolUse","tool_name":"task_complete","tool_input":{"summary":"done"}}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
@@ -583,5 +584,447 @@ func TestTaskCompleteSummary(t *testing.T) {
 	}
 	if got := taskCompleteSummary(jsontext.Value("")); got != "" {
 		t.Fatalf("empty: got %q", got)
+	}
+}
+
+// systemOneStub is a /v1/systemone stub answering the noul question with the
+// given probability; gotAuth (if non-nil) captures the Authorization header.
+func systemOneStub(t *testing.T, noul float64, gotAuth *string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gotAuth != nil {
+			*gotAuth = r.Header.Get("Authorization")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"model":"m","answers":{"safe":{"type":"noul","noul":%g}}}`, noul)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// approveCfg is a fully-configured approveConfig with one model rule
+// (run_* -> server "srv" at the given URL).
+func approveCfg(url string) approveConfig {
+	return approveConfig{
+		Servers: map[string]approveServer{
+			"srv": {Model: "decision-model", URL: url, Key: "test-key"},
+		},
+		Rules: []approveRule{
+			{Match: "run_*", Server: "srv", Thresholds: [2]float64{0.1, 0.5}},
+		},
+	}
+}
+
+func TestToolMatchesOne(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		want    bool
+	}{
+		{"run_in_terminal", "run_*", true},
+		{"edit", "edit", true},
+		{"domprobe1", "*probe*", true},
+		{"view", "run_*", false},
+		{"RUN_in_terminal", "run_*", false}, // case-sensitive
+		{"view", "[", false},                // invalid pattern matches nothing
+	}
+	for _, c := range cases {
+		if got := toolMatchesOne(c.name, c.pattern); got != c.want {
+			t.Errorf("toolMatchesOne(%q, %q) = %v, want %v", c.name, c.pattern, got, c.want)
+		}
+	}
+}
+
+func TestValidThresholds(t *testing.T) {
+	if !validThresholds([2]float64{0.1, 0.5}) {
+		t.Error("0.1,0.5 should be valid")
+	}
+	for _, bad := range [][2]float64{{0.5, 0.1}, {-1, 0.5}, {0.1, 2}, {0.5, 0.5}} {
+		if validThresholds(bad) {
+			t.Errorf("validThresholds(%v) should be false", bad)
+		}
+	}
+}
+
+func TestNoulDecision(t *testing.T) {
+	cases := []struct {
+		v    float64
+		want string
+	}{
+		{0, "deny"},
+		{0.09, "deny"},
+		{0.1, "ask"},
+		{0.49, "ask"},
+		{0.5, "allow"},
+		{1, "allow"},
+	}
+	for _, c := range cases {
+		if got := noulDecision(c.v, 0.1, 0.5); got != c.want {
+			t.Errorf("noulDecision(%v) = %q, want %q", c.v, got, c.want)
+		}
+	}
+}
+
+func TestRunHookApproveAllow(t *testing.T) {
+	out := stubHookStdout(t)
+	srv := systemOneStub(t, 0.9, nil)
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"ls"}}`), Approve: approveCfg(srv.URL)}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Decision string `json:"permissionDecision"`
+		Reason   string `json:"permissionDecisionReason"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
+	}
+	if got.Decision != "allow" || got.Reason == "" {
+		t.Fatalf("stdout = %q, want allow with a reason", out.String())
+	}
+}
+
+func TestRunHookApproveDeny(t *testing.T) {
+	out := stubHookStdout(t)
+	srv := systemOneStub(t, 0.05, nil)
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"rm -rf /"}}`), Approve: approveCfg(srv.URL)}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Decision string `json:"permissionDecision"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
+	}
+	if got.Decision != "deny" {
+		t.Fatalf("stdout = %q, want deny", out.String())
+	}
+}
+
+func TestRunHookApproveAskNtfy(t *testing.T) {
+	stubNtfyDelay(t)
+	var ntfyTitle, ntfyClick, ntfyBody string
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ntfyTitle = r.Header.Get("Title")
+		ntfyClick = r.Header.Get("Click")
+		b, _ := io.ReadAll(r.Body)
+		ntfyBody = string(b)
+	}))
+	defer ntfy.Close()
+	stubNtfy(t, ntfy)
+
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"mirror":"http://mirror.example/?ws=file:///x%2Fy"}`))
+	}))
+	defer bridge.Close()
+
+	srv := systemOneStub(t, 0.3, nil)
+	out := stubHookStdout(t)
+	if err := runHook(t.Context(), hookParams{Bridge: bridge.URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","session_id":"01c86818-0239-4f9d-8a9c-375f7590bd28","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`), Approve: approveCfg(srv.URL)}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Decision string `json:"permissionDecision"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
+	}
+	if got.Decision != "ask" {
+		t.Fatalf("stdout = %q, want ask", out.String())
+	}
+	if ntfyTitle != "VS Code Copilot: tool approval needed [01c86818]" {
+		t.Errorf("ntfy title = %q", ntfyTitle)
+	}
+	if ntfyClick != "http://mirror.example/?ws=file:///x%2Fy" {
+		t.Errorf("ntfy click = %q", ntfyClick)
+	}
+	if !strings.HasPrefix(ntfyBody, "Tool run_in_terminal needs approval") {
+		t.Errorf("ntfy body = %q", ntfyBody)
+	}
+}
+
+func TestRunHookApproveNoMatchNoOutput(t *testing.T) {
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++ }))
+	defer srv.Close()
+	out := stubHookStdout(t)
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"view","tool_input":{"path":"/x"}}`), Approve: approveCfg(srv.URL)}); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("systemone requests = %d, want 0 for a non-matching tool", n)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty for a non-matching tool", out.String())
+	}
+}
+
+func TestRunHookApproveModelDownFailOpen(t *testing.T) {
+	out := stubHookStdout(t)
+	cfg := approveCfg("http://127.0.0.1:1") // nothing listening
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`), Approve: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty (fail-open) when the model is unreachable", out.String())
+	}
+}
+
+func TestRunHookApproveSendsKey(t *testing.T) {
+	var gotAuth string
+	srv := systemOneStub(t, 0.9, &gotAuth)
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`), Approve: approveCfg(srv.URL)}); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer test-key" {
+		t.Fatalf("Authorization = %q, want Bearer test-key", gotAuth)
+	}
+}
+
+func TestRunHookApproveDisabledNoCall(t *testing.T) {
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++ }))
+	defer srv.Close()
+	out := stubHookStdout(t)
+	// Zero-value config: feature disabled, no model call, no stdout.
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("systemone requests = %d, want 0 when disabled", n)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty when disabled", out.String())
+	}
+}
+
+func TestLoadApproveConfig(t *testing.T) {
+	good := `{
+		"servers": {"s0": {"model":"m","url":"http://x/v1/systemone","timeout":"5s"}},
+		"rules": [
+			{"match":"vscode_*","policy":"allow"},
+			{"match":"mcp_*","server":"s0","thresholds":[0.1,0.5]}
+		]
+	}`
+	dir := t.TempDir()
+	p := filepath.Join(dir, "approve.json")
+	if err := os.WriteFile(p, []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, ok := loadApproveConfig(p)
+	if !ok {
+		t.Fatal("expected a valid config")
+	}
+	if len(cfg.Rules) != 2 || cfg.Rules[1].Server != "s0" || cfg.Rules[1].Thresholds[0] != 0.1 {
+		t.Fatalf("parsed config = %+v", cfg)
+	}
+
+	// Empty path = disabled.
+	if _, ok := loadApproveConfig(""); ok {
+		t.Error("empty path should be disabled")
+	}
+	// Missing file.
+	if _, ok := loadApproveConfig(filepath.Join(dir, "nope.json")); ok {
+		t.Error("missing file should be disabled")
+	}
+	// Each of these must be rejected.
+	bad := func(body string) {
+		t.Helper()
+		bp := filepath.Join(dir, "bad.json")
+		if err := os.WriteFile(bp, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := loadApproveConfig(bp); ok {
+			t.Errorf("config %s should be invalid", body)
+		}
+	}
+	bad(`{`)
+	bad(`{"rules":[{"match":"a","policy":"allow","server":"s0"}]}`)         // both policy and server
+	bad(`{"rules":[{"match":"a","server":"s0"}]}`)                          // server not defined
+	bad(`{"rules":[{"match":"a","server":"nope","thresholds":[0.1,0.5]}]}`) // unknown server
+	bad(`{"rules":[{"match":"a","policy":"maybe"}]}`)                       // bad policy
+	bad(`{"rules":[{"match":"a","server":"s0","thresholds":[0.5,0.1]}]}`)   // bad thresholds
+	bad(`{"rules":[{"server":"s0","thresholds":[0.1,0.5]}]}`)               // no match
+}
+
+func TestRunHookApproveLocalAllow(t *testing.T) {
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++ }))
+	defer srv.Close()
+	out := stubHookStdout(t)
+	cfg := approveConfig{
+		Servers: map[string]approveServer{"srv": {Model: "m", URL: srv.URL}},
+		Rules:   []approveRule{{Match: "run_*", Policy: "allow"}},
+	}
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"ls"}}`), Approve: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Decision string `json:"permissionDecision"`
+		Reason   string `json:"permissionDecisionReason"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
+	}
+	if got.Decision != "allow" || got.Reason != "local rule: allow" {
+		t.Fatalf("stdout = %q, want allow / local rule: allow", out.String())
+	}
+	if n != 0 {
+		t.Fatalf("systemone requests = %d, want 0 for a local rule", n)
+	}
+}
+
+func TestRunHookApproveLocalAskNtfy(t *testing.T) {
+	stubNtfyDelay(t)
+	var ntfyTitle, ntfyBody string
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ntfyTitle = r.Header.Get("Title")
+		b, _ := io.ReadAll(r.Body)
+		ntfyBody = string(b)
+	}))
+	defer ntfy.Close()
+	stubNtfy(t, ntfy)
+
+	out := stubHookStdout(t)
+	cfg := approveConfig{Rules: []approveRule{{Match: "run_*", Policy: "ask"}}}
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, NtfyTopic: "my-topic", Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","session_id":"01c86818-0239-4f9d-8a9c-375f7590bd28","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`), Approve: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Decision string `json:"permissionDecision"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
+	}
+	if got.Decision != "ask" {
+		t.Fatalf("stdout = %q, want ask", out.String())
+	}
+	if ntfyTitle != "VS Code Copilot: tool approval needed [01c86818]" {
+		t.Errorf("ntfy title = %q", ntfyTitle)
+	}
+	if !strings.HasPrefix(ntfyBody, "Tool run_in_terminal needs approval") {
+		t.Errorf("ntfy body = %q", ntfyBody)
+	}
+}
+
+func TestRunHookApproveFirstRuleWins(t *testing.T) {
+	out := stubHookStdout(t)
+	// Both rules match run_in_terminal; the first (local allow) must win
+	// and the model rule must not be consulted (its server is unreachable).
+	cfg := approveConfig{
+		Servers: map[string]approveServer{"srv": {Model: "m", URL: "http://127.0.0.1:1"}},
+		Rules: []approveRule{
+			{Match: "run_*", Policy: "allow"},
+			{Match: "run_*", Server: "srv", Thresholds: [2]float64{0.1, 0.5}},
+		},
+	}
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"x"}}`), Approve: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Decision string `json:"permissionDecision"`
+		Reason   string `json:"permissionDecisionReason"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
+	}
+	if got.Decision != "allow" || got.Reason != "local rule: allow" {
+		t.Fatalf("stdout = %q, want the first rule (local allow) to win", out.String())
+	}
+}
+
+// TestCallSystemOne drives callSystemOne against a mock /v1/systemone server
+// and checks the request it sends plus the success and fail-open responses.
+func TestCallSystemOne(t *testing.T) {
+	stubHookLog(t)
+
+	var gotAuth, gotCT, gotModel, gotState string
+	var respStatus int
+	var respBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotCT = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model     string `json:"model"`
+			State     string `json:"state"`
+			Questions struct {
+				Safe struct {
+					Type         string `json:"type"`
+					Instructions string `json:"instructions"`
+				} `json:"safe"`
+			} `json:"questions"`
+		}
+		_ = json.Unmarshal(b, &req)
+		gotModel = req.Model
+		gotState = req.State
+		w.WriteHeader(respStatus)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	s := approveServer{Model: "dm", URL: srv.URL, Key: "k1"}
+	input := jsontext.Value(`{"command":"ls"}`)
+
+	// 1. Normal: noul present -> value returned.
+	respStatus = 200
+	respBody = `{"answers":{"safe":{"noul":0.7}}}`
+	v, ok := s.callSystemOne(t.Context(), "run_in_terminal", input)
+	if !ok || v != 0.7 {
+		t.Fatalf("got %v ok=%v, want 0.7 true", v, ok)
+	}
+	if gotModel != "dm" {
+		t.Errorf("model = %q, want dm", gotModel)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("content-type = %q, want application/json", gotCT)
+	}
+	if gotAuth != "Bearer k1" {
+		t.Errorf("auth = %q, want Bearer k1", gotAuth)
+	}
+	// state must carry the tool name and its input.
+	if !strings.Contains(gotState, `"run_in_terminal"`) || !strings.Contains(gotState, `"command":"ls"`) {
+		t.Errorf("state = %q, want tool_name + tool_input", gotState)
+	}
+
+	// 2. Missing noul -> fail-open (NaN sentinel).
+	respBody = `{"answers":{"safe":{}}}`
+	if v, ok := s.callSystemOne(t.Context(), "run_in_terminal", input); ok {
+		t.Fatalf("missing noul: got %v ok=true, want fail-open", v)
+	}
+
+	// 3. 5xx -> fail-open.
+	respStatus = 500
+	respBody = `{"answers":{"safe":{"noul":0.9}}}`
+	if _, ok := s.callSystemOne(t.Context(), "run_in_terminal", input); ok {
+		t.Fatal("5xx: want fail-open")
+	}
+
+	// 4. Malformed JSON -> fail-open.
+	respStatus = 200
+	respBody = `not json`
+	if _, ok := s.callSystemOne(t.Context(), "run_in_terminal", input); ok {
+		t.Fatal("bad json: want fail-open")
+	}
+
+	// 5. No key -> no Authorization header.
+	respBody = `{"answers":{"safe":{"noul":0.2}}}`
+	s2 := approveServer{Model: "dm", URL: srv.URL}
+	v, ok = s2.callSystemOne(t.Context(), "run_in_terminal", input)
+	if !ok || v != 0.2 {
+		t.Fatalf("no-key: got %v ok=%v, want 0.2 true", v, ok)
+	}
+	if gotAuth != "" {
+		t.Errorf("no-key: auth = %q, want empty", gotAuth)
 	}
 }
