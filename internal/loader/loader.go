@@ -119,9 +119,12 @@ func (l *Loader) Load(m config.Model, others map[string]struct{}) {
 		// server for its currently-loaded models and unload them (excluding
 		// the target). Failures are logged and never block the load.
 		if l.unloadOthers {
+			l.log.Debug("use unload others")
 			for baseURL := range others {
+				l.log.Debug("unload with url", "url", baseURL)
 				omU, err := url.Parse(baseURL)
 				if err != nil {
+					l.log.Warn("failed to unload", "url", baseURL, "err", err)
 					continue
 				}
 				omRoot := omU.Scheme + "://" + omU.Host
