@@ -685,13 +685,15 @@ func TestRunHookApproveAllow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Decision string `json:"permissionDecision"`
-		Reason   string `json:"permissionDecisionReason"`
+		HookSpecificOutput struct {
+			Decision string `json:"permissionDecision"`
+			Reason   string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
 	}
-	if got.Decision != "allow" || got.Reason == "" {
+	if got.HookSpecificOutput.Decision != "allow" || got.HookSpecificOutput.Reason == "" {
 		t.Fatalf("stdout = %q, want allow with a reason", out.String())
 	}
 }
@@ -704,12 +706,14 @@ func TestRunHookApproveDeny(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Decision string `json:"permissionDecision"`
+		HookSpecificOutput struct {
+			Decision string `json:"permissionDecision"`
+		} `json:"hookSpecificOutput"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
 	}
-	if got.Decision != "deny" {
+	if got.HookSpecificOutput.Decision != "deny" {
 		t.Fatalf("stdout = %q, want deny", out.String())
 	}
 }
@@ -739,12 +743,14 @@ func TestRunHookApproveAskNtfy(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Decision string `json:"permissionDecision"`
+		HookSpecificOutput struct {
+			Decision string `json:"permissionDecision"`
+		} `json:"hookSpecificOutput"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
 	}
-	if got.Decision != "ask" {
+	if got.HookSpecificOutput.Decision != "ask" {
 		t.Fatalf("stdout = %q, want ask", out.String())
 	}
 	if ntfyTitle != "VS Code Copilot: tool approval needed [01c86818]" {
@@ -880,13 +886,15 @@ func TestRunHookApproveLocalAllow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Decision string `json:"permissionDecision"`
-		Reason   string `json:"permissionDecisionReason"`
+		HookSpecificOutput struct {
+			Decision string `json:"permissionDecision"`
+			Reason   string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
 	}
-	if got.Decision != "allow" || got.Reason != "local rule: allow" {
+	if got.HookSpecificOutput.Decision != "allow" || got.HookSpecificOutput.Reason != "local rule: allow" {
 		t.Fatalf("stdout = %q, want allow / local rule: allow", out.String())
 	}
 	if n != 0 {
@@ -912,12 +920,14 @@ func TestRunHookApproveLocalAskNtfy(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Decision string `json:"permissionDecision"`
+		HookSpecificOutput struct {
+			Decision string `json:"permissionDecision"`
+		} `json:"hookSpecificOutput"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
 	}
-	if got.Decision != "ask" {
+	if got.HookSpecificOutput.Decision != "ask" {
 		t.Fatalf("stdout = %q, want ask", out.String())
 	}
 	if ntfyTitle != "VS Code Copilot: tool approval needed [01c86818]" {
@@ -944,13 +954,15 @@ func TestRunHookApproveFirstRuleWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Decision string `json:"permissionDecision"`
-		Reason   string `json:"permissionDecisionReason"`
+		HookSpecificOutput struct {
+			Decision string `json:"permissionDecision"`
+			Reason   string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("stdout %q not JSON: %v", out.String(), err)
 	}
-	if got.Decision != "allow" || got.Reason != "local rule: allow" {
+	if got.HookSpecificOutput.Decision != "allow" || got.HookSpecificOutput.Reason != "local rule: allow" {
 		t.Fatalf("stdout = %q, want the first rule (local allow) to win", out.String())
 	}
 }

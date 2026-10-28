@@ -477,18 +477,32 @@ func (srv approveServer) callSystemOne(ctx context.Context, toolName string, too
 	return out.Answers.Safe.Noul, true
 }
 
-// emitPermissionDecision writes the single-line preToolUse decision JSON to
-// stdout. The reason is always included (required for "deny").
-func emitPermissionDecision(decision, reason string) {
-	out, err := json.Marshal(struct {
+// preToolUseDecisionOutput is the PreToolUse stdout JSON the Copilot
+// extension expects. chatHookService.executePreToolUseHook reads the decision
+// from hookSpecificOutput.permissionDecision and returns early (ignoring the
+// decision) when hookSpecificOutput is absent, so the decision MUST be wrapped
+// in a hookSpecificOutput object — a top-level permissionDecision is dropped.
+type preToolUseDecisionOutput struct {
+	HookSpecificOutput struct {
+		HookEventName            string `json:"hookEventName"`
 		PermissionDecision       string `json:"permissionDecision"`
 		PermissionDecisionReason string `json:"permissionDecisionReason"`
-	}{PermissionDecision: decision, PermissionDecisionReason: reason})
+	} `json:"hookSpecificOutput"`
+}
+
+// emitPermissionDecision writes the PreToolUse decision JSON to stdout. The
+// reason is always included (required for "deny").
+func emitPermissionDecision(decision, reason string) {
+	var out preToolUseDecisionOutput
+	out.HookSpecificOutput.HookEventName = "PreToolUse"
+	out.HookSpecificOutput.PermissionDecision = decision
+	out.HookSpecificOutput.PermissionDecisionReason = reason
+	b, err := json.Marshal(out)
 	if err != nil {
 		reportApproveError(fmt.Errorf("marshal decision: %w", err))
 		return
 	}
-	fmt.Fprintln(hookStdout, string(out))
+	fmt.Fprintln(hookStdout, string(b))
 }
 
 // pushAskNtfy pushes one ntfy notification for a tool call the model scored
