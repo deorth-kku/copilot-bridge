@@ -39,6 +39,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -56,14 +57,6 @@ const hookMaxBody = 1 << 20
 // hookTimeout bounds the round trip to the bridge. VS Code's default hook
 // timeout is 30s; we stay far inside it.
 const hookTimeout = 5 * time.Second
-
-// systemOneTimeout is the DEFAULT per-call bound for a /v1/systemone
-// decision-model call (a server can override it with its own "timeout"). A
-// decision model answers in well under a second; 8s leaves headroom while
-// keeping the worst-case hook budget (8s + ntfyMaxAttempts*ntfyTimeout +
-// ntfyRetryDelay = 8s + 12s + 1s = 21s) close to the 20s hook timeout in
-// the install doc. A slow model is treated as a failure (fail-open).
-const systemOneTimeout = 8 * time.Second
 
 // systemOneQuestionID is the id of the single noul question the hook asks
 // the decision model.
@@ -84,7 +77,7 @@ type approveServer struct {
 	Model   string        `json:"model"`
 	URL     string        `json:"url"`
 	Key     string        `json:"key"`
-	Timeout time.Duration `json:"timeout"` // duration string; default systemOneTimeout
+	Timeout time.Duration `json:"timeout"`
 }
 
 // approveRule gates one set of tools by a glob match. It is EITHER a local
@@ -106,12 +99,10 @@ var ntfyBaseURL = "https://ntfy.sh"
 const ntfyMaxLen = 1500
 
 // ntfyTimeout bounds a single ntfy push attempt.
-const ntfyTimeout = 6 * time.Second
+const ntfyTimeout = 5 * time.Second
 
 // ntfyMaxAttempts is the number of push attempts (one retry covers
-// transient proxy/CDN hiccups, e.g. an EOF mid-request). Worst-case hook
-// budget: hookTimeout + ntfyMaxAttempts*ntfyTimeout + ntfyRetryDelay =
-// 5s + 12s + 1s = 18s, inside the 20s hook timeout in the install doc.
+// transient proxy/CDN hiccups, e.g. an EOF mid-request).
 const ntfyMaxAttempts = 2
 
 // ntfyRetryDelay separates retry attempts (a var so tests can skip the
@@ -139,6 +130,7 @@ var hookStdout io.Writer = os.Stdout
 // runHookCommand is the entry point for the "hook" subcommand. It always
 // exits with status 0 (see the package comment).
 func runHookCommand(args []string) {
+	setupHookLogger()
 	fs := flag.NewFlagSet("hook", flag.ContinueOnError)
 	bridge := fs.String("bridge", "http://127.0.0.1:9527", "bridge HTTP address (the mirror web server)")
 	ntfyTopic := fs.String("ntfy-topic", "", "ntfy.sh topic for the task-finished notification (empty = no notification)")
@@ -146,6 +138,7 @@ func runHookCommand(args []string) {
 	if err := fs.Parse(args); err != nil {
 		os.Exit(0)
 	}
+	slog.Info("hook start", "bridge", *bridge, "ntfy-topic", *ntfyTopic, "approve-config", *approveCfg)
 	approve, _ := loadApproveConfig(*approveCfg)
 	// The hook's lifetime is bounded by the process signals: a SIGTERM (or
 	// Ctrl+C) cancels the context, which in turn cancels every in-flight
@@ -197,8 +190,14 @@ func runHook(ctx context.Context, p hookParams) error {
 	// Not fatal: the payload is forwarded verbatim regardless; the fields
 	// are only needed for the ntfy notifications.
 	_ = json.UnmarshalRead(tr, &ev)
+	slog.Info("hook event", "event", ev.Name, "tool", ev.ToolName, "session", ev.SessionID)
 
 	mirrorURL, bridgeErr := bridgeHook(ctx, p.Bridge, body)
+	if bridgeErr != nil {
+		slog.Warn("bridge hook failed", "err", bridgeErr)
+	} else {
+		slog.Info("bridge hook ok", "mirror", mirrorURL)
+	}
 
 	// PostToolUse of task_complete: always stop the agent execution.
 	// VS Code's default is to return to the agent once more after
@@ -263,6 +262,7 @@ func parseTime(data []byte, t *time.Duration) error {
 func loadApproveConfig(path string) (approveConfig, bool) {
 	var cfg approveConfig
 	if path == "" {
+		slog.Info("approve: disabled (no -approve-config)")
 		return cfg, false
 	}
 	f, err := os.Open(path)
@@ -279,6 +279,7 @@ func loadApproveConfig(path string) (approveConfig, bool) {
 		reportApproveError(err)
 		return approveConfig{}, false
 	}
+	slog.Info("approve: config loaded", "path", path, "rules", len(cfg.Rules), "servers", len(cfg.Servers))
 	return cfg, true
 }
 
@@ -335,25 +336,31 @@ func toolMatchesOne(name, pattern string) bool {
 // an ntfy notification. A non-matching tool, or any model failure, leaves
 // stdout empty (fail-open: VS Code decides).
 func (cfg approveConfig) approveToolCall(ctx context.Context, ntfyTopic, sessionID, toolName string, toolInput jsontext.Value, mirrorURL string) {
-	for _, r := range cfg.Rules {
+	slog.Info("approve: evaluating", "tool", toolName, "rules", len(cfg.Rules))
+	for i, r := range cfg.Rules {
 		if !toolMatchesOne(toolName, r.Match) {
+			slog.Debug("approve: rule no match", "rule", i, "match", r.Match, "tool", toolName)
 			continue
 		}
 		if r.Policy != "" {
 			// Local rule: decide without calling the model.
+			slog.Info("approve: local rule", "rule", i, "match", r.Match, "policy", r.Policy)
 			emitPermissionDecision(r.Policy, "local rule: "+r.Policy)
 			if r.Policy == "ask" && ntfyTopic != "" {
 				pushAskNtfy(ctx, ntfyTopic, sessionID, toolName, toolInput, mirrorURL)
 			}
 			return
 		}
+		slog.Info("approve: model rule", "rule", i, "match", r.Match, "server", r.Server)
 		srv := cfg.Servers[r.Server]
 		v, ok := srv.callSystemOne(ctx, toolName, toolInput)
 		if !ok {
 			// Model unreachable / bad response: fail-open.
+			slog.Warn("approve: model fail-open", "server", r.Server, "tool", toolName)
 			return
 		}
 		decision := noulDecision(v, r.Thresholds[0], r.Thresholds[1])
+		slog.Info("approve: decision", "decision", decision, "noul", v, "t1", r.Thresholds[0], "t2", r.Thresholds[1])
 		emitPermissionDecision(decision, noulReason(v, r.Thresholds[0], r.Thresholds[1]))
 		if decision == "ask" && ntfyTopic != "" {
 			pushAskNtfy(ctx, ntfyTopic, sessionID, toolName, toolInput, mirrorURL)
@@ -361,6 +368,7 @@ func (cfg approveConfig) approveToolCall(ctx context.Context, ntfyTopic, session
 		return
 	}
 	// No rule matched: keep the current behavior (no decision).
+	slog.Info("approve: no rule matched", "tool", toolName)
 }
 
 // noulDecision maps a 0..1 noul value to a permission decision using the two
@@ -799,23 +807,28 @@ func assistantContent(raw jsontext.Value) string {
 	return strings.Join(parts, "\n")
 }
 
-// hookLogPath is the app log path for hook error lines (a var so tests
-// can redirect it away from the real log).
-var hookLogPath = defaultLogPath()
-
-// logHookError appends one line to the app log (the GUI build has no
-// console, so stderr alone is not visible). Best effort.
-func logHookError(err error) {
-	p := hookLogPath
+// setupHookLogger installs the hook subcommand's file logger as the process
+// default (slog.SetDefault), mirroring the daemon's run(): it opens
+// defaultHookLogPath ONCE (the same folder as the service log, a different
+// filename) and writes slog text records to it. If the file cannot be
+// opened it falls back to stderr so a logging failure never breaks the hook.
+// Tests call runHook directly (not runHookCommand) and install their own
+// default logger.
+func setupHookLogger() {
+	p := defaultHookLogPath()
+	var w io.Writer = os.Stderr
 	if dir := filepath.Dir(p); dir != "" && dir != "." {
-		if e := os.MkdirAll(dir, 0o755); e != nil {
-			return
+		if e := os.MkdirAll(dir, 0o755); e == nil {
+			if f, e := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); e == nil {
+				w = f
+			}
 		}
 	}
-	f, e := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if e != nil {
-		return
-	}
-	defer f.Close()
-	fmt.Fprintf(f, "time=%s hook: %v\n", time.Now().Format(time.RFC3339), err)
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
+}
+
+// logHookError reports one hook error on the default logger (the GUI build
+// has no console, so stderr alone is not visible). Best effort.
+func logHookError(err error) {
+	slog.Error("hook", "err", err)
 }

@@ -224,6 +224,13 @@ func defaultLogPath() string {
 	return filepath.Join(os.TempDir(), "copilot-bridge", "app.log")
 }
 
+// defaultHookLogPath returns the hook subcommand's log file location: the
+// SAME folder as the service log (defaultLogPath) with a different name,
+// e.g. %TEMP%\copilot-bridge\hook.log on Windows.
+func defaultHookLogPath() string {
+	return filepath.Join(filepath.Dir(defaultLogPath()), "hook.log")
+}
+
 // defaultStoragePath returns the VS Code user globalStorage storage.json
 // location (vscodeUserDir + globalStorage/storage.json).
 func defaultStoragePath() string {

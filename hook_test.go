@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -390,12 +391,23 @@ func stubNtfyDelay(t *testing.T) {
 	t.Cleanup(func() { ntfyRetryDelay = orig })
 }
 
-// stubHookLog redirects hook error logging to a temp file.
-func stubHookLog(t *testing.T) {
+// stubHookLog points the default slog logger at a temp file for the duration
+// of the test and returns the path. runHookCommand installs the real file
+// logger via slog.SetDefault; tests call runHook directly, so they install
+// their own default logger here.
+func stubHookLog(t *testing.T) string {
 	t.Helper()
-	orig := hookLogPath
-	hookLogPath = filepath.Join(t.TempDir(), "app.log")
-	t.Cleanup(func() { hookLogPath = orig })
+	orig := slog.Default()
+	f, err := os.Create(filepath.Join(t.TempDir(), "hook.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		slog.SetDefault(orig)
+		f.Close()
+	})
+	slog.SetDefault(slog.New(slog.NewTextHandler(f, nil)))
+	return f.Name()
 }
 
 // okBridge is a minimal bridge stub answering 200.
@@ -940,6 +952,50 @@ func TestRunHookApproveFirstRuleWins(t *testing.T) {
 	}
 	if got.Decision != "allow" || got.Reason != "local rule: allow" {
 		t.Fatalf("stdout = %q, want the first rule (local allow) to win", out.String())
+	}
+}
+
+// TestRunHookWritesLog checks the hook logger appends the key flow lines
+// (event, approve evaluation, decision) to the hook log file.
+func TestRunHookWritesLog(t *testing.T) {
+	logPath := stubHookLog(t)
+	out := stubHookStdout(t)
+	srv := systemOneStub(t, 0.9, nil)
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"run_in_terminal","tool_input":{"command":"ls"}}`), Approve: approveCfg(srv.URL)}); err != nil {
+		t.Fatal(err)
+	}
+	_ = out
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(b)
+	for _, want := range []string{"hook event", "approve: evaluating", "approve: decision", "decision=allow"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log missing %q; log =\n%s", want, log)
+		}
+	}
+}
+
+// TestRunHookLogsNoRuleMatched checks a non-matching PreToolUse tool logs
+// the no-match outcome (the "allow not working" diagnostic).
+func TestRunHookLogsNoRuleMatched(t *testing.T) {
+	logPath := stubHookLog(t)
+	out := stubHookStdout(t)
+	if err := runHook(t.Context(), hookParams{Bridge: okBridge(t).URL, Stdin: strings.NewReader(
+		`{"hook_event_name":"PreToolUse","tool_name":"view","tool_input":{"path":"/x"}}`), Approve: approveCfg("http://127.0.0.1:1")}); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty for a non-matching tool", out.String())
+	}
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "approve: no rule matched") {
+		t.Errorf("log missing no-rule-matched line; log =\n%s", b)
 	}
 }
 
