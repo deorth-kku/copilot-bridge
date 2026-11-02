@@ -51,12 +51,13 @@ type stateMsg struct {
 	// each .chat-thinking-box); the browser maps each live ratio onto its own
 	// copy of the element.
 	NestedScrolls []cdp.NestedScroll `json:"nestedScrolls,omitempty"`
-	// Popup is the visible context view (popup menu / dropdown) that renders
-	// outside the pane root. HTML is only present when it changed since the
-	// last message; Left/Top are pane-relative and always present. Null when
-	// no popup is open (the browser removes its copy).
-	Popup  *cdp.PopupState `json:"popup,omitempty"`
-	Window string          `json:"window,omitempty"`
+	// Popups are the visible context views (popup menus, dropdowns, tooltips)
+	// that render outside the pane root. Each entry's HTML is only present
+	// when it changed since the last message; Left/Top are pane-relative and
+	// always present. Empty/nil when no popup is open (the browser removes
+	// its copies).
+	Popups []cdp.PopupState `json:"popups,omitempty"`
+	Window string           `json:"window,omitempty"`
 	// WindowID is the CDP target id of the window currently mirrored; the
 	// browser uses it to mark the selected item in the status-bar picker.
 	WindowID string `json:"windowId,omitempty"`

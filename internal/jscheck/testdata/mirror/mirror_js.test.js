@@ -295,7 +295,7 @@ test('mirror: popup without a known anchor falls back to pane-relative + viewpor
   const { pane, ws } = setup();
   try {
     state(ws, {
-      popup: { html: '<div class="context-view"><div class="monaco-list-row">A</div></div>', left: 1200, top: 750, width: 200, height: 100 },
+      popups: [{ id: 0, html: '<div class="context-view"><div class="monaco-list-row">A</div></div>', left: 1200, top: 750, width: 200, height: 100 }],
     });
     const pop = pane.children[0];
     assert.equal(pop.getAttribute('class'), 'context-view');
@@ -342,11 +342,12 @@ test('mirror: popup anchors to the mirror copy of the last-clicked control', () 
     span.dispatchEvent({ type: 'mousedown', target: span, clientX: 116, clientY: 136, button: 0, buttons: 1, detail: 1, preventDefault() {} });
     // Live popup opens flush below the live anchor (same size as the mirror one).
     state(ws, {
-      popup: {
+      popups: [{
+        id: 0,
         html: '<div class="context-view"><div class="monaco-list-row">M</div></div>',
         left: 100, top: 152, width: 160, height: 80,
         anchor: { left: 100, top: 120, width: 120, height: 32 },
-      },
+      }],
     });
     const pop = pane.children[1];
     assert.equal(pop.style.position, 'fixed');
@@ -359,11 +360,48 @@ test('mirror: popup anchors to the mirror copy of the last-clicked control', () 
 test('mirror: a state without a popup removes the rendered popup', () => {
   const { pane, ws } = setup();
   try {
-    state(ws, { popup: { html: '<div class="context-view"></div>', left: 10, top: 10, width: 50, height: 50 } });
+    state(ws, { popups: [{ id: 0, html: '<div class="context-view"></div>', left: 10, top: 10, width: 50, height: 50 }] });
     const pop = pane.children[0];
     state(ws, { html: '<div class="root"></div>' });
     assert.equal(pop.parentElement, null);
     assert.equal(pane.children.length, 0);
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: two popups render as separate overlays', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      popups: [
+        { id: 0, html: '<div class="context-view">A</div>', left: 10, top: 10, width: 50, height: 50 },
+        { id: 1, html: '<div class="context-view">B</div>', left: 200, top: 10, width: 50, height: 50 },
+      ],
+    });
+    assert.equal(pane.children.length, 2);
+    // (the domstub's element textContent does not traverse children; the
+    // text lives in the child Text node)
+    assert.equal(pane.children[0].childNodes[0].data, 'A');
+    assert.equal(pane.children[1].childNodes[0].data, 'B');
+    assert.equal(pane.children[1].style.left, '200px');
+  } finally { uninstallGlobals(); }
+});
+
+test('mirror: closing the first of two popups keeps the second (id, not index)', () => {
+  const { pane, ws } = setup();
+  try {
+    state(ws, {
+      popups: [
+        { id: 0, html: '<div class="context-view">A</div>', left: 10, top: 10, width: 50, height: 50 },
+        { id: 1, html: '<div class="context-view">B</div>', left: 200, top: 10, width: 50, height: 50 },
+      ],
+    });
+    const b = pane.children[1];
+    // A closes; the server list is now [B] — B keeps its STABLE id 1, so it
+    // must not be shifted into A's slot nor closed with A.
+    state(ws, { popups: [{ id: 1, html: '<div class="context-view">B</div>', left: 200, top: 10, width: 50, height: 50 }] });
+    assert.equal(b.parentElement, pane, 'the surviving popup must stay rendered');
+    assert.equal(b.childNodes[0].data, 'B');
+    assert.equal(pane.children.length, 1);
   } finally { uninstallGlobals(); }
 });
 

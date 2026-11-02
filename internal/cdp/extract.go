@@ -96,8 +96,11 @@ type HTMLState struct {
 	ThemeBg string `json:"themeBg"`
 	layoutState
 	CSSFP string `json:"cssFP"`
-	// Popup is the currently visible context view (nil when none is open).
-	Popup *PopupState `json:"popup"`
+	// Popups are the currently visible context views (empty/nil when none
+	// is open). VS Code can show several at once (e.g. the model picker
+	// dropdown plus an auto-shown hover tooltip), so the mirror renders
+	// each as a separate overlay.
+	Popups []PopupState `json:"popups"`
 }
 
 // CSSState is the result of ExtractCSS.
@@ -107,11 +110,16 @@ type CSSState struct {
 
 // PopupState is one visible context view (popup menu, dropdown, tooltip)
 // captured alongside the pane. VS Code renders context views OUTSIDE the
-// pane root — in a single .context-view container that is a child of the
+// pane root — in .context-view containers that are children of the
 // workbench root — so the pane subtree alone never contains them. Left/Top
 // are the container's offset relative to the pane root's bounding box, so
 // the mirror can place it in the same pane-relative spot.
 type PopupState struct {
+	// ID is the container's index in the FULL (including hidden)
+	// .context-view list. The containers are persistent DOM nodes, so the
+	// id is stable across open/close cycles and does not shift when an
+	// earlier popup closes — the mirror matches its copies by this id.
+	ID     int     `json:"id"`
 	HTML   string  `json:"html,omitempty"`
 	Left   float64 `json:"left"`
 	Top    float64 `json:"top"`
@@ -402,27 +410,31 @@ const htmlExpr = `(selectors) => {
   // Context views (popup menus, dropdowns, tooltips) render OUTSIDE the
   // pane root — in .context-view containers that are children of the
   // workbench root — so the pane subtree alone never contains them. There
-  // can be MORE THAN ONE: the action-list menus live in one (which stays in
-  // the DOM, hidden, between openings) while hover-style popups such as the
-  // context-usage "Session Info" widget render in a separate one. Capture
-  // the currently visible one (the last visible in DOM order, i.e. the one
-  // painted on top), positioned relative to the pane root, so the mirror can
-  // render it in the same pane-relative spot.
-  let popup = null;
+  // can be MORE THAN ONE visible at once: the action-list menus live in one
+  // while hover-style popups (tooltips, the context-usage "Session Info"
+  // widget) render in separate containers. Capture ALL currently visible
+  // ones, positioned relative to the pane root, so the mirror can render
+  // each in the same pane-relative spot. Each carries a stable id: its
+  // index in the FULL (including hidden) .context-view list. The containers
+  // are persistent DOM nodes, so the id does not shift when an earlier
+  // popup closes and the mirror can match its copies across frames.
+  let popups = null;
   try {
-    let cv = null;
-    for (const c of document.querySelectorAll('.context-view')) {
+    const cvs = document.querySelectorAll('.context-view');
+    const visible = [];
+    for (let i = 0; i < cvs.length; i++) {
+      const c = cvs[i];
       const cr = c.getBoundingClientRect();
-      if (cr.width > 0 && cr.height > 0) cv = c;
+      if (cr.width > 0 && cr.height > 0) {
+        visible.push({
+          id: i,
+          html: safeHTML(c),
+          left: cr.left - r.left, top: cr.top - r.top,
+          width: cr.width, height: cr.height,
+        });
+      }
     }
-    if (cv) {
-      const cr = cv.getBoundingClientRect();
-      popup = {
-        html: safeHTML(cv),
-        left: cr.left - r.left, top: cr.top - r.top,
-        width: cr.width, height: cr.height,
-      };
-    }
+    if (visible.length > 0) popups = visible;
   } catch (e) {}
   // Serialize the pane subtree with the HTML parser's structural hazards
   // escaped: <a>, <button> and <form> are emitted as x-a / x-button /
@@ -485,7 +497,7 @@ const htmlExpr = `(selectors) => {
     scrollRows: scrollRows,
     nestedScrolls: nestedScrolls,
     cssFP: cssFP,
-    popup: popup,
+    popups: popups,
   };
 }`
 
@@ -649,23 +661,27 @@ const fpExpr = `(selectors) => {
   // text content) still triggers a full re-extract of themeVars.
   let themeInd = '';
   try { themeInd = getComputedStyle(el).getPropertyValue('--vscode-foreground').trim(); } catch (e) {}
-  // The context view (popup menus) sits OUTSIDE the pane root, so the pane's
+  // The context views (popup menus) sit OUTSIDE the pane root, so the pane's
   // own content never changes when a popup opens, closes, or moves — fold a
   // cheap popup fingerprint into fp so any of those triggers a re-extract.
-  // As in htmlExpr, pick the visible .context-view (there can be several:
-  // the hidden menu one plus hover popups such as the context-usage widget).
+  // There can be several visible at once (the action-list menu plus a hover
+  // tooltip); fingerprint each so any open/close/move triggers a re-extract.
+  // Each part is prefixed with the container's stable id (its index in the
+  // FULL list) so a shift in visible order is not mistaken for a content
+  // change of the surviving popup.
   let popFP = '';
   try {
-    let cv = null;
-    for (const c of document.querySelectorAll('.context-view')) {
+    let parts = [];
+    const cvs = document.querySelectorAll('.context-view');
+    for (let i = 0; i < cvs.length; i++) {
+      const c = cvs[i];
       const cr = c.getBoundingClientRect();
-      if (cr.width > 0 && cr.height > 0) cv = c;
+      if (cr.width > 0 && cr.height > 0) {
+        parts.push(i + ':' + c.innerText.length + ':' + c.childElementCount + ':' +
+          Math.round(cr.left) + ':' + Math.round(cr.top));
+      }
     }
-    if (cv) {
-      const cr = cv.getBoundingClientRect();
-      popFP = cv.innerText.length + ':' + cv.childElementCount + ':' +
-        Math.round(cr.left) + ':' + Math.round(cr.top);
-    }
+    if (parts.length > 0) popFP = parts.join('|');
   } catch (e) {}
   // Chat-input cursor state, folded into the fp so caret moves and focus
   // changes trigger a full re-extract: neither alters innerText or the
@@ -884,17 +900,17 @@ const clickPointExpr = `(args) => {
   ` + findRootJS + `
   let root = null;
   let p = path;
-  // A path starting with -1 is rooted at the live context view (popup)
-  // instead of the pane root; the remaining indices are relative to it.
-  // There can be several .context-view elements (the hidden menu one plus
-  // hover popups such as the context-usage widget); use the visible one.
-  if (Array.isArray(p) && p.length > 0 && p[0] === -1) {
-    const cvs = document.querySelectorAll('.context-view');
-    for (const c of cvs) {
+  // A path starting with a negative value -(id+1) is rooted at the
+  // .context-view (popup) container with that stable id — its index in the
+  // FULL (including hidden) .context-view list — instead of the pane root;
+  // the remaining indices are relative to it.
+  if (Array.isArray(p) && p.length > 0 && p[0] < 0) {
+    const id = -p[0] - 1; // .context-view index in the full list
+    const c = document.querySelectorAll('.context-view')[id];
+    if (c) {
       const cr = c.getBoundingClientRect();
-      if (cr.width > 0 && cr.height > 0) root = c;
+      if (cr.width > 0 && cr.height > 0) { root = c; p = p.slice(1); }
     }
-    if (root) p = p.slice(1);
   } else {
     root = findRoot(sels);
   }

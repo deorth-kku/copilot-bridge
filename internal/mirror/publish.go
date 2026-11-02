@@ -241,7 +241,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 
 	// Full HTML extract only when the content fingerprint changed.
 	var html, rootStyle, themeVars, themeBg string
-	var newPopup *cdp.PopupState
+	var newPopups []cdp.PopupState
 	var htmlMs int64
 	// The nested-scroll state shipped with a message must be measured at the
 	// SAME instant as the HTML it accompanies. The fingerprint (taken first,
@@ -266,12 +266,15 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		if hs.NestedScrolls != nil {
 			nestedScrolls = hs.NestedScrolls
 		}
-		if hs.Popup != nil {
-			newPopup = hs.Popup
-			// Popups can carry images too (e.g. the attached-image hover
-			// preview renders its full-size blob img inside the hover's
-			// .context-view); rewrite them just like the pane's.
-			newPopup.HTML = m.rewriteImages(s, newPopup.HTML)
+		if len(hs.Popups) > 0 {
+			newPopups = make([]cdp.PopupState, len(hs.Popups))
+			for i := range hs.Popups {
+				newPopups[i] = hs.Popups[i]
+				// Popups can carry images too (e.g. the attached-image hover
+				// preview renders its full-size blob img inside the hover's
+				// .context-view); rewrite them just like the pane's.
+				newPopups[i].HTML = m.rewriteImages(s, hs.Popups[i].HTML)
+			}
 		}
 		html = m.rewriteImages(s, html)
 		htmlMs = time.Since(exStart).Milliseconds()
@@ -299,13 +302,29 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		window:        s.Title(), windowID: winID, fp: fpst.FP, inputFocused: fpst.InputFocused,
 		cursorChar: fpst.CursorChar, inputBreaks: fpst.InputBreaks,
 	}
-	if newPopup != nil {
-		ns.popupHTML = newPopup.HTML
-		ns.popupFP = hashStr(newPopup.HTML)
-		ns.popupLeft = newPopup.Left
-		ns.popupTop = newPopup.Top
-		ns.popupW = newPopup.Width
-		ns.popupH = newPopup.Height
+	if fpChanged {
+		// The content fingerprint changed: the fresh extract is the source
+		// of truth for which popups are open. An empty newPopups here means
+		// a popup just CLOSED, so ns.popups must stay nil (the mirror closes
+		// its copy).
+		if len(newPopups) > 0 {
+			ns.popups = make([]popupSnap, len(newPopups))
+			for i := range newPopups {
+				ns.popups[i] = popupSnap{
+					id: newPopups[i].ID, html: newPopups[i].HTML, fp: hashStr(newPopups[i].HTML),
+					left: newPopups[i].Left, top: newPopups[i].Top,
+					width: newPopups[i].Width, height: newPopups[i].Height,
+				}
+			}
+		}
+	} else if prev != nil {
+		// A refresh that did NOT change the content fingerprint (scroll,
+		// rect, css, nested) must still advertise the popups that are
+		// already open: the mirror treats an empty popup list as "all
+		// closed", so dropping them here would make an open popup vanish on
+		// the very next non-content refresh. Their HTML is unchanged (fp did
+		// not change), so only their positions are re-sent below.
+		ns.popups = prev.popups
 	}
 	m.snapMu.Lock()
 	m.snaps[winID] = ns
@@ -321,31 +340,49 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 	if fpChanged {
 		base.HTML = html
 	}
-	// The popup is part of the content fingerprint, so it only changes when
-	// fpChanged. Always advertise its position while it is open (the browser
-	// keeps its DOM and just re-positions); re-send the HTML only when it
-	// actually changed.
-	if ns.popupFP != "" {
-		base.Popup = &cdp.PopupState{Left: ns.popupLeft, Top: ns.popupTop, Width: ns.popupW, Height: ns.popupH}
-		if prev == nil || prev.popupFP != ns.popupFP {
-			base.Popup.HTML = ns.popupHTML
+	// The popups are part of the content fingerprint, so they only change
+	// when fpChanged. Always advertise their positions while open (the
+	// browser keeps its DOM and just re-positions); re-send the HTML only
+	// when it actually changed.
+	if len(ns.popups) > 0 {
+		base.Popups = make([]cdp.PopupState, len(ns.popups))
+		for i := range ns.popups {
+			base.Popups[i] = cdp.PopupState{
+				ID: ns.popups[i].id, Left: ns.popups[i].left, Top: ns.popups[i].top,
+				Width: ns.popups[i].width, Height: ns.popups[i].height,
+			}
+			// Match the previous frame's popup by stable id: the array order
+			// shifts when an earlier popup closes, so index comparison would
+			// compare two different popups.
+			prevFP := ""
+			if prev != nil {
+				for _, pp := range prev.popups {
+					if pp.id == ns.popups[i].id {
+						prevFP = pp.fp
+						break
+					}
+				}
+			}
+			if prev == nil || prevFP != ns.popups[i].fp {
+				base.Popups[i].HTML = ns.popups[i].html
+			}
 		}
 	}
 	if sendTheme {
 		base.ThemeVars = themeVars
 		base.ThemeBg = themeBg
 	}
-	// The popup's anchor depends on each client's OWN last-clicked control
+	// The popups' anchor depends on each client's OWN last-clicked control
 	// (several tabs can mirror this window at once), so resolve it per
 	// client on every refresh while a popup is open: one cheap eval per
 	// client, only while visible. Marshal a copy of the message per client
-	// — never mutate the shared Popup pointer.
+	// — never mutate the shared Popups slice.
 	marshalStart := time.Now()
-	// Phase 1: the pane HTML and the popup, styled by the CACHED css. This is
-	// what makes the popup visible in the mirror, so it must not wait for a
-	// CSS re-extract. A client that has not rendered this window yet (just
-	// connected, or just switched via the picker) gets the cached CSS here
-	// and the fresh extract in phase 2.
+	// Phase 1: the pane HTML and the popups, styled by the CACHED css. This
+	// is what makes the popups visible in the mirror, so it must not wait
+	// for a CSS re-extract. A client that has not rendered this window yet
+	// (just connected, or just switched via the picker) gets the cached CSS
+	// here and the fresh extract in phase 2.
 	phase1Ms := int64(0)
 	if fpChanged || rectChanged || scrollChanged || nestedChanged || anyNeedsFull {
 		for _, c := range group {
@@ -361,8 +398,8 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 				msg.ThemeBg = themeBg
 				c.lastWin.Store(&winID)
 			}
-			if ns.popupFP != "" && msg.Popup != nil {
-				m.withPopupAnchor(&msg, c, s, fpst.Rect)
+			if len(msg.Popups) > 0 {
+				m.withPopupAnchors(&msg, c, s, fpst.Rect)
 			}
 			c.sendTo(msg)
 		}
@@ -394,13 +431,24 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 				Rect: fpst.Rect, Scroll: fpst.Scroll, ScrollPath: fpst.ScrollPath, ScrollRows: fpst.ScrollRows,
 				Window: s.Title(), WindowID: winID, Windows: wins,
 			}
-			if ns.popupFP != "" {
-				follow.Popup = &cdp.PopupState{Left: ns.popupLeft, Top: ns.popupTop, Width: ns.popupW, Height: ns.popupH}
+			if len(ns.popups) > 0 {
+				follow.Popups = make([]cdp.PopupState, len(ns.popups))
+				for i := range ns.popups {
+					// The ID MUST be carried: the mirror matches its open
+					// popups by stable id, and a follow that omits it (id 0)
+					// makes the mirror's close check fail and drop the very
+					// popup phase 1 just rendered.
+					follow.Popups[i] = cdp.PopupState{
+						ID:   ns.popups[i].id,
+						Left: ns.popups[i].left, Top: ns.popups[i].top,
+						Width: ns.popups[i].width, Height: ns.popups[i].height,
+					}
+				}
 			}
 			for _, c := range m.groupClients(m.disc.Windows())[winID] {
 				fm := follow
-				if fm.Popup != nil {
-					m.withPopupAnchor(&fm, c, s, fpst.Rect)
+				if len(fm.Popups) > 0 {
+					m.withPopupAnchors(&fm, c, s, fpst.Rect)
 				}
 				c.sendTo(fm)
 			}
@@ -419,13 +467,14 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		"htmlBytes", len(html), "cssBytes", len(css))
 }
 
-// withPopupAnchor resolves the client's last-clicked control to a live rect
-// and attaches it as the popup's anchor, mutating the (per-client COPY of
-// the) message in place. The mirror applies the live (popup - anchor)
-// offset to its own copy of the control, which is size-independent. No-op
-// when the message carries no popup or the client has no anchor yet.
-func (m *Mirror) withPopupAnchor(msg *stateMsg, c *client, s *cdp.Session, paneRect cdp.PaneRect) {
-	if msg.Popup == nil {
+// withPopupAnchors resolves the client's last-clicked control to a live rect
+// and attaches it as the anchor on each popup in the message, mutating the
+// (per-client COPY of the) message in place. The mirror applies the live
+// (popup - anchor) offset to its own copy of the control, which is
+// size-independent. No-op when the message carries no popups or the client
+// has no anchor yet.
+func (m *Mirror) withPopupAnchors(msg *stateMsg, c *client, s *cdp.Session, paneRect cdp.PaneRect) {
+	if len(msg.Popups) == 0 {
 		return
 	}
 	ap := c.lastAnchor.Load()
@@ -436,12 +485,19 @@ func (m *Mirror) withPopupAnchor(msg *stateMsg, c *client, s *cdp.Session, paneR
 	if !ok {
 		return
 	}
-	p := *msg.Popup
-	p.Anchor = &cdp.PaneRect{
+	anchor := &cdp.PaneRect{
 		Left: ar.Left - paneRect.Left, Top: ar.Top - paneRect.Top,
 		Width: ar.Width, Height: ar.Height,
 	}
-	msg.Popup = &p
+	// Copy the slice before mutating: msg is a SHALLOW copy of a message
+	// shared by the per-client loop, so writing Anchor in place would leak
+	// this client's anchor into the other clients' messages (visible
+	// whenever a later client early-returns above and keeps the stale
+	// entries).
+	msg.Popups = append([]cdp.PopupState(nil), msg.Popups...)
+	for i := range msg.Popups {
+		msg.Popups[i].Anchor = anchor
+	}
 }
 
 // windowIn reports whether id is in the (title-sorted) window set.

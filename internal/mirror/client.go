@@ -214,14 +214,22 @@ func mergeState(old, new stateMsg) stateMsg {
 	if new.Windows == nil {
 		new.Windows = old.Windows
 	}
-	// A nil popup in the NEWER frame means "the popup closed" — that is
-	// intentional and must not be resurrected from the older frame. A
-	// position-only popup (its HTML changed earlier) inherits the latest
-	// payload from the older frame.
-	if new.Popup != nil && new.Popup.HTML == "" && old.Popup != nil && old.Popup.HTML != "" {
-		p := *new.Popup
-		p.HTML = old.Popup.HTML
-		new.Popup = &p
+	// A nil/empty Popups in the NEWER frame means "all popups closed" —
+	// that is intentional and must not be resurrected from the older frame.
+	// A position-only popup (its HTML changed earlier) inherits the latest
+	// payload from the older frame's popup with the SAME stable id (array
+	// order shifts when an earlier popup closes, so index matching is wrong).
+	if len(new.Popups) > 0 {
+		for i := range new.Popups {
+			if new.Popups[i].HTML == "" {
+				for _, op := range old.Popups {
+					if op.ID == new.Popups[i].ID && op.HTML != "" {
+						new.Popups[i].HTML = op.HTML
+						break
+					}
+				}
+			}
+		}
 	}
 	return new
 }
@@ -278,10 +286,16 @@ func (m *Mirror) sendFullState(c *client) {
 			NestedScrolls: s.nestedScrolls,
 			Window:        s.window, WindowID: s.windowID,
 		}
-		if s.popupFP != "" {
+		if len(s.popups) > 0 {
 			// A just-connected tab has no anchor of its own yet: the browser
 			// falls back to the live pane-relative popup offset.
-			msg.Popup = &cdp.PopupState{HTML: s.popupHTML, Left: s.popupLeft, Top: s.popupTop, Width: s.popupW, Height: s.popupH}
+			msg.Popups = make([]cdp.PopupState, len(s.popups))
+			for i := range s.popups {
+				msg.Popups[i] = cdp.PopupState{
+					ID: s.popups[i].id, HTML: s.popups[i].html, Left: s.popups[i].left, Top: s.popups[i].top,
+					Width: s.popups[i].width, Height: s.popups[i].height,
+				}
+			}
 		}
 	} else {
 		msg = stateMsg{Type: "state", Err: "waiting for VS Code window"}

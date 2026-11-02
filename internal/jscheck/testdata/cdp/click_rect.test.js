@@ -52,7 +52,7 @@ test('clickPoint: no root -> null', () => {
   } finally { uninstallGlobals(); }
 });
 
-test('clickPoint: -1 path roots at the VISIBLE context view', () => {
+test('clickPoint: negative path roots at the context view with that stable id', () => {
   const { root } = build();
   try {
     const hidden = new El('div', { attrs: { class: 'context-view' }, rect: { left: 0, top: 0, width: 0, height: 0 } });
@@ -61,9 +61,31 @@ test('clickPoint: -1 path roots at the VISIBLE context view', () => {
     cv.appendChild(row);
     root.appendChild(hidden);
     root.appendChild(cv);
-    // path [-1, 0]: visible context view > row; row rect (55,65,90,10)
-    const p = clickPoint([['.pane'], [-1, 0], 0.5, 1]);
+    // The visible cv is id 1 in the FULL list (the hidden one is 0):
+    // path [-2, 0] = cv > row; row rect (55,65,90,10)
+    const p = clickPoint([['.pane'], [-2, 0], 0.5, 1]);
     assert.deepEqual(p, { x: 100, y: 75 });
+    // The hidden cv (id 0) is not visible -> null.
+    assert.equal(clickPoint([['.pane'], [-1, 0], 0.5, 1]), null);
+    // Out-of-range id -> null.
+    assert.equal(clickPoint([['.pane'], [-3, 0], 0.5, 1]), null);
+  } finally { uninstallGlobals(); }
+});
+
+test('clickPoint: second visible context view addressed by its own id', () => {
+  const { root } = build();
+  try {
+    const cv1 = new El('div', { attrs: { class: 'context-view' }, rect: { left: 50, top: 60, width: 100, height: 40 } });
+    const row1 = new El('div', { rect: { left: 55, top: 65, width: 90, height: 10 } });
+    cv1.appendChild(row1);
+    const cv2 = new El('div', { attrs: { class: 'context-view' }, rect: { left: 200, top: 300, width: 80, height: 20 } });
+    const row2 = new El('div', { rect: { left: 205, top: 305, width: 70, height: 10 } });
+    cv2.appendChild(row2);
+    root.appendChild(cv1);
+    root.appendChild(cv2);
+    // cv2 is id 1: path [-2, 0] = cv2 > row2; row2 rect (205,305,70,10)
+    const p = clickPoint([['.pane'], [-2, 0], 0.5, 1]);
+    assert.deepEqual(p, { x: 240, y: 315 });
   } finally { uninstallGlobals(); }
 });
 

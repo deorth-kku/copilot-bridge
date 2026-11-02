@@ -325,27 +325,31 @@ module.exports = (selectors) => {
   // Context views (popup menus, dropdowns, tooltips) render OUTSIDE the
   // pane root — in .context-view containers that are children of the
   // workbench root — so the pane subtree alone never contains them. There
-  // can be MORE THAN ONE: the action-list menus live in one (which stays in
-  // the DOM, hidden, between openings) while hover-style popups such as the
-  // context-usage "Session Info" widget render in a separate one. Capture
-  // the currently visible one (the last visible in DOM order, i.e. the one
-  // painted on top), positioned relative to the pane root, so the mirror can
-  // render it in the same pane-relative spot.
-  let popup = null;
+  // can be MORE THAN ONE visible at once: the action-list menus live in one
+  // while hover-style popups (tooltips, the context-usage "Session Info"
+  // widget) render in separate containers. Capture ALL currently visible
+  // ones, positioned relative to the pane root, so the mirror can render
+  // each in the same pane-relative spot. Each carries a stable id: its
+  // index in the FULL (including hidden) .context-view list. The containers
+  // are persistent DOM nodes, so the id does not shift when an earlier
+  // popup closes and the mirror can match its copies across frames.
+  let popups = null;
   try {
-    let cv = null;
-    for (const c of document.querySelectorAll('.context-view')) {
+    const cvs = document.querySelectorAll('.context-view');
+    const visible = [];
+    for (let i = 0; i < cvs.length; i++) {
+      const c = cvs[i];
       const cr = c.getBoundingClientRect();
-      if (cr.width > 0 && cr.height > 0) cv = c;
+      if (cr.width > 0 && cr.height > 0) {
+        visible.push({
+          id: i,
+          html: safeHTML(c),
+          left: cr.left - r.left, top: cr.top - r.top,
+          width: cr.width, height: cr.height,
+        });
+      }
     }
-    if (cv) {
-      const cr = cv.getBoundingClientRect();
-      popup = {
-        html: safeHTML(cv),
-        left: cr.left - r.left, top: cr.top - r.top,
-        width: cr.width, height: cr.height,
-      };
-    }
+    if (visible.length > 0) popups = visible;
   } catch (e) {}
   // Serialize the pane subtree with the HTML parser's structural hazards
   // escaped: <a>, <button> and <form> are emitted as x-a / x-button /
@@ -408,6 +412,6 @@ module.exports = (selectors) => {
     scrollRows: scrollRows,
     nestedScrolls: nestedScrolls,
     cssFP: cssFP,
-    popup: popup,
+    popups: popups,
   };
 };

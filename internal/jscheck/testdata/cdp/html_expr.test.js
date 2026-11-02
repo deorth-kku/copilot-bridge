@@ -210,18 +210,40 @@ test('htmlExpr: visible context view captured pane-relative; hidden ones ignored
   buildPane({ popup: true });
   try {
     const r = htmlExpr(['.chat-viewpane-container']);
-    assert.equal(r.popup.html, '<div class="context-view">menu</div>');
-    assert.equal(r.popup.left, 100); // 110 - pane.left(10)
-    assert.equal(r.popup.top, 60); // 80 - pane.top(20)
-    assert.equal(r.popup.width, 120);
-    assert.equal(r.popup.height, 60);
+    assert.equal(r.popups.length, 1);
+    assert.equal(r.popups[0].id, 1); // index in the FULL list (the hidden one is 0)
+    assert.equal(r.popups[0].html, '<div class="context-view">menu</div>');
+    assert.equal(r.popups[0].left, 100); // 110 - pane.left(10)
+    assert.equal(r.popups[0].top, 60); // 80 - pane.top(20)
+    assert.equal(r.popups[0].width, 120);
+    assert.equal(r.popups[0].height, 60);
   } finally { uninstallGlobals(); }
 });
 
-test('htmlExpr: no popup -> popup null', () => {
+test('htmlExpr: two visible context views captured with stable ids', () => {
+  const { root } = buildPane({ popup: true });
+  // A second visible container (a hover tooltip) AFTER the menu one.
+  const cv2 = new El('div', { attrs: { class: 'context-view' }, rect: { left: 300, top: 400, width: 90, height: 30 } });
+  cv2.outerHTML = '<div class="context-view">tip</div>';
+  cv2.appendChild(new Text('tip'));
+  root.appendChild(cv2);
+  try {
+    const r = htmlExpr(['.chat-viewpane-container']);
+    assert.equal(r.popups.length, 2);
+    assert.equal(r.popups[0].id, 1);
+    assert.equal(r.popups[0].html, '<div class="context-view">menu</div>');
+    assert.equal(r.popups[1].id, 2);
+    assert.equal(r.popups[1].html, '<div class="context-view">tip</div>');
+    assert.equal(r.popups[1].left, 290); // 300 - pane.left(10)
+    assert.equal(r.popups[1].top, 380); // 400 - pane.top(20)
+  } finally { uninstallGlobals(); }
+});
+
+test('htmlExpr: no popup -> popups empty', () => {
   buildPane();
   try {
-    assert.equal(htmlExpr(['.chat-viewpane-container']).popup, null);
+    const r = htmlExpr(['.chat-viewpane-container']);
+    assert.equal(r.popups == null || r.popups.length === 0, true);
   } finally { uninstallGlobals(); }
 });
 

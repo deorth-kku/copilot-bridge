@@ -37,22 +37,38 @@ func TestMergeStateNewerPayloadWins(t *testing.T) {
 }
 
 func TestMergeStatePopup(t *testing.T) {
-	// A nil popup in the newer frame means "closed": never resurrected.
-	old := stateMsg{Type: "state", Popup: &cdp.PopupState{HTML: "menu", Left: 1, Top: 2}}
+	// An empty Popups in the newer frame means "closed": never resurrected.
+	old := stateMsg{Type: "state", Popups: []cdp.PopupState{{ID: 0, HTML: "menu", Left: 1, Top: 2}}}
 	new := stateMsg{Type: "state"}
-	if m := mergeState(old, new); m.Popup != nil {
-		t.Fatalf("closed popup must not be resurrected: %+v", m.Popup)
+	if m := mergeState(old, new); len(m.Popups) != 0 {
+		t.Fatalf("closed popup must not be resurrected: %+v", m.Popups)
 	}
 	// A position-only popup inherits the latest payload from the older frame.
-	new = stateMsg{Type: "state", Popup: &cdp.PopupState{Left: 9, Top: 9}}
+	new = stateMsg{Type: "state", Popups: []cdp.PopupState{{ID: 0, Left: 9, Top: 9}}}
 	m := mergeState(old, new)
-	if m.Popup == nil || m.Popup.HTML != "menu" || m.Popup.Left != 9 || m.Popup.Top != 9 {
-		t.Fatalf("position-only popup must inherit the older HTML: %+v", m.Popup)
+	if len(m.Popups) != 1 || m.Popups[0].HTML != "menu" || m.Popups[0].Left != 9 || m.Popups[0].Top != 9 {
+		t.Fatalf("position-only popup must inherit the older HTML: %+v", m.Popups)
 	}
 	// A newer popup HTML wins.
-	new = stateMsg{Type: "state", Popup: &cdp.PopupState{HTML: "menu2", Left: 3}}
-	if m := mergeState(old, new); m.Popup.HTML != "menu2" {
-		t.Fatalf("newer popup HTML must win: %+v", m.Popup)
+	new = stateMsg{Type: "state", Popups: []cdp.PopupState{{ID: 0, HTML: "menu2", Left: 3}}}
+	if m := mergeState(old, new); m.Popups[0].HTML != "menu2" {
+		t.Fatalf("newer popup HTML must win: %+v", m.Popups)
+	}
+}
+
+func TestMergeStatePopupShift(t *testing.T) {
+	// Two popups open (ids 0 and 1); the FIRST closes, so the survivor
+	// shifts to index 0 in the newer frame. Inheritance must follow the
+	// stable id, not the array position: the survivor keeps its own HTML,
+	// and must not inherit the closed popup's.
+	old := stateMsg{Type: "state", Popups: []cdp.PopupState{
+		{ID: 0, HTML: "menuA", Left: 1, Top: 2},
+		{ID: 1, HTML: "menuB", Left: 3, Top: 4},
+	}}
+	new := stateMsg{Type: "state", Popups: []cdp.PopupState{{ID: 1, Left: 9, Top: 9}}}
+	m := mergeState(old, new)
+	if len(m.Popups) != 1 || m.Popups[0].ID != 1 || m.Popups[0].HTML != "menuB" {
+		t.Fatalf("shifted popup must inherit by id, not index: %+v", m.Popups)
 	}
 }
 

@@ -69,8 +69,20 @@ test('fpExpr: visible popup folded into popFP', () => {
   buildPane({ popup: true });
   try {
     const r = fpExpr(['.chat-viewpane-container']);
-    // popFP = innerText len 4 : childElementCount 1 : round(left) : round(top) ; curFP empty ; inputFP empty ; valFP empty
-    assert.ok(r.fp.endsWith(':4:1:110:80:::'), r.fp);
+    // popFP = id 1 (FULL-list index; the hidden one is 0) : innerText len 4 : childElementCount 1 : round(left) : round(top) ; curFP empty ; inputFP empty ; valFP empty
+    assert.ok(r.fp.endsWith(':1:4:1:110:80:::'), r.fp);
+  } finally { uninstallGlobals(); }
+});
+
+test('fpExpr: two visible popups folded into popFP with ids', () => {
+  const { root } = buildPane({ popup: true });
+  const cv2 = new El('div', { attrs: { class: 'context-view' }, rect: { left: 300, top: 400, width: 90, height: 30 } });
+  cv2.innerText = 'tip';
+  root.appendChild(cv2);
+  try {
+    const r = fpExpr(['.chat-viewpane-container']);
+    // popFP = "1:4:1:110:80|2:3:0:300:400"
+    assert.ok(r.fp.includes('1:4:1:110:80|2:3:0:300:400'), r.fp);
   } finally { uninstallGlobals(); }
 });
 

@@ -141,14 +141,23 @@ type snapState struct {
 	// input's view lines (see cdp.FingerprintState.InputBreaks); the mirror
 	// re-groups the view lines across soft wraps.
 	inputBreaks []bool
-	// popupHTML/popupFP capture the visible context view (popup menu) that
-	// renders outside the pane root; popupFP == "" means no popup is open.
-	popupHTML string
-	popupFP   string
-	popupLeft float64
-	popupTop  float64
-	popupW    float64
-	popupH    float64
+	// popups captures the visible context views (popup menus, tooltips) that
+	// render outside the pane root. Each entry stores the HTML, a fingerprint
+	// of it, and the pane-relative position. Empty means no popup is open.
+	popups []popupSnap
+}
+
+// popupSnap is the server-side state for one visible context view.
+type popupSnap struct {
+	// id is the container's stable identity (its index in the full
+	// .context-view list); the mirror matches its copies by it.
+	id     int
+	html   string
+	fp     string
+	left   float64
+	top    float64
+	width  float64
+	height float64
 }
 
 // client is one connected browser tab.

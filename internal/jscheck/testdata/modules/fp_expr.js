@@ -285,23 +285,27 @@ module.exports = (selectors) => {
   // text content) still triggers a full re-extract of themeVars.
   let themeInd = '';
   try { themeInd = getComputedStyle(el).getPropertyValue('--vscode-foreground').trim(); } catch (e) {}
-  // The context view (popup menus) sits OUTSIDE the pane root, so the pane's
+  // The context views (popup menus) sit OUTSIDE the pane root, so the pane's
   // own content never changes when a popup opens, closes, or moves — fold a
   // cheap popup fingerprint into fp so any of those triggers a re-extract.
-  // As in htmlExpr, pick the visible .context-view (there can be several:
-  // the hidden menu one plus hover popups such as the context-usage widget).
+  // There can be several visible at once (the action-list menu plus a hover
+  // tooltip); fingerprint each so any open/close/move triggers a re-extract.
+  // Each part is prefixed with the container's stable id (its index in the
+  // FULL list) so a shift in visible order is not mistaken for a content
+  // change of the surviving popup.
   let popFP = '';
   try {
-    let cv = null;
-    for (const c of document.querySelectorAll('.context-view')) {
+    let parts = [];
+    const cvs = document.querySelectorAll('.context-view');
+    for (let i = 0; i < cvs.length; i++) {
+      const c = cvs[i];
       const cr = c.getBoundingClientRect();
-      if (cr.width > 0 && cr.height > 0) cv = c;
+      if (cr.width > 0 && cr.height > 0) {
+        parts.push(i + ':' + c.innerText.length + ':' + c.childElementCount + ':' +
+          Math.round(cr.left) + ':' + Math.round(cr.top));
+      }
     }
-    if (cv) {
-      const cr = cv.getBoundingClientRect();
-      popFP = cv.innerText.length + ':' + cv.childElementCount + ':' +
-        Math.round(cr.left) + ':' + Math.round(cr.top);
-    }
+    if (parts.length > 0) popFP = parts.join('|');
   } catch (e) {}
   // Chat-input cursor state, folded into the fp so caret moves and focus
   // changes trigger a full re-extract: neither alters innerText or the

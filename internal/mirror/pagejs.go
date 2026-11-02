@@ -233,7 +233,7 @@ const pageJS = `(function () {
         restoreNestedScrolls(m);
         syncDrawnScrollbars();
       }
-      updatePopup(m);
+      updatePopups(m);
       // The caret re-seating walks the regrouped text, so it runs last.
       syncCursor(m);
     };
@@ -652,14 +652,14 @@ const pageJS = `(function () {
   // Popup menus (agent/mode picker, model picker, reasoning effort, ...)
   // render in the live page's .context-view container, which is OUTSIDE the
   // pane root, so the pane HTML alone never contains them. The server
-  // extracts the visible container (m.popup) and the mirror renders it as a
+  // extracts the visible containers (m.popups) and the mirror renders each as a
   // sibling of the pane root inside #pane. It is positioned FIXED in
   // viewport coordinates (pane origin + the server's pane-relative offset):
   // fixed positioning escapes #pane's overflow clipping (the popup can sit
   // lower than the mirror viewport) while the element stays inside #pane in
   // the DOM, so workbench CSS scoping and event bubbling keep working.
-  var popupEl = null;
-  var lastPopup = null;
+  var popupEls = [];   // slot i: element of the popup open at slot i (null = closing/free)
+  var lastPopups = []; // slot i: server state of the popup open at slot i (null = none)
   // lastAnchorPath is the DOM path (from the pane root) of the control the
   // user last clicked (mousedown). The next popup is positioned relative to
   // the mirror's copy of that control, NOT at the live pane-relative
@@ -694,8 +694,8 @@ const pageJS = `(function () {
     return Math.abs(mirror.width - live.width) <= Math.max(24, live.width * 0.5) &&
            Math.abs(mirror.height - live.height) <= Math.max(8, live.height * 0.5);
   }
-  function positionPopup() {
-    if (!popupEl || !lastPopup) return;
+  function positionOnePopup(el, popup) {
+    if (!el || !popup) return;
     var pr = pane.getBoundingClientRect();
     var left, top;
     // Anchor-relative placement: the server sends the live popup rect and
@@ -704,36 +704,36 @@ const pageJS = `(function () {
     // copy of the anchor (its current rect in mirror viewport coordinates).
     var used = false;
     var ar = null;
-    if (lastAnchorPath && lastPopup.anchor) {
+    if (lastAnchorPath && popup.anchor) {
       var a = pathEl(lastAnchorPath);
       if (a) {
         var ar0 = a.getBoundingClientRect();
-        if (popupNearAnchor(lastPopup, lastPopup.anchor) &&
-            anchorSizeMatches(ar0, lastPopup.anchor)) {
+        if (popupNearAnchor(popup, popup.anchor) &&
+            anchorSizeMatches(ar0, popup.anchor)) {
           ar = ar0;
-          left = ar.left + (lastPopup.left - lastPopup.anchor.left);
-          top = ar.top + (lastPopup.top - lastPopup.anchor.top);
+          left = ar.left + (popup.left - popup.anchor.left);
+          top = ar.top + (popup.top - popup.anchor.top);
           used = true;
         }
       }
     }
     if (!used) {
-      left = pr.left + lastPopup.left;
-      top = pr.top + lastPopup.top;
+      left = pr.left + popup.left;
+      top = pr.top + popup.top;
     }
     // The mirror viewport is not the live window: a transferred position can
     // overflow it. Flip the popup to the other side of the anchor (keeping
     // the live gap) when anchor-based placement overflows.
     var vh = window.innerHeight, vw = window.innerWidth;
-    if (used && (top < 0 || top + lastPopup.height > vh)) {
-      if (lastPopup.top < lastPopup.anchor.top) {
+    if (used && (top < 0 || top + popup.height > vh)) {
+      if (popup.top < popup.anchor.top) {
         // Live popup sat above the anchor; move it below.
-        var gap = lastPopup.anchor.top - (lastPopup.top + lastPopup.height);
+        var gap = popup.anchor.top - (popup.top + popup.height);
         top = ar.top + ar.height + Math.max(0, gap);
       } else {
         // Live popup sat below the anchor; move it above.
-        var gap2 = lastPopup.top - (lastPopup.anchor.top + lastPopup.anchor.height);
-        top = ar.top - lastPopup.height - Math.max(0, gap2);
+        var gap2 = popup.top - (popup.anchor.top + popup.anchor.height);
+        top = ar.top - popup.height - Math.max(0, gap2);
       }
     }
     // The final clamps apply to BOTH branches: the fallback position is a
@@ -742,14 +742,14 @@ const pageJS = `(function () {
     // widget pushed below it). Clamping keeps it on screen near its anchor
     // area.
     if (top < 0) top = 0;
-    if (top + lastPopup.height > vh) top = Math.max(0, vh - lastPopup.height);
+    if (top + popup.height > vh) top = Math.max(0, vh - popup.height);
     if (left < 0) left = 0;
-    if (left + lastPopup.width > vw) {
-      left = Math.max(0, vw - lastPopup.width);
+    if (left + popup.width > vw) {
+      left = Math.max(0, vw - popup.width);
     }
-    popupEl.style.position = 'fixed';
-    popupEl.style.left = left + 'px';
-    popupEl.style.top = top + 'px';
+    el.style.position = 'fixed';
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
   }
   // Live closes a dropdown with a 150ms CSS animation (actionWidget.ts):
   // it stamps the widget's CURRENT opacity/transform as the close keyframes'
@@ -758,69 +758,106 @@ const pageJS = `(function () {
   // and removes the element after the animation duration. Reproduce that
   // here so the mirror's close matches live. Non-dropdown popups (hover
   // widgets, tooltips) have no live close animation: remove them at once.
-  var popupCloseTimer = null;
-  function ensureCloseRemoval() {
-    // The close state persists across many state messages (m.popup stays
-    // null), so the removal timer must be armed exactly once.
-    if (popupCloseTimer != null) return;
-    popupCloseTimer = setTimeout(function () {
-      popupCloseTimer = null;
-      if (popupEl) { popupEl.remove(); popupEl = null; }
+  function ensureCloseRemoval(el, idx) {
+    // The close state persists across many state messages, so the removal
+    // timer must be armed exactly once per popup.
+    if (el._closeTimer != null) return;
+    el._closeTimer = setTimeout(function () {
+      el._closeTimer = null;
+      el.remove();
+      if (popupEls[idx] === el) popupEls[idx] = null;
     }, 150);
   }
-  function closePopup() {
-    if (!popupEl) return;
-    var w = popupEl.querySelector('.action-widget.action-widget-dropdown');
-    if (!w) { popupEl.remove(); popupEl = null; return; }
+  function closeOnePopup(el, idx) {
+    if (!el) return;
+    var w = el.querySelector('.action-widget.action-widget-dropdown');
+    if (!w) { el.remove(); popupEls[idx] = null; return; }
     if (w.classList.contains('action-widget-dropdown-closing')) {
-      ensureCloseRemoval();
+      ensureCloseRemoval(el, idx);
       return;
     }
     var cs = getComputedStyle(w);
     w.style.setProperty('--action-widget-close-start-opacity', cs.opacity);
     w.style.setProperty('--action-widget-close-start-transform', cs.transform);
     w.classList.add('action-widget-dropdown-closing');
-    ensureCloseRemoval();
+    ensureCloseRemoval(el, idx);
   }
   // Restart the open animation on a widget that was patched IN PLACE instead
   // of inserted fresh (a reopen landing while the close animation is still
   // running): the reflow trick resets the CSS animation to its first frame.
-  function restartOpenAnimation() {
-    var w = popupEl ? popupEl.querySelector('.action-widget.action-widget-dropdown') : null;
+  function restartOpenAnimation(el) {
+    var w = el ? el.querySelector('.action-widget.action-widget-dropdown') : null;
     if (!w) return;
     w.style.animation = 'none';
     void w.offsetWidth;
     w.style.animation = '';
   }
-  function updatePopup(m) {
-    // A defensive pane.innerHTML rebuild in applyState detaches the popup;
-    // drop the stale reference so it is re-appended on the next HTML update.
-    if (popupEl && !popupEl.isConnected) {
-      popupEl = null;
-      if (popupCloseTimer != null) { clearTimeout(popupCloseTimer); popupCloseTimer = null; }
-    }
-    if (!m.popup) {
-      if (popupEl) closePopup();
-      lastPopup = null;
-      return;
-    }
-    // A new popup on top of a still-closing one: the widget below is patched
-    // in place (not re-inserted), so the open animation must be restarted
-    // by hand after the patch.
-    var reopening = lastPopup === null && popupEl != null;
-    lastPopup = m.popup;
-    if (m.popup.html != null) {
-      var want = parseFragment(m.popup.html);
-      if (popupEl) {
-        if (popupCloseTimer != null) { clearTimeout(popupCloseTimer); popupCloseTimer = null; }
-        patchNode(popupEl, want);
-      } else {
-        pane.appendChild(want);
-        popupEl = want;
+  // popupEls/lastPopups are parallel SLOT arrays (always the same length):
+  // slot i holds lastPopups[i] (the server state of the open popup, or null)
+  // and popupEls[i] (its element, or null while closing/free). Popups are
+  // matched by their STABLE id — the .context-view container's index in the
+  // FULL (including hidden) live container list — so closing an earlier
+  // popup does not shift the surviving ones to new indices.
+  function popupIdIn(list, id) {
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return true;
+    return false;
+  }
+  function updatePopups(m) {
+    var newPopups = m.popups || [];
+    // A defensive pane.innerHTML rebuild in applyState detaches the popups;
+    // drop stale references so they are re-appended on the next HTML update.
+    for (var i = 0; i < popupEls.length; i++) {
+      if (popupEls[i] && !popupEls[i].isConnected) {
+        if (popupEls[i]._closeTimer != null) { clearTimeout(popupEls[i]._closeTimer); popupEls[i]._closeTimer = null; }
+        popupEls[i] = null;
       }
-      if (reopening) restartOpenAnimation();
     }
-    positionPopup();
+    // Close popups whose id is no longer in the server's list.
+    for (var i = 0; i < lastPopups.length; i++) {
+      if (lastPopups[i] != null && !popupIdIn(newPopups, lastPopups[i].id)) {
+        closeOnePopup(popupEls[i], i);
+        lastPopups[i] = null;
+      }
+    }
+    // Drop trailing free slots (a slot with a still-closing element is kept
+    // so its removal timer can null it).
+    while (popupEls.length > 0 && popupEls[popupEls.length - 1] == null &&
+           (lastPopups.length === 0 || lastPopups[lastPopups.length - 1] == null)) {
+      popupEls.pop();
+      if (lastPopups.length > 0) lastPopups.pop();
+    }
+    // Update / create each popup, matching by stable id.
+    for (var i = 0; i < newPopups.length; i++) {
+      var np = newPopups[i];
+      var j = -1;
+      for (var k = 0; k < lastPopups.length; k++) {
+        if (lastPopups[k] != null && lastPopups[k].id === np.id) { j = k; break; }
+      }
+      var wasOpen = j >= 0;
+      if (j < 0) {
+        // No open slot for this id: reuse a fully free slot, else append
+        // one. A slot whose element is still closing is never reused, so a
+        // fresh popup is always inserted as a NEW element (with its open
+        // animation), never patched onto a fading one.
+        for (var k = 0; k < lastPopups.length; k++) {
+          if (lastPopups[k] == null && popupEls[k] == null) { j = k; break; }
+        }
+        if (j < 0) { j = lastPopups.length; lastPopups.push(null); popupEls.push(null); }
+      }
+      lastPopups[j] = np;
+      if (np.html != null) {
+        var want = parseFragment(np.html);
+        if (popupEls[j]) {
+          if (popupEls[j]._closeTimer != null) { clearTimeout(popupEls[j]._closeTimer); popupEls[j]._closeTimer = null; }
+          patchNode(popupEls[j], want);
+          if (!wasOpen) restartOpenAnimation(popupEls[j]);
+        } else {
+          pane.appendChild(want);
+          popupEls[j] = want;
+        }
+      }
+      positionOnePopup(popupEls[j], np);
+    }
   }
 
   // Resolve a DOM path (child indices from the pane root) to a current
@@ -1287,10 +1324,19 @@ const pageJS = `(function () {
     var root = pane.firstElementChild || pane;
     var t = (target && target !== pane) ? target : root;
     // The popup (.context-view) is a sibling of the pane root, so no path
-    // from the pane root reaches it: prefix its path with -1 and the server
-    // resolves it against the live .context-view instead.
+    // from the pane root reaches it: prefix its path with -(id+1) and the
+    // server resolves it against the live .context-view container with that
+    // stable id (its index in the FULL container list).
     var pv = (t && t.closest) ? t.closest('.context-view') : null;
     if (pv) {
+      // Find the tracked popup slot this element belongs to and use its
+      // stable id. An untracked container (mid-close, or detached by a
+      // rebuild) falls through to the pane-root walk below, which yields
+      // path null — the click is dropped rather than mis-attributed.
+      var pvid = null;
+      for (var pi = 0; pi < lastPopups.length; pi++) {
+        if (popupEls[pi] === pv && lastPopups[pi] != null) { pvid = lastPopups[pi].id; break; }
+      }
       var pidx = [];
       var n2 = t;
       while (n2 && n2 !== pv) {
@@ -1299,13 +1345,13 @@ const pageJS = `(function () {
         pidx.unshift(Array.prototype.indexOf.call(p2.children, n2));
         n2 = p2;
       }
-      if (n2 === pv) {
+      if (n2 === pv && pvid != null) {
         var tr2 = t.getBoundingClientRect();
         var rx2 = tr2.width > 0 ? (cx - tr2.left) / tr2.width : 0;
         var ry2 = tr2.height > 0 ? (cy - tr2.top) / tr2.height : 0;
         if (rx2 < 0) rx2 = 0; else if (rx2 > 1) rx2 = 1;
         if (ry2 < 0) ry2 = 0; else if (ry2 > 1) ry2 = 1;
-        return { path: [-1].concat(pidx), relX: rx2, relY: ry2 };
+        return { path: [-(pvid + 1)].concat(pidx), relX: rx2, relY: ry2 };
       }
     }
     var path = [];
@@ -1639,7 +1685,9 @@ const pageJS = `(function () {
   // repositions an open popup, and re-maps the self-drawn scrollbars.
   window.addEventListener('resize', function () {
     syncDrawnScrollbars();
-    positionPopup();
+    for (var i = 0; i < popupEls.length; i++) {
+      if (popupEls[i] && lastPopups[i]) positionOnePopup(popupEls[i], lastPopups[i]);
+    }
     repositionCursor();
   });
   // Fallback focus for browsers where the mousedown focus did not stick.
