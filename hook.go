@@ -464,6 +464,10 @@ func (srv approveServer) callSystemOne(ctx context.Context, toolName string, too
 				Noul float64 `json:"noul"`
 			} `json:"safe"`
 		} `json:"answers"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	}
 	out.Answers.Safe.Noul = math.NaN()
 	if err := json.UnmarshalRead(io.LimitReader(resp.Body, 1<<20), &out); err != nil {
@@ -474,6 +478,7 @@ func (srv approveServer) callSystemOne(ctx context.Context, toolName string, too
 		reportApproveError(fmt.Errorf("systemone response has no answers.%s.noul", systemOneQuestionID))
 		return 0, false
 	}
+	slog.Info("systemone usage", "input_tokens", out.Usage.InputTokens, "output_tokens", out.Usage.OutputTokens)
 	return out.Answers.Safe.Noul, true
 }
 

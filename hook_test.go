@@ -1096,3 +1096,31 @@ func TestCallSystemOne(t *testing.T) {
 		t.Errorf("no-key: auth = %q, want empty", gotAuth)
 	}
 }
+
+// TestCallSystemOneUsage checks that the usage object from a successful
+// /v1/systemone response is written to the app log.
+func TestCallSystemOneUsage(t *testing.T) {
+	logPath := stubHookLog(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"dm","answers":{"safe":{"type":"noul","noul":0.7}},"usage":{"input_tokens":37,"output_tokens":0}}`))
+	}))
+	defer srv.Close()
+
+	s := approveServer{Model: "dm", URL: srv.URL}
+	input := jsontext.Value(`{"command":"ls"}`)
+	if v, ok := s.callSystemOne(t.Context(), "run_in_terminal", input); !ok || v != 0.7 {
+		t.Fatalf("got %v ok=%v, want 0.7 true", v, ok)
+	}
+
+	// Let the async slog handler flush, then read the log back.
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := string(b)
+	if !strings.Contains(logged, `input_tokens=37`) || !strings.Contains(logged, `output_tokens=0`) {
+		t.Fatalf("log = %q, want usage input_tokens=37 output_tokens=0", logged)
+	}
+}
