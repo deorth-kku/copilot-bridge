@@ -12,7 +12,7 @@ import (
 // handleWorkspacesPage serves the workspaces page. The mux pattern
 // "/workspaces" matches only that exact path, so no path check is needed.
 func (m *Mirror) handleWorkspacesPage(w http.ResponseWriter, r *http.Request) {
-	writeStaticHTML(w, r, workspacesHTML, workspacesPageGz)
+	writeStatic(w, r, "text/html; charset=utf-8", workspacesHTML, workspacesPageGz)
 }
 
 // handleWorkspaceList serves the current workspace list: the known

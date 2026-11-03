@@ -32,7 +32,7 @@ func TestWriteStaticHTMLGzip(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-			writeStaticHTML(rec, req, tc.src, &gzipStatic{src: tc.src})
+			writeStatic(rec, req, "text/html; charset=utf-8", tc.src, &gzipStatic{src: tc.src})
 
 			if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
 				t.Fatalf("Content-Encoding = %q, want gzip", got)
@@ -59,7 +59,7 @@ func TestWriteStaticHTMLGzip(t *testing.T) {
 			// Client without gzip support.
 			rec2 := httptest.NewRecorder()
 			req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-			writeStaticHTML(rec2, req2, tc.src, &gzipStatic{src: tc.src})
+			writeStatic(rec2, req2, "text/html; charset=utf-8", tc.src, &gzipStatic{src: tc.src})
 			if got := rec2.Header().Get("Content-Encoding"); got != "" {
 				t.Errorf("no-gzip client got Content-Encoding %q, want none", got)
 			}

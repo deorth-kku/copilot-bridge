@@ -1,5 +1,5 @@
-// Unit tests for the mirror page's inline client JS
-// (internal/mirror/page.go): the IIFE that opens the /ws WebSocket,
+// Unit tests for the mirror page's client JS
+// (internal/mirror/static/page.js): the IIFE that opens the /ws WebSocket,
 // syncs the window picker + CSS/theme from state messages, patches the
 // pane DOM incrementally, places popups, and forwards mouse/keyboard
 // input to the server.
@@ -18,7 +18,9 @@ const {
   WebSocketStub,
 } = require('../domstub.js');
 
-const src = fs.readFileSync(__dirname + '/../raw/mirror_page_js.js', 'utf8');
+// The test reads the committed source file directly, so the suite always
+// runs against the live page JS (no fixture copy to keep in sync).
+const src = fs.readFileSync(__dirname + '/../../../mirror/static/page.js', 'utf8');
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
 // The pane sits below the 26px status bar and fills the 800x500 area;

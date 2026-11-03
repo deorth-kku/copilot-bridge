@@ -1,4 +1,3 @@
-
 (function () {
   var status = document.getElementById('status');
   var pane = document.getElementById('pane');
@@ -232,6 +231,7 @@
         syncDrawnScrollbars();
       }
       updatePopups(m);
+      updateModalEditor(m);
       // The caret re-seating walks the regrouped text, so it runs last.
       syncCursor(m);
     };
@@ -658,6 +658,10 @@
   // the DOM, so workbench CSS scoping and event bubbling keep working.
   var popupEls = [];   // slot i: element of the popup open at slot i (null = closing/free)
   var lastPopups = []; // slot i: server state of the popup open at slot i (null = none)
+  // modalEl is the element of the open modal editor (the image carousel,
+  // Markdown preview, ...), rendered as a full-viewport overlay. Null when
+  // no modal editor is open.
+  var modalEl = null;
   // lastAnchorPath is the DOM path (from the pane root) of the control the
   // user last clicked (mousedown). The next popup is positioned relative to
   // the mirror's copy of that control, NOT at the live pane-relative
@@ -856,6 +860,46 @@
       }
       positionOnePopup(popupEls[j], np);
     }
+  }
+  // The modal editor (image carousel, Markdown preview, ...) renders OUTSIDE
+  // the pane root in a .part.editor.modal-editor-part overlay that blocks
+  // interaction with the rest of the workbench. The server extracts it and
+  // the mirror renders it as a FULL-VIEWPORT overlay on top of the pane: the
+  // carousel's inline width/height (set by VS Code to its live size) is
+  // overridden to fill the viewport, and the image inside scales via
+  // object-fit: contain, so it displays correctly at any mirror size.
+  function updateModalEditor(m) {
+    var me = m.modalEditor;
+    if (modalEl && !modalEl.isConnected) modalEl = null; // detached by a rebuild
+    if (!me) {
+      // No modal editor open: remove the overlay.
+      if (modalEl) { modalEl.remove(); modalEl = null; }
+      return;
+    }
+    // Content update only when the HTML is present (a position-only follow
+    // omits it, so the current copy is kept and just re-sized below).
+    if (me.html != null) {
+      var want = parseFragment(me.html);
+      if (modalEl) {
+        patchNode(modalEl, want);
+      } else {
+        pane.appendChild(want);
+        modalEl = want;
+      }
+    }
+    if (!modalEl) return;
+    // Full-viewport overlay: fixed positioning escapes #pane's overflow
+    // clipping and covers the whole viewport (a modal blocks everything).
+    modalEl.style.position = 'fixed';
+    modalEl.style.inset = '0';
+    modalEl.style.left = '0';
+    modalEl.style.top = '0';
+    modalEl.style.width = '100%';
+    modalEl.style.height = '100%';
+    // The carousel carries an inline width/height (its live size); override
+    // it so it fills the viewport. The image scales via object-fit: contain.
+    var car = modalEl.querySelector('.image-carousel-editor');
+    if (car) { car.style.width = '100%'; car.style.height = '100%'; }
   }
 
   // Resolve a DOM path (child indices from the pane root) to a current
@@ -1350,6 +1394,28 @@
         if (rx2 < 0) rx2 = 0; else if (rx2 > 1) rx2 = 1;
         if (ry2 < 0) ry2 = 0; else if (ry2 > 1) ry2 = 1;
         return { path: [-(pvid + 1)].concat(pidx), relX: rx2, relY: ry2 };
+      }
+    }
+    // The modal editor overlay is a sibling of the pane root, so no path
+    // from the pane root reaches it: prefix its path with -2 and the server
+    // resolves it against the live .part.editor.modal-editor-part.
+    var mv = (t && t.closest) ? t.closest('.part.editor.modal-editor-part') : null;
+    if (mv && modalEl && mv === modalEl) {
+      var midx = [];
+      var n3 = t;
+      while (n3 && n3 !== mv) {
+        var p3 = n3.parentElement;
+        if (!p3) break;
+        midx.unshift(Array.prototype.indexOf.call(p3.children, n3));
+        n3 = p3;
+      }
+      if (n3 === mv) {
+        var tr3 = t.getBoundingClientRect();
+        var rx3 = tr3.width > 0 ? (cx - tr3.left) / tr3.width : 0;
+        var ry3 = tr3.height > 0 ? (cy - tr3.top) / tr3.height : 0;
+        if (rx3 < 0) rx3 = 0; else if (rx3 > 1) rx3 = 1;
+        if (ry3 < 0) ry3 = 0; else if (ry3 > 1) ry3 = 1;
+        return { path: [-2].concat(midx), relX: rx3, relY: ry3 };
       }
     }
     var path = [];

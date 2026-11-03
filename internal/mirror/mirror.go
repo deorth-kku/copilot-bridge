@@ -328,6 +328,10 @@ func (m *Mirror) Run(ctx context.Context) error {
 	mux.HandleFunc("/ws", m.handleWS)
 	mux.HandleFunc("/img/", m.handleImage)
 	mux.HandleFunc("/workspaces", m.handleWorkspacesPage)
+	mux.HandleFunc("/page.css", m.handlePageCSS)
+	mux.HandleFunc("/page.js", m.handlePageJS)
+	mux.HandleFunc("/workspaces.css", m.handleWorkspacesCSS)
+	mux.HandleFunc("/workspaces.js", m.handleWorkspacesJS)
 	mux.HandleFunc("/api/workspaces", m.handleWorkspaceList)
 	mux.HandleFunc("/api/workspaces/open", m.handleWorkspaceOpen)
 	mux.HandleFunc("/api/hook", m.handleHook)
@@ -376,7 +380,7 @@ func (m *Mirror) handlePage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	writeStaticHTML(w, r, pageHTML, mirrorPageGz)
+	writeStatic(w, r, "text/html; charset=utf-8", pageHTML, mirrorPageGz)
 }
 
 // memReporter logs process memory and the image-cache size every 30s.

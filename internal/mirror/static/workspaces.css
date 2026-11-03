@@ -1,0 +1,63 @@
+
+  /* Hand-written VS Code (Dark Modern) look — no workbench CSS is borrowed
+     (the page must render with no live VS Code window). Values are pinned
+     to the live theme: UI font "Segoe WPC"/"Segoe UI" 13px, window bg
+     #181818, fg #cccccc, description #9d9d9d, inputs #313131 with a
+     #3c3c3c border and #0078d4 focus, list hover #2a2d2e, selection
+     #37373d, diff-green #54b054, badge #616161/#f8f8f8, error #f85149.
+     Mobile-first: big touch targets and 16px inputs (no iOS zoom-on-focus);
+     the desktop look is restored in the min-width:800px block below. */
+  html { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #181818; color: #cccccc; font: 13px "Segoe WPC", "Segoe UI", sans-serif; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; background: #181818; border-bottom: 1px solid #2b2b2b; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 10px; z-index: 10; box-sizing: border-box; }
+  /* .monaco-inputbox look: 4px radius, focus border #0078d4. Mobile-first:
+     full-width row and 16px font (no iOS zoom-on-focus); the desktop look
+     is restored in the min-width:800px block below. */
+  #q { background: #313131; color: #cccccc; border: 1px solid #3c3c3c; height: 36px; box-sizing: border-box; border-radius: 4px; order: 3; flex: 1 1 100%; font: 16px "Segoe WPC", "Segoe UI", sans-serif; padding: 0 10px; }
+  #q:focus { outline: none; border-color: #0078d4; }
+  #q::placeholder { color: #989898; }
+  /* Power-off toggle: icon-only, same idiom as the back button (#nav).
+     The armed state glows in the error red (#f85149). */
+  /* margin-left:auto right-aligns the [power-off][count] group. */
+  #poweroff { order: 1; margin-left: auto; width: 36px; height: 36px; padding: 0; background: transparent; border: none; border-radius: 6px; color: #cccccc; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  #poweroff:hover { background: rgba(90,93,94,0.31); }
+  #poweroff.armed { color: #f85149; filter: drop-shadow(0 0 3px rgba(248, 81, 73, 0.8)) drop-shadow(0 0 8px rgba(248, 81, 73, 0.5)); }
+  /* Back-button idiom, probed from the live chat view's "Go Back"
+     toolbar action: icon-only, transparent, no border, 6px radius,
+     hover bg rgba(90,93,94,0.31), 22x22 hit area (16px icon + 3px pad).
+     Mobile keeps a 36px touch target with the same look. */
+  #nav { width: 36px; height: 36px; padding: 0; background: transparent; border: none; border-radius: 6px; color: #cccccc; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  #nav:hover { background: rgba(90,93,94,0.31); }
+  #count { order: 2; color: #9d9d9d; white-space: nowrap; font-size: 12px; }
+  /* Mobile bar is TWO wrapped rows (nav row + full-width search row):
+     6 + 36 + 6 row-gap + 36 + 6 padding + 1px border = 91px. */
+  #list { position: absolute; top: 91px; bottom: 0; left: 0; right: 0; overflow-y: auto; }
+  /* VS Code-style scrollbar: transparent track, translucent slider. */
+  #list::-webkit-scrollbar { width: 12px; }
+  #list::-webkit-scrollbar-track { background: transparent; }
+  #list::-webkit-scrollbar-thumb { background: rgba(100,100,100,0.4); }
+  #list::-webkit-scrollbar-thumb:hover { background: rgba(100,100,100,0.6); }
+  /* Rows follow the session-list idiom: name line + muted path line. */
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; padding: 8px 12px; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+  .row:hover { background: #2a2d2e; }
+  .row:active { background: #37373d; }
+  /* Green dot marks an open workspace; closed rows carry no dot (and no
+     reserved slot), so their names sit flush left. */
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #54b054; flex: 0 0 auto; }
+  .name { font-size: 13px; white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .badge { color: #f8f8f8; background: #616161; white-space: nowrap; font-size: 11px; line-height: 15px; padding: 0 5px; border-radius: 2px; }
+  .status { order: 3; color: #9d9d9d; white-space: nowrap; font-size: 12px; margin-left: auto; }
+  .row.err .status { color: #f85149; }
+  .path { order: 4; color: #9d9d9d; flex: 1 1 100%; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .msg { padding: 12px; color: #9d9d9d; font-size: 13px; }
+  .msg.err { color: #f85149; }
+  @media (min-width: 800px) {
+    #bar { flex-wrap: nowrap; height: 26px; padding: 0 8px; }
+    #q { height: 20px; font-size: 12px; order: 1; flex: 1 1 auto; padding: 0 8px; }
+    #nav { width: 22px; height: 22px; }
+    #poweroff { order: 2; width: 22px; height: 22px; }
+    #count { order: 3; }
+    #list { top: 27px; }
+    .row { padding: 5px 10px; }
+    .msg { padding: 8px 10px; font-size: 12px; }
+  }

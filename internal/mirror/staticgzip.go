@@ -48,12 +48,17 @@ func (g *gzipStatic) bytes() []byte {
 var (
 	mirrorPageGz     = &gzipStatic{src: pageHTML}
 	workspacesPageGz = &gzipStatic{src: workspacesHTML}
+	mirrorCSSGz      = &gzipStatic{src: pageCSS}
+	mirrorJSGz       = &gzipStatic{src: pageJS}
+	workspacesCSSGz  = &gzipStatic{src: workspacesCSS}
+	workspacesJSGz   = &gzipStatic{src: workspacesJS}
 )
 
-// writeStaticHTML serves a constant HTML page, gzip-encoded when the client
-// advertises support and a precompressed copy is available.
-func writeStaticHTML(w http.ResponseWriter, r *http.Request, src string, gz *gzipStatic) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+// writeStatic serves a constant static asset (HTML page, CSS, or JS),
+// gzip-encoded when the client advertises support and a precompressed copy
+// is available.
+func writeStatic(w http.ResponseWriter, r *http.Request, contentType, src string, gz *gzipStatic) {
+	w.Header().Set("Content-Type", contentType)
 	// Vary is required so a shared cache does not serve the gzipped body to
 	// a client that cannot decode it.
 	w.Header().Add("Vary", "Accept-Encoding")
