@@ -101,6 +101,11 @@ type HTMLState struct {
 	// dropdown plus an auto-shown hover tooltip), so the mirror renders
 	// each as a separate overlay.
 	Popups []PopupState `json:"popups"`
+	// ModalEditor is the currently visible modal editor (the image carousel
+	// editor, a Markdown preview, ...), rendered outside the pane root in a
+	// .part.editor.modal-editor-part overlay. Nil when no modal editor is
+	// open.
+	ModalEditor *ModalEditorState `json:"modalEditor"`
 }
 
 // CSSState is the result of ExtractCSS.
@@ -132,6 +137,26 @@ type PopupState struct {
 	// (popup - anchor) offset to its own copy of that control. Nil when the
 	// anchor is unknown (e.g. the popup was opened via the keyboard).
 	Anchor *PaneRect `json:"anchor,omitempty"`
+}
+
+// ModalEditorState is the visible modal editor (the image carousel editor, a
+// Markdown preview, ...) captured alongside the pane. VS Code renders modal
+// editors OUTSIDE the pane root — in a .part.editor.modal-editor-part
+// floating overlay that blocks interaction with the rest of the workbench —
+// so the pane subtree alone never contains it. The mirror renders it as a
+// full-viewport overlay and forwards clicks (notably the close button) to
+// live. Left/Top/Width/Height are the overlay's bounding box in the live
+// viewport.
+type ModalEditorState struct {
+	// HTML is the modal editor's subtree. omitempty: a position-only follow
+	// (the box moved but its content did not) omits it, so the browser keeps
+	// its current copy and only re-applies the size (an empty string would
+	// parse to no element and crash the in-place patch).
+	HTML   string  `json:"html,omitempty"`
+	Left   float64 `json:"left"`
+	Top    float64 `json:"top"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 // inputEditorJS is spliced into both fpExpr and htmlExpr (they are
@@ -436,6 +461,26 @@ const htmlExpr = `(selectors) => {
     }
     if (visible.length > 0) popups = visible;
   } catch (e) {}
+  // The modal editor (image carousel, Markdown preview, ...) renders
+  // OUTSIDE the pane root in a .part.editor.modal-editor-part floating
+  // overlay that blocks interaction with the rest of the workbench. Capture
+  // it — including its title bar and close button — so the mirror can render
+  // it as a full-viewport overlay and forward clicks (notably close) to
+  // live.
+  let modalEditor = null;
+  try {
+    const me = document.querySelector('.part.editor.modal-editor-part');
+    if (me) {
+      const mr = me.getBoundingClientRect();
+      if (mr.width > 0 && mr.height > 0) {
+        modalEditor = {
+          html: safeHTML(me),
+          left: mr.left, top: mr.top,
+          width: mr.width, height: mr.height,
+        };
+      }
+    }
+  } catch (e) {}
   // Serialize the pane subtree with the HTML parser's structural hazards
   // escaped: <a>, <button> and <form> are emitted as x-a / x-button /
   // x-form. The HTML parser re-parents nested <a> (adoption agency) and
@@ -498,6 +543,7 @@ const htmlExpr = `(selectors) => {
     nestedScrolls: nestedScrolls,
     cssFP: cssFP,
     popups: popups,
+    modalEditor: modalEditor,
   };
 }`
 
@@ -683,6 +729,21 @@ const fpExpr = `(selectors) => {
     }
     if (parts.length > 0) popFP = parts.join('|');
   } catch (e) {}
+  // The modal editor (image carousel, Markdown preview, ...) sits OUTSIDE
+  // the pane root, so the pane's own content never changes when it opens,
+  // closes, or resizes — fold a cheap modal fingerprint into fp so any of
+  // those triggers a re-extract.
+  let modFP = '';
+  try {
+    const me = document.querySelector('.part.editor.modal-editor-part');
+    if (me) {
+      const mr = me.getBoundingClientRect();
+      if (mr.width > 0 && mr.height > 0) {
+        modFP = me.innerText.length + ':' + me.childElementCount + ':' +
+          Math.round(mr.width) + ':' + Math.round(mr.height);
+      }
+    }
+  } catch (e) {}
   // Chat-input cursor state, folded into the fp so caret moves and focus
   // changes trigger a full re-extract: neither alters innerText or the
   // child count (the cursor's position is an inline style, and focus is a
@@ -707,7 +768,7 @@ const fpExpr = `(selectors) => {
     const qtas = el.querySelectorAll('.chat-question-freeform-textarea');
     for (const q of qtas) valFP += (q.value || '') + '\u0001';
   } catch (e) {}
-  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP + ':' + curFP + ':' + inputFP + ':' + valFP;
+  const fp = el.innerText.length + ':' + el.childElementCount + ':' + model.length + ':' + themeInd + ':' + popFP + ':' + curFP + ':' + inputFP + ':' + valFP + ':' + modFP;
   return {
     fp: fp,
     cssFP: cssFP,
@@ -900,16 +961,26 @@ const clickPointExpr = `(args) => {
   ` + findRootJS + `
   let root = null;
   let p = path;
-  // A path starting with a negative value -(id+1) is rooted at the
+  // A path starting with a negative value is rooted OUTSIDE the pane root:
+  // -2 is the .part.editor.modal-editor-part (the modal editor overlay,
+  // e.g. the image carousel); any other negative value -(id+1) is the
   // .context-view (popup) container with that stable id — its index in the
-  // FULL (including hidden) .context-view list — instead of the pane root;
-  // the remaining indices are relative to it.
+  // FULL (including hidden) .context-view list. The remaining indices are
+  // relative to the resolved root.
   if (Array.isArray(p) && p.length > 0 && p[0] < 0) {
-    const id = -p[0] - 1; // .context-view index in the full list
-    const c = document.querySelectorAll('.context-view')[id];
-    if (c) {
-      const cr = c.getBoundingClientRect();
-      if (cr.width > 0 && cr.height > 0) { root = c; p = p.slice(1); }
+    if (p[0] === -2) {
+      const me = document.querySelector('.part.editor.modal-editor-part');
+      if (me) {
+        const mr = me.getBoundingClientRect();
+        if (mr.width > 0 && mr.height > 0) { root = me; p = p.slice(1); }
+      }
+    } else {
+      const id = -p[0] - 1; // .context-view index in the full list
+      const c = document.querySelectorAll('.context-view')[id];
+      if (c) {
+        const cr = c.getBoundingClientRect();
+        if (cr.width > 0 && cr.height > 0) { root = c; p = p.slice(1); }
+      }
     }
   } else {
     root = findRoot(sels);

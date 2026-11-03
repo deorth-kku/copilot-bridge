@@ -56,6 +56,80 @@ const pageCSS = `  html, body {
      closes the live popup as before. */
   #pane .context-view .context-view-pointerBlock,
   #pane .context-view .context-view-block { pointer-events: none !important; }
+  /* The modal editor (image carousel, Markdown preview, ...) is a FULL-
+     VIEWPORT overlay on top of the pane. It renders OUTSIDE the pane root in
+     live (a .part.editor.modal-editor-part floating overlay that blocks the
+     rest of the workbench), so the mirror appends it to #pane and pins it to
+     the whole viewport. The re-fit rule above already gives it 100%
+     width/height; fixed positioning + inset: 0 make it cover the viewport
+     (escaping #pane's overflow clipping) and sit above the pane root. */
+  #pane > .part.editor.modal-editor-part {
+    position: fixed !important;
+    /* Start BELOW the fixed window picker (#status, 26px tall, z-index 9999)
+       so the modal's title bar (header) is not covered by the picker. This
+       matches #pane's margin-top: 26px, so the modal fills the same area as
+       the pane (y:26 to the viewport bottom) and the picker stays usable for
+       switching windows while the modal is open. */
+    top: 26px !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    z-index: 1000 !important;
+    /* The live modal editor's background comes from theme-scoped rules that
+       do not reach the mirror's overlay; paint it opaque so the workbench
+       behind does not show through. */
+    background: var(--mirror-bg, #1e1e1e) !important;
+    /* Live lays the modal out as a grid: grid-template-rows: auto 1fr
+       (header auto ~= 40px, content 1fr = the rest). That rule is
+       theme-scoped and does not reach the mirror, so the overlay falls
+       back to block layout: the .content child keeps its live 888px height
+       and overflows the 888px viewport by the header's 40px, clipping the
+       thumbnail strip at the bottom. Restore the grid so the header takes
+       its natural height and the content fills the remaining space. */
+    display: grid !important;
+    grid-template-rows: auto 1fr !important;
+    grid-template-columns: 1fr !important;
+  }
+  /* The modal editor's title bar (header) carries its dark background and
+     its flex layout from theme-scoped rules that do not reach the mirror.
+     Without the flex rule the header falls back to block layout: the
+     .modal-editor-title and the .modal-editor-action-container (the three
+     window-control buttons) stack vertically and the buttons end up on the
+     LEFT, below the title. In live the header is a flex row with the title
+     on the left and the buttons pushed to the right. Restore that layout
+     and paint the header opaque so the title is legible. */
+  #pane > .part.editor.modal-editor-part .modal-editor-header {
+    background: var(--mirror-bg, #1e1e1e) !important;
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+  }
+  /* The carousel is deeply nested inside a Monaco grid/split-view chain
+     (.content > .grid-view-container > .monaco-grid-view > .monaco-grid-branch-node
+     > .monaco-split-view2 > .monaco-scrollable-element > .split-view-container
+     > .split-view-view > .editor-group-container > .editor-container
+     > .editor-instance > .image-carousel-editor). Each link carries a live
+     pixel size from the Monaco layout engine; force the whole chain to fill
+     the modal editor so the image (object-fit: contain) scales to the
+     mirror viewport. */
+  #pane .part.editor.modal-editor-part .content,
+  #pane .part.editor.modal-editor-part .grid-view-container,
+  #pane .part.editor.modal-editor-part .monaco-grid-view,
+  #pane .part.editor.modal-editor-part .monaco-grid-branch-node,
+  #pane .part.editor.modal-editor-part .monaco-split-view2,
+  #pane .part.editor.modal-editor-part .monaco-scrollable-element,
+  #pane .part.editor.modal-editor-part .split-view-container,
+  #pane .part.editor.modal-editor-part .split-view-view,
+  #pane .part.editor.modal-editor-part .editor-group-container,
+  #pane .part.editor.modal-editor-part .editor-container,
+  #pane .part.editor.modal-editor-part .editor-instance,
+  #pane .part.editor.modal-editor-part .image-carousel-editor {
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+  }
   #pane .interactive-list { height: auto !important; flex: 1 1 0% !important; min-height: 0 !important; }
   /* The session-selection view has the same re-fit problem as the chat list,
      but its list container is .agent-sessions-control-container (NOT

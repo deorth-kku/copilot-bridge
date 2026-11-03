@@ -231,6 +231,17 @@ func mergeState(old, new stateMsg) stateMsg {
 			}
 		}
 	}
+	// A nil ModalEditor in the NEWER frame means the modal editor closed —
+	// that is intentional and must not be resurrected from the older frame.
+	// A position-only follow (empty HTML) inherits the payload from the
+	// older frame so the overlay keeps its content.
+	if new.ModalEditor != nil && new.ModalEditor.HTML == "" && old.ModalEditor != nil {
+		new.ModalEditor = &cdp.ModalEditorState{
+			HTML: old.ModalEditor.HTML,
+			Left: new.ModalEditor.Left, Top: new.ModalEditor.Top,
+			Width: new.ModalEditor.Width, Height: new.ModalEditor.Height,
+		}
+	}
 	return new
 }
 
@@ -296,6 +307,9 @@ func (m *Mirror) sendFullState(c *client) {
 					Width: s.popups[i].width, Height: s.popups[i].height,
 				}
 			}
+		}
+		if s.modalEditor != nil {
+			msg.ModalEditor = s.modalEditor
 		}
 	} else {
 		msg = stateMsg{Type: "state", Err: "waiting for VS Code window"}

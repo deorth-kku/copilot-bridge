@@ -145,6 +145,10 @@ type snapState struct {
 	// render outside the pane root. Each entry stores the HTML, a fingerprint
 	// of it, and the pane-relative position. Empty means no popup is open.
 	popups []popupSnap
+	// modalEditor captures the visible modal editor (image carousel, ...)
+	// that renders outside the pane root in a .part.editor.modal-editor-part
+	// overlay. Nil when no modal editor is open.
+	modalEditor *cdp.ModalEditorState
 }
 
 // popupSnap is the server-side state for one visible context view.

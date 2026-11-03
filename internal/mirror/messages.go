@@ -57,7 +57,13 @@ type stateMsg struct {
 	// always present. Empty/nil when no popup is open (the browser removes
 	// its copies).
 	Popups []cdp.PopupState `json:"popups,omitempty"`
-	Window string           `json:"window,omitempty"`
+	// ModalEditor is the visible modal editor (image carousel, Markdown
+	// preview, ...) rendered outside the pane root in a
+	// .part.editor.modal-editor-part overlay. Its HTML is only present when
+	// it changed; Left/Top/Width/Height are always present while open. Nil
+	// when no modal editor is open (the browser removes its copy).
+	ModalEditor *cdp.ModalEditorState `json:"modalEditor"`
+	Window      string                `json:"window,omitempty"`
 	// WindowID is the CDP target id of the window currently mirrored; the
 	// browser uses it to mark the selected item in the status-bar picker.
 	WindowID string `json:"windowId,omitempty"`

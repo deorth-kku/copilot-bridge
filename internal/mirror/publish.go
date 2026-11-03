@@ -242,6 +242,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 	// Full HTML extract only when the content fingerprint changed.
 	var html, rootStyle, themeVars, themeBg string
 	var newPopups []cdp.PopupState
+	var newModalEditor *cdp.ModalEditorState
 	var htmlMs int64
 	// The nested-scroll state shipped with a message must be measured at the
 	// SAME instant as the HTML it accompanies. The fingerprint (taken first,
@@ -275,6 +276,13 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 				// .context-view); rewrite them just like the pane's.
 				newPopups[i].HTML = m.rewriteImages(s, hs.Popups[i].HTML)
 			}
+		}
+		// The modal editor (image carousel, ...) renders its image as a
+		// blob: URL the mirror (http origin) cannot load; rewrite it just
+		// like the pane's and popups'.
+		if hs.ModalEditor != nil {
+			hs.ModalEditor.HTML = m.rewriteImages(s, hs.ModalEditor.HTML)
+			newModalEditor = hs.ModalEditor
 		}
 		html = m.rewriteImages(s, html)
 		htmlMs = time.Since(exStart).Milliseconds()
@@ -317,6 +325,10 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 				}
 			}
 		}
+		// The fresh extract is the source of truth for the modal editor too:
+		// a nil newModalEditor here means it just CLOSED, so ns.modalEditor
+		// must stay nil (the mirror removes its copy).
+		ns.modalEditor = newModalEditor
 	} else if prev != nil {
 		// A refresh that did NOT change the content fingerprint (scroll,
 		// rect, css, nested) must still advertise the popups that are
@@ -325,6 +337,7 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 		// the very next non-content refresh. Their HTML is unchanged (fp did
 		// not change), so only their positions are re-sent below.
 		ns.popups = prev.popups
+		ns.modalEditor = prev.modalEditor
 	}
 	m.snapMu.Lock()
 	m.snaps[winID] = ns
@@ -367,6 +380,24 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 				base.Popups[i].HTML = ns.popups[i].html
 			}
 		}
+	}
+	// The modal editor is part of the content, so its HTML only changes when
+	// fpChanged; a position-only refresh (scroll/rect) re-sends the box
+	// without the HTML (the browser keeps its copy). A nil ns.modalEditor
+	// means it is closed, so base.ModalEditor stays nil.
+	if ns.modalEditor != nil {
+		me := cdp.ModalEditorState{
+			Left: ns.modalEditor.Left, Top: ns.modalEditor.Top,
+			Width: ns.modalEditor.Width, Height: ns.modalEditor.Height,
+		}
+		prevHTML := ""
+		if prev != nil && prev.modalEditor != nil {
+			prevHTML = prev.modalEditor.HTML
+		}
+		if prev == nil || prev.modalEditor == nil || prevHTML != ns.modalEditor.HTML {
+			me.HTML = ns.modalEditor.HTML
+		}
+		base.ModalEditor = &me
 	}
 	if sendTheme {
 		base.ThemeVars = themeVars
@@ -443,6 +474,15 @@ func (m *Mirror) refreshWindow(winID string, wins []cdp.Window, group []*client)
 						Left: ns.popups[i].left, Top: ns.popups[i].top,
 						Width: ns.popups[i].width, Height: ns.popups[i].height,
 					}
+				}
+			}
+			// The follow carries the modal editor's position WITHOUT html: a
+			// null modalEditor would make the browser drop the overlay phase
+			// 1 just rendered.
+			if ns.modalEditor != nil {
+				follow.ModalEditor = &cdp.ModalEditorState{
+					Left: ns.modalEditor.Left, Top: ns.modalEditor.Top,
+					Width: ns.modalEditor.Width, Height: ns.modalEditor.Height,
 				}
 			}
 			for _, c := range m.groupClients(m.disc.Windows())[winID] {
