@@ -1,11 +1,17 @@
-// Unit tests for extractFn (internal/cdp/inject.go): reads the chat input
-// state (input text, model, effort, mode, visibility) from the live DOM.
+// Unit tests for the probe library's extract (internal/cdp/js/probe_lib.js):
+// reads the chat input state (input text, model, effort, mode, visibility)
+// from the live DOM.
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { El, makeDocument, makeWindow, installGlobals, uninstallGlobals } = require('../domstub.js');
-const { loadExpr } = require('./loadexpr.js');
-const extract = loadExpr('extract_fn.js');
+const { installLib } = require('./loadexpr.js');
+// extract lives on the page-global probe library; install it on the
+// current stub window (buildState swaps windows between tests).
+const extract = () => {
+  if (!window.__copilotBridgeProbes) installLib();
+  return window.__copilotBridgeProbes.extract();
+};
 
 function buildState({ input, model, modelAttr, effort, effortAttr, mode, inputEditor = true } = {}) {
   const root = new El('div', { attrs: { class: 'monaco-workbench' }, offsetWidth: 100, offsetHeight: 100 });

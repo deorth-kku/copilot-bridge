@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { El, makeDocument, makeWindow, installGlobals, uninstallGlobals, MutationObserver } = require('../domstub.js');
-const { loadIIFE } = require('./loadexpr.js');
+const { loadIIFE, installLib } = require('./loadexpr.js');
 
 const src = loadIIFE('inject.js', 'copilotBridge');
 const sleep = ms => new Promise(res => setTimeout(res, ms));
@@ -23,6 +23,7 @@ async function setup() {
   const calls = [];
   win.copilotBridge = p => calls.push(p);
   installGlobals(doc, win);
+  installLib(); // the IIFE references window.__copilotBridgeProbes at eval time
   await sleep(80);
   calls.length = 0;
   return { doc, win, calls };

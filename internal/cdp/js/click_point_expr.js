@@ -1,6 +1,6 @@
 (args) => {
+  const P = window.__copilotBridgeProbes;
   const sels = args[0], path = args[1], rx = args[2], ry = args[3];
-  __FIND_ROOT__
   let root = null;
   let p = path;
   // A path starting with a negative value is rooted OUTSIDE the pane root:
@@ -25,7 +25,7 @@
       }
     }
   } else {
-    root = findRoot(sels);
+    root = P.findRoot(sels);
   }
   if (!root) return null;
   let el = root;

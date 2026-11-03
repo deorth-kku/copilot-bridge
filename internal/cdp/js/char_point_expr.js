@@ -1,7 +1,7 @@
 (args) => {
+  const P = window.__copilotBridgeProbes;
   const sels = args[0], char = args[1];
-  __FIND_ROOT__
-  const root = findRoot(sels);
+  const root = P.findRoot(sels);
   if (!root) return null;
   const ed = root.querySelector('.chat-input-container .interactive-input-editor .monaco-editor')
              || root.querySelector('.interactive-input-editor .monaco-editor');

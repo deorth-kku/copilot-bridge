@@ -15,12 +15,14 @@ import (
 // a second instance would override the first one's binding).
 const BindingName = "copilotBridge"
 
-// extractFn is an arrow function (NOT invoked) that reads the current
-// chat input state. It must stay a function: InjectJS assigns it to a
-// variable and calls it.
+// ProbeLibJS is the page-global probe library (js/probe_lib.js): the
+// shared helpers (findRoot, measureScroll, scrollObj, inputEditor, cssFP,
+// extract) that the probe expressions and the observer IIFE reference.
+// Session evaluates it before the observer IIFE and again after every
+// navigation (a reload wipes the globals).
 //
-//go:embed js/extract_fn.js
-var extractFn string
+//go:embed js/probe_lib.js
+var ProbeLibJS string
 
 // defaultDebounceMs is the page-side DOM-change debounce used when the
 // -debounce flag is not given.
@@ -39,9 +41,8 @@ func clampDebounceMs(ms int) int {
 	return ms
 }
 
-// injectJS is the injected IIFE as a template: __EXTRACT_FN__ is spliced
-// with the extractFn source, __BINDING__ with BindingName, and
-// __DEBOUNCE_MS__ with the clamped debounce value.
+// injectJS is the injected IIFE as a template: __BINDING__ is spliced with
+// BindingName and __DEBOUNCE_MS__ with the clamped debounce value.
 //
 //go:embed js/inject.js
 var injectJS string
@@ -53,7 +54,6 @@ var injectJS string
 // snapshot.
 func InjectJS(debounceMs int) string {
 	return strings.NewReplacer(
-		"__EXTRACT_FN__", extractFn,
 		"__BINDING__", BindingName,
 		"__DEBOUNCE_MS__", strconv.Itoa(clampDebounceMs(debounceMs)),
 	).Replace(injectJS)

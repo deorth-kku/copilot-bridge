@@ -16,15 +16,9 @@ func TestInjectedJSCompiles(t *testing.T) {
 		js   string
 	}{
 		// inject.go
-		{"extractFn", extractFn},
+		{"ProbeLibJS", ProbeLibJS},
 		{"InjectJS", InjectJS(defaultDebounceMs)},
 		{"MirrorInjectJS", MirrorInjectJS(defaultDebounceMs)},
-		// js/lib fragments (spliced into the expressions below)
-		{"findRootJS", findRootJS},
-		{"scrollStateJS", scrollStateJS},
-		{"inputEditorJS", inputEditorJS},
-		{"cssFPJS", cssFPJS},
-		{"scrollObjJS", scrollObjJS},
 		// extract.go
 		{"htmlExpr", htmlExpr},
 		{"fpExpr", fpExpr},

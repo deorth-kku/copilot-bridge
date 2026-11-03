@@ -209,6 +209,7 @@ func (s *Session) Run(ctx context.Context) {
 		s.Stop()
 	}()
 
+	s.eval("probe-lib", ProbeLibJS)
 	s.inject(BindingName, InjectJS(s.debounceMs))
 	s.inject(MirrorBindingName, MirrorInjectJS(s.debounceMs))
 
@@ -218,6 +219,7 @@ func (s *Session) Run(ctx context.Context) {
 		case <-readDone:
 			return
 		case <-s.nav:
+			s.eval("probe-lib", ProbeLibJS)
 			s.inject(BindingName, InjectJS(s.debounceMs))
 			s.inject(MirrorBindingName, MirrorInjectJS(s.debounceMs))
 		}
@@ -236,17 +238,22 @@ func (s *Session) inject(name, js string) {
 		s.log.Error("addBinding failed", "binding", name, "err", err)
 		return
 	}
+	s.eval(name, js)
+}
+
+// eval evaluates js on the page, logging CDP errors and page-side
+// exceptions (which ride inside the result as exceptionDetails, NOT as CDP
+// errors).
+func (s *Session) eval(tag, js string) {
 	raw, err := s.Call("Runtime.evaluate", map[string]any{"expression": js, "returnByValue": true})
 	if err != nil {
-		s.log.Error("injection failed", "binding", name, "err", err)
+		s.log.Error("evaluate failed", "script", tag, "err", err)
 		return
 	}
-	// A page-side exception is NOT a CDP error: it rides inside the result
-	// as exceptionDetails.
 	var r evalResp
 	if err := json.Unmarshal(raw, &r); err == nil {
 		if d := r.exception(); d != "" {
-			s.log.Error("injection threw", "binding", name, "err", d)
+			s.log.Error("script threw", "script", tag, "err", d)
 		}
 	}
 }

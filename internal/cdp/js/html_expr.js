@@ -1,9 +1,13 @@
 (selectors) => {
-  __FIND_ROOT__
-  const el = findRoot(selectors);
+  const P = window.__copilotBridgeProbes;
+  const el = P.findRoot(selectors);
   if (!el) return { err: 'pane not found' };
   const r = el.getBoundingClientRect();
-__SCROLL_STATE____INPUT_EDITOR____CSS_FP____SCROLL_OBJ__
+  const m = P.measureScroll(el);
+  const { scrollPath, scrollRows, nestedScrolls } = m;
+  const { inputFocused } = P.inputEditor(el);
+  const cssFP = P.cssFP();
+  const scroll = P.scrollObj(el, m);
   const rootStyle = ((document.documentElement.getAttribute('style') || '') + ';' +
     (document.body ? (document.body.getAttribute('style') || '') : '')).trim();
   // Capture every CSS custom property computed at the pane root. VS Code

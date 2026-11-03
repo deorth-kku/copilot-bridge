@@ -198,43 +198,41 @@ path to `copilot-bridge.exe`:
 `go test ./internal/...` runs everything. The injected JavaScript is
 covered in two layers (both skip cleanly when node is not on PATH):
 
-- **Syntax** — every injected JS constant is checked with `node --check`
+- **Syntax** — every injected JS source is checked with `node --check`
   (`TestInjectedJSCompiles`, `TestPageHTMLInlineScriptsCompiles`).
-- **Behavior** — 77 node:test unit tests run the real JS against a minimal
+- **Behavior** — 149 node:test unit tests run the real JS against a minimal
   DOM stub (`internal/jscheck/testdata/domstub.js`):
-    - `internal/jscheck/testdata/cdp/*.test.js` (55): extraction probes,
-      the two injected IIFEs (initial snapshot, 50ms debounce, no stacking
-      on re-injection, capture-phase scroll wakes), font data-URI
-      rewriting, and image fetching.
-    - `internal/jscheck/testdata/mirror/mirror_js.test.js` (22): the
+    - `internal/jscheck/testdata/cdp/*.test.js` (84): the page-global probe
+      library (`js/probe_lib.js`), the extraction probes, the two injected
+      IIFEs (initial snapshot, 50ms debounce, no stacking on re-injection,
+      capture-phase scroll wakes), font data-URI rewriting, and image
+      fetching.
+    - `internal/jscheck/testdata/mirror/mirror_js.test.js` (65): the
       mirror page's inline client IIFE — WebSocket connect/reconnect,
       window-picker sync, versioned CSS/theme updates, incremental DOM
       patching (node identity preserved), popup placement (anchor-relative
       + viewport clamp), and mouse/keyboard/wheel input capture.
 
-The unit tests are also runnable directly with node (node 21+), with no
-Go prerequisite — the module fixtures
-(`internal/jscheck/testdata/{modules,raw}/`) are committed alongside the
-suites:
+The JS under test is committed source, not generated fixtures: the cdp
+probe expressions live in `internal/cdp/js/` (the shared helpers are the
+page-global probe library `js/probe_lib.js`, which the session evaluates
+before any probe runs) and the mirror page assets in
+`internal/mirror/static/`. The node:test files load those files directly
+(via `jscheck/testdata/cdp/loadexpr.js`), so the suites always run against
+the live committed sources. They are also runnable directly with node
+(node 21+), with no Go prerequisite:
 
 ```sh
 node --test internal/jscheck/testdata/cdp/*.test.js
 node --test internal/jscheck/testdata/mirror/mirror_js.test.js
 ```
 
-`TestJSFixturesCurrent` and `TestMirrorJSFixturesCurrent` (part of
-`go test ./internal/...`) fail when the committed fixtures drift from the
-JS constants. After editing an injected JS constant, regenerate them:
-
-```sh
-go test -run TestJSUnitStandalone ./internal/cdp -gen
-go test -run TestMirrorJSFixturesCurrent ./internal/mirror -gen
-```
-
-When adding a new injected JS constant, add it to
-`jsUnitModules`/`jsUnitRaw` in `internal/cdp/jsunit_test.go` and to
-`TestInjectedJSCompiles`, then regenerate the fixtures. The mirror page's
-inline script is extracted automatically by `pageScripts()` in
+When adding a new injected JS source, create the file
+(`internal/cdp/js/` or `internal/mirror/static/`), embed it in Go
+(`//go:embed`), add it to `TestInjectedJSCompiles`, and — if it has
+behavior — a node:test suite in `internal/jscheck/testdata/` registered in
+the matching `TestJSUnit` file list. The mirror page's inline script is
+extracted automatically by `pageScripts()` in
 `internal/mirror/jsunit_test.go`.
 
 ## Caveats

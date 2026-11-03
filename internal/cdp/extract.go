@@ -5,7 +5,6 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
-	"strings"
 )
 
 // PaneRect is the pane root's bounding box in the VS Code viewport
@@ -197,102 +196,36 @@ type PageHealth struct {
 	} `json:"heap"`
 }
 
-// Shared probe fragments (js/lib/). The probe expressions are evaluated as
-// SEPARATE programs by CDP Runtime.evaluate, so the helpers cannot be
-// shared page-side and must be inlined into every expression that needs
-// them. The committed expression files carry __PLACEHOLDER__ markers that
-// assembleProbes splices with these fragments at package init — the
-// fragments live in one place instead of being copy-pasted into every
-// expression.
+// Probe expressions (js/*.js). The shared helpers they reference
+// (findRoot, measureScroll, scrollObj, inputEditor, cssFP) are page
+// globals installed by the probe library (js/probe_lib.js, ProbeLibJS)
+// before any probe is evaluated — see Session.Run.
 //
-// TODO: consider installing the probe library once per session as page
-// globals (window.__probes = {...}) so the shared fragments are parsed
-// once instead of spliced into every expression.
-//
-// findRootJS tries the candidate selectors in order and returns the first
-// match (or null).
-//
-//go:embed js/lib/find_root.js
-var findRootJS string
-
-// scrollStateJS locates the element that actually scrolls the active view:
-// monaco-lists scroll their .monaco-scrollable-element DIRECT CHILD
-// (overflow:hidden, scrolled programmatically via scrollTop), so a "walk up
-// for overflow:auto/scroll" heuristic never finds it. The pane root
-// contains TWO such lists — the chat message list and the agent-sessions
-// list (session-selection view) — and exactly one of them is expanded at a
-// time, so the one with the most scrollable room (scrollHeight -
-// clientHeight) is the active one. The ancestor walk remains as a fallback
-// for other pane shapes. It also records the measured container as a DOM
-// path from the pane root (scrollPath), the rows' offset/geometry
-// (scrollOffset/scrollRows), and the nested scroll containers
-// (nestedScrolls).
-//
-//go:embed js/lib/scroll_state.js
-var scrollStateJS string
-
-// inputEditorJS locates the chat input's Monaco editor and reports whether
-// it holds the page focus (document.activeElement inside it — with the
-// native edit context that is a .native-edit-context div, not the old
-// textarea). The mirror needs the focus state because live keeps the input
-// cursor hidden whenever the input is not focused, and a static HTML
-// snapshot cannot tell the two apart (the cursor element exists in both
-// states). It also reports the cursor's CHARACTER INDEX (count of
-// characters before the caret), computed from the live layout: the cursor's
-// inline top picks the wrapped line, its left the offset within it. The
-// mirror re-wraps the input text at its own width (responsive layout), so
-// it needs the index — a size-independent identity — not the live cursor
-// pixels. It also fingerprints the editor width plus each line's character
-// count (inputFP) and the hard/soft wrap boundaries (inputBreaks).
-//
-//go:embed js/lib/input_editor.js
-var inputEditorJS string
-
-// cssFPJS computes the cheap CSS fingerprint: the stylesheet count plus
-// the inline <style> lengths on documentElement and body. VS Code adds
-// inline <style> elements (e.g. when opening a context view), so any of
-// those flips the fingerprint and triggers a CSS re-extract.
-//
-//go:embed js/lib/css_fp.js
-var cssFPJS string
-
-// scrollObjJS builds the scroll state object from the measured scroller
-// (sc) and the rows' offset (scrollOffset). When no real scroller exists
-// (sc is null), it reports the pane root's own geometry as a neutral state:
-// the mirror early-returns on the null scrollPath, so those values are
-// informational only.
-//
-//go:embed js/lib/scroll_obj.js
-var scrollObjJS string
-
-// Templated probe expressions (js/*.js): the committed files carry the
-// __PLACEHOLDER__ markers; the final strings are assembled below.
-//
-// htmlExprTmpl extracts the pane subtree's outerHTML plus the layout
+// htmlExpr extracts the pane subtree's outerHTML plus the layout
 // metadata the mirror needs (bounding box, scroll, theme inline styles, and
 // a cheap CSS fingerprint). It is an arrow function (NOT invoked);
 // ExtractHTML passes the candidate selectors as its single argument.
 //
 //go:embed js/html_expr.js
-var htmlExprTmpl string
+var htmlExpr string
 
-// fpExprTmpl is the cheap per-poll probe: it returns a content fingerprint,
+// fpExpr is the cheap per-poll probe: it returns a content fingerprint,
 // a CSS fingerprint, and the layout metadata (bounding box + scroll)
 // without dumping the pane's outerHTML.
 //
 //go:embed js/fp_expr.js
-var fpExprTmpl string
+var fpExpr string
 
-// healthExprTmpl samples the live page's size and memory: total/pane DOM
+// healthExpr samples the live page's size and memory: total/pane DOM
 // node counts, stylesheet count, and the JS heap (when the Chromium build
 // exposes performance.memory). The mirror evaluates it once a minute so the
 // log can correlate refresh latency with renderer pressure over long
 // sessions.
 //
 //go:embed js/health_expr.js
-var healthExprTmpl string
+var healthExpr string
 
-// clickPointExprTmpl resolves a DOM path (child indices from the pane root)
+// clickPointExpr resolves a DOM path (child indices from the pane root)
 // plus a relative (0..1) position within the target element to an absolute
 // live-page coordinate. Mapping by element identity (rather than by absolute
 // pane offset) keeps forwarded clicks accurate even when the mirror's
@@ -303,9 +236,9 @@ var healthExprTmpl string
 // callExpr, which wraps the expression in an IIFE and passes one argument.
 //
 //go:embed js/click_point_expr.js
-var clickPointExprTmpl string
+var clickPointExpr string
 
-// charPointExprTmpl resolves a chat-input caret character index (count of
+// charPointExpr resolves a chat-input caret character index (count of
 // characters before the caret, same identity as FingerprintState.CursorChar)
 // to an absolute live-page coordinate: the click point on the caret's
 // boundary. The mirror re-wraps the input text at its own width, so a
@@ -316,36 +249,14 @@ var clickPointExprTmpl string
 // callExpr, which wraps the expression in an IIFE and passes one argument.
 //
 //go:embed js/char_point_expr.js
-var charPointExprTmpl string
+var charPointExpr string
 
-// rectExprTmpl resolves a DOM path (child indices from the pane root) to the
+// rectExpr resolves a DOM path (child indices from the pane root) to the
 // target element's bounding box in viewport coordinates. ok:false (via a
 // null return) when the path does not resolve.
 //
 //go:embed js/rect_expr.js
-var rectExprTmpl string
-
-// The final probe expressions, assembled once at package init.
-var (
-	htmlExpr       = assembleProbes(htmlExprTmpl)
-	fpExpr         = assembleProbes(fpExprTmpl)
-	healthExpr     = assembleProbes(healthExprTmpl)
-	clickPointExpr = assembleProbes(clickPointExprTmpl)
-	charPointExpr  = assembleProbes(charPointExprTmpl)
-	rectExpr       = assembleProbes(rectExprTmpl)
-)
-
-// assembleProbes splices the shared fragments (js/lib) into a templated
-// probe expression.
-func assembleProbes(tmpl string) string {
-	return strings.NewReplacer(
-		"__FIND_ROOT__", findRootJS,
-		"__SCROLL_STATE__", scrollStateJS,
-		"__INPUT_EDITOR__", inputEditorJS,
-		"__CSS_FP__", cssFPJS,
-		"__SCROLL_OBJ__", scrollObjJS,
-	).Replace(tmpl)
-}
+var rectExpr string
 
 // cssExpr dumps every accessible stylesheet and rewrites each @font-face
 // font URL into an inlined base64 data URI, so the returned CSS is fully

@@ -1,9 +1,10 @@
-// loadexpr.js: loads the committed CDP probe sources (internal/cdp/js)
-// and assembles the templated expressions the same way the Go package
-// does — the js/lib fragments are spliced into the __PLACEHOLDER__
-// markers. The standalone expressions load directly. Keeping the assembly
-// here (instead of in a generated fixture) means the suites always run
-// against the live committed files.
+// loadexpr.js: loads the committed CDP probe sources (internal/cdp/js).
+// The probe expressions reference the page-global probe library
+// (window.__copilotBridgeProbes, probe_lib.js) the same way the live page
+// does: installLib() evaluates the library against the current stub
+// window, mirroring cdp.Session, which evaluates it before the probes.
+// Keeping the load here (instead of in a generated fixture) means the
+// suites always run against the live committed files.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -11,38 +12,35 @@ const path = require('node:path');
 const JS_DIR = path.join(__dirname, '..', '..', '..', 'cdp', 'js');
 const read = (p) => fs.readFileSync(path.join(JS_DIR, p), 'utf8');
 
-// The shared fragments, keyed by their placeholder. __BINDING__ and
-// __DEBOUNCE_MS__ are the inject-IIFE parameters (the binding global and
-// the default debounce, cdp.defaultDebounceMs).
-const LIBS = {
-  __FIND_ROOT__: () => read('lib/find_root.js'),
-  __SCROLL_STATE__: () => read('lib/scroll_state.js'),
-  __INPUT_EDITOR__: () => read('lib/input_editor.js'),
-  __CSS_FP__: () => read('lib/css_fp.js'),
-  __SCROLL_OBJ__: () => read('lib/scroll_obj.js'),
-  __EXTRACT_FN__: () => read('extract_fn.js'),
-  __BINDING__: (b) => b,
-  __DEBOUNCE_MS__: () => '50',
-};
-
-function resolve(name, binding) {
-  let src = read(name);
-  for (const [ph, get] of Object.entries(LIBS)) {
-    src = src.split(ph).join(ph === '__BINDING__' ? binding : get());
-  }
-  return src;
+// installLib evaluates the probe library in the current global context
+// (window = the current domstub window). A fresh installGlobals yields a
+// window without the library, so the next probe call reinstalls it.
+function installLib() {
+  new Function(read('probe_lib.js'))();
 }
 
-// loadExpr resolves one expression source (a bare arrow-function
-// expression) and evaluates it.
+function libReady() {
+  return typeof window !== 'undefined' && !!window && !!window.__copilotBridgeProbes;
+}
+
+// loadExpr loads one expression source (a bare arrow-function expression)
+// and evaluates it. The returned wrapper installs the probe library on
+// first call (the expressions reference window.__copilotBridgeProbes at
+// call time).
 function loadExpr(name) {
-  return new Function('return ' + resolve(name))();
+  const f = new Function('return ' + read(name))();
+  return (...args) => {
+    if (!libReady()) installLib();
+    return f(...args);
+  };
 }
 
-// loadIIFE resolves one injected-IIFE source (binding = the page global
-// the IIFE pushes through).
+// loadIIFE loads one injected-IIFE source. __BINDING__ is spliced with the
+// page global the IIFE pushes through, __DEBOUNCE_MS__ with the default
+// debounce (cdp.defaultDebounceMs). The caller must installLib() before
+// evaluating the IIFE (it references the library at eval time).
 function loadIIFE(name, binding) {
-  return resolve(name, binding);
+  return read(name).split('__BINDING__').join(binding).split('__DEBOUNCE_MS__').join('50');
 }
 
-module.exports = { loadExpr, loadIIFE };
+module.exports = { installLib, loadExpr, loadIIFE };

@@ -16,13 +16,15 @@ import (
 // every command method the client sends (in order) and drives the same
 // flow the real page produces:
 //
-//  1. client: Runtime.enable, Page.enable, then addBinding + evaluate for
-//     BOTH bindings (chat state, mirror wake)
+//  1. client: Runtime.enable, Page.enable, then evaluate the probe
+//     library, then addBinding + evaluate for BOTH bindings (chat state,
+//     mirror wake)
 //  2. page:   bindingCalled with EMPTY input (startup snapshot — the
 //     real page always emits this on (re)inject),
 //     then a real input event,
 //     then Page.frameNavigated (workbench reload),
-//  3. client: addBinding + evaluate for both bindings (re-injection)
+//  3. client: evaluate the probe library, then addBinding + evaluate for
+//     both bindings (re-injection)
 //  4. page:   bindingCalled with RESTORED input (post-reload snapshot,
 //     must be skipped), then a real input event
 func startMockPage(t *testing.T) (wsURL string, methods chan string) {
@@ -100,10 +102,11 @@ func TestSessionHandshakeAndEvents(t *testing.T) {
 	s := NewSession("test-id", "Test Window", wsURL, events, discardLog, defaultDebounceMs)
 	go s.Run(context.Background())
 
-	// 1. handshake commands in the expected order (two bindings:
-	//    chat state + mirror wake)
+	// 1. handshake commands in the expected order (probe library, then
+	//    two bindings: chat state + mirror wake)
 	for _, want := range []string{
 		"Runtime.enable", "Page.enable",
+		"Runtime.evaluate",
 		"Runtime.addBinding", "Runtime.evaluate",
 		"Runtime.addBinding", "Runtime.evaluate",
 	} {
@@ -127,8 +130,10 @@ func TestSessionHandshakeAndEvents(t *testing.T) {
 		t.Errorf("unexpected first forwarded event fields: %+v", ev)
 	}
 
-	// 3. frameNavigated triggers re-injection of BOTH bindings
+	// 3. frameNavigated triggers re-injection of the probe library and
+	//    BOTH bindings
 	for _, want := range []string{
+		"Runtime.evaluate",
 		"Runtime.addBinding", "Runtime.evaluate",
 		"Runtime.addBinding", "Runtime.evaluate",
 	} {
@@ -309,9 +314,11 @@ func TestSessionSubframeNavigationDoesNotReinject(t *testing.T) {
 	go s.Run(context.Background())
 	defer s.Stop()
 
-	// Handshake: enable both domains, install both bindings.
+	// Handshake: enable both domains, evaluate the probe library, install
+	// both bindings.
 	for _, want := range []string{
 		"Runtime.enable", "Page.enable",
+		"Runtime.evaluate",
 		"Runtime.addBinding", "Runtime.evaluate",
 		"Runtime.addBinding", "Runtime.evaluate",
 	} {
@@ -342,6 +349,7 @@ func TestSessionSubframeNavigationDoesNotReinject(t *testing.T) {
 		"params": map[string]any{"frame": map[string]any{"id": "main", "url": "vscode-workbench://vscode-app/"}},
 	}
 	for _, want := range []string{
+		"Runtime.evaluate",
 		"Runtime.addBinding", "Runtime.evaluate",
 		"Runtime.addBinding", "Runtime.evaluate",
 	} {

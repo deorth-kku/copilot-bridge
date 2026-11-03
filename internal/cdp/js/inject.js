@@ -1,6 +1,7 @@
 (() => {
-  const extract = __EXTRACT_FN__
-  ;
+  // The probe library (probe_lib.js) is evaluated before this IIFE by
+  // cdp.Session, so the shared helpers are page globals.
+  const extract = window.__copilotBridgeProbes.extract;
   const push = () => {
     try { window.__BINDING__(JSON.stringify(extract())); } catch (e) {}
   };

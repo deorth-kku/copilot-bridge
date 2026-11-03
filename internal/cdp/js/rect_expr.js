@@ -1,7 +1,7 @@
 (args) => {
+  const P = window.__copilotBridgeProbes;
   const sels = args[0], path = args[1];
-  __FIND_ROOT__
-  const root = findRoot(sels);
+  const root = P.findRoot(sels);
   if (!root) return null;
   let el = root;
   if (Array.isArray(path) && path.length) {
