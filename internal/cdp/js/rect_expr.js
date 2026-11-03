@@ -1,13 +1,6 @@
-module.exports = (args) => {
+(args) => {
   const sels = args[0], path = args[1];
-  
-  const findRoot = (sels) => {
-    for (const sel of sels) {
-      try { const e = document.querySelector(sel); if (e) return e; } catch (err) {}
-    }
-    return null;
-  };
-
+  __FIND_ROOT__
   const root = findRoot(sels);
   if (!root) return null;
   let el = root;
@@ -19,4 +12,4 @@ module.exports = (args) => {
   }
   const r = el.getBoundingClientRect();
   return { ok: true, left: r.left, top: r.top, width: r.width, height: r.height };
-};
+}

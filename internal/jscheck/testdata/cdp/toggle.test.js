@@ -4,7 +4,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { El, makeDocument, makeWindow, installGlobals, uninstallGlobals } = require('../domstub.js');
-const toggleChat = require('../modules/toggle_chat.js');
+const { loadExpr } = require('./loadexpr.js');
+const toggleChat = loadExpr('toggle_chat.js');
 
 function build() {
   const root = new El('div');

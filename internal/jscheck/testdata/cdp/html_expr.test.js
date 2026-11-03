@@ -6,7 +6,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { El, Text, makeDocument, makeWindow, makeGetComputedStyle, installGlobals, uninstallGlobals } = require('../domstub.js');
-const htmlExpr = require('../modules/html_expr.js');
+const { loadExpr } = require('./loadexpr.js');
+const htmlExpr = loadExpr('html_expr.js');
 
 // Pane with TWO monaco-lists: the chat list (expanded, scrollable room)
 // and the sessions list (collapsed, no room), plus a model picker.

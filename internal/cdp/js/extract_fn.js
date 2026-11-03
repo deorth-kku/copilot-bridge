@@ -1,5 +1,4 @@
-(() => {
-  const extract = () => {
+() => {
     const q = sel => document.querySelector(sel);
     // Normalized boolean: a missing element must yield false (not null),
     // so the payload's *Visible fields are always JSON booleans.
@@ -33,29 +32,3 @@
       modelVisible: vis(modelEl)
     };
   }
-  ;
-  const push = () => {
-    try { window.copilotBridge(JSON.stringify(extract())); } catch (e) {}
-  };
-
-  // versioned install: replaces any stale observer from older versions
-  const VERSION = 1;
-  if (window.__copilotBridgeVersion !== VERSION) {
-    if (window.__copilotBridgeMO) { try { window.__copilotBridgeMO.disconnect(); } catch (e) {} }
-    window.__copilotBridgeVersion = VERSION;
-    let timer = null;
-    window.__copilotBridgeSchedule = () => {
-      if (timer) return;
-      timer = setTimeout(() => { timer = null; push(); }, 50);
-    };
-    window.__copilotBridgeMO = new MutationObserver(window.__copilotBridgeSchedule);
-    window.__copilotBridgeMO.observe(document.documentElement, {
-      subtree: true, childList: true, characterData: true,
-      attributes: true, attributeFilter: ['aria-label']
-    });
-  }
-
-  // always emit current state (re-attach / re-inject after reload)
-  (window.__copilotBridgeSchedule || push)();
-  return 'ok';
-})()

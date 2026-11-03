@@ -4,7 +4,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { El, makeDocument, makeWindow, installGlobals, uninstallGlobals } = require('../domstub.js');
-const extract = require('../modules/extract_fn.js');
+const { loadExpr } = require('./loadexpr.js');
+const extract = loadExpr('extract_fn.js');
 
 function buildState({ input, model, modelAttr, effort, effortAttr, mode, inputEditor = true } = {}) {
   const root = new El('div', { attrs: { class: 'monaco-workbench' }, offsetWidth: 100, offsetHeight: 100 });

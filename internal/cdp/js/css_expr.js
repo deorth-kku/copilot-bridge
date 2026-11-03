@@ -1,4 +1,4 @@
-module.exports = async () => {
+async () => {
   const toB64 = (buf) => {
     let s = '';
     const bytes = new Uint8Array(buf);
@@ -44,4 +44,4 @@ module.exports = async () => {
     css += text + '\n';
   }
   return { css: css };
-};
+}

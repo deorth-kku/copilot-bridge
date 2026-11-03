@@ -4,8 +4,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { El, makeDocument, makeWindow, installGlobals, uninstallGlobals } = require('../domstub.js');
-const imageFetch = require('../modules/image_fetch.js');
-const imageCanvas = require('../modules/image_canvas.js');
+const { loadExpr } = require('./loadexpr.js');
+const imageFetch = loadExpr('image_fetch.js');
+const imageCanvas = loadExpr('image_canvas.js');
 
 function withGlobals(doc, fetchImpl) {
   installGlobals(doc, makeWindow(doc), fetchImpl ? { fetch: fetchImpl } : {});

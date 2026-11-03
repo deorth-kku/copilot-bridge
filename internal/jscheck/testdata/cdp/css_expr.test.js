@@ -4,7 +4,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { El, makeDocument, makeWindow, installGlobals, uninstallGlobals } = require('../domstub.js');
-const cssExpr = require('../modules/css_expr.js');
+const { loadExpr } = require('./loadexpr.js');
+const cssExpr = loadExpr('css_expr.js');
 
 const SHEET_HREF = 'vscode-file://vscode-app/sheet.css';
 const FONT_BYTES = 'FONTBYTES';

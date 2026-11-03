@@ -3,7 +3,9 @@
 package cdp
 
 import (
+	_ "embed"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,40 +18,9 @@ const BindingName = "copilotBridge"
 // extractFn is an arrow function (NOT invoked) that reads the current
 // chat input state. It must stay a function: InjectJS assigns it to a
 // variable and calls it.
-const extractFn = `() => {
-    const q = sel => document.querySelector(sel);
-    // Normalized boolean: a missing element must yield false (not null),
-    // so the payload's *Visible fields are always JSON booleans.
-    const vis = el => !!(el && (el.offsetWidth || el.offsetHeight));
-
-    const inputEditor = q('.chat-input-container .interactive-input-editor .monaco-editor')
-                     || q('.interactive-input-editor .monaco-editor');
-    const inputText = inputEditor ? (inputEditor.innerText || '').replace(/\n+$/, '') : null;
-
-    const modelEl = q('a.model-picker-name');
-    // aria-label is the stable key; fall back to the visible text when the
-    // attribute is ABSENT (null). The empty-string coalesce must come
-    // AFTER the textContent fallback: (null || '') would swallow the null
-    // and the fallback would never run.
-    const model = modelEl
-      ? ((modelEl.getAttribute('aria-label') || modelEl.textContent) || '').replace(/^Models,\s*/, '').trim()
-      : null;
-    const effortEl = q('.model-picker-config');
-    const effort = effortEl
-      ? ((effortEl.getAttribute('aria-label') || effortEl.textContent) || '').replace(/^Reasoning Effort:\s*/i, '').trim()
-      : null;
-    const modeEl = q('.chat-input-picker-item .chat-input-picker-label');
-    const mode = modeEl ? modeEl.textContent.trim() : null;
-
-    return {
-      input: inputText,
-      model: model,
-      effort: effort,
-      mode: mode,
-      inputVisible: vis(inputEditor),
-      modelVisible: vis(modelEl)
-    };
-  }`
+//
+//go:embed js/extract_fn.js
+var extractFn string
 
 // defaultDebounceMs is the page-side DOM-change debounce used when the
 // -debounce flag is not given.
@@ -68,40 +39,24 @@ func clampDebounceMs(ms int) int {
 	return ms
 }
 
+// injectJS is the injected IIFE as a template: __EXTRACT_FN__ is spliced
+// with the extractFn source, __BINDING__ with BindingName, and
+// __DEBOUNCE_MS__ with the clamped debounce value.
+//
+//go:embed js/inject.js
+var injectJS string
+
 // InjectJS returns the script that installs a versioned MutationObserver
 // debouncing (debounceMs) DOM changes in the whole document and pushing
 // the state through window.<BindingName>. It always emits the current
 // state at the end, so (re)connecting or reloading yields an immediate
 // snapshot.
 func InjectJS(debounceMs int) string {
-	return `(() => {
-  const extract = ` + extractFn + `
-  ;
-  const push = () => {
-    try { window.` + BindingName + `(JSON.stringify(extract())); } catch (e) {}
-  };
-
-  // versioned install: replaces any stale observer from older versions
-  const VERSION = 1;
-  if (window.__copilotBridgeVersion !== VERSION) {
-    if (window.__copilotBridgeMO) { try { window.__copilotBridgeMO.disconnect(); } catch (e) {} }
-    window.__copilotBridgeVersion = VERSION;
-    let timer = null;
-    window.__copilotBridgeSchedule = () => {
-      if (timer) return;
-      timer = setTimeout(() => { timer = null; push(); }, ` + strconv.Itoa(clampDebounceMs(debounceMs)) + `);
-    };
-    window.__copilotBridgeMO = new MutationObserver(window.__copilotBridgeSchedule);
-    window.__copilotBridgeMO.observe(document.documentElement, {
-      subtree: true, childList: true, characterData: true,
-      attributes: true, attributeFilter: ['aria-label']
-    });
-  }
-
-  // always emit current state (re-attach / re-inject after reload)
-  (window.__copilotBridgeSchedule || push)();
-  return 'ok';
-})()`
+	return strings.NewReplacer(
+		"__EXTRACT_FN__", extractFn,
+		"__BINDING__", BindingName,
+		"__DEBOUNCE_MS__", strconv.Itoa(clampDebounceMs(debounceMs)),
+	).Replace(injectJS)
 }
 
 // MirrorBindingName is the CDP runtime binding global the mirror's change
@@ -110,6 +65,13 @@ func InjectJS(debounceMs int) string {
 // deduped by payload in the session, which would swallow DOM changes that
 // don't alter the chat state.
 const MirrorBindingName = "copilotBridgeMirror"
+
+// mirrorInjectJS is the mirror IIFE as a template: __BINDING__ is spliced
+// with MirrorBindingName and __DEBOUNCE_MS__ with the clamped debounce
+// value.
+//
+//go:embed js/mirror_inject.js
+var mirrorInjectJS string
 
 // MirrorInjectJS installs a versioned observer that wakes the mirror
 // (via window.<MirrorBindingName>) whenever the page changes in a way the
@@ -125,32 +87,8 @@ const MirrorBindingName = "copilotBridgeMirror"
 // ~1000/debounceMs wakes/second. It always emits once at the end, so
 // (re)connecting yields an immediate probe.
 func MirrorInjectJS(debounceMs int) string {
-	return `(() => {
-  const VERSION = 1;
-  const wake = () => { try { window.` + MirrorBindingName + `('1'); } catch (e) {} };
-  if (window.__mirrorVersion !== VERSION) {
-    if (window.__mirrorMO) { try { window.__mirrorMO.disconnect(); } catch (e) {} }
-    // Drop the previous install's scroll/resize listeners as well, so a
-    // VERSION bump does not stack another pair on top of the old ones.
-    if (window.__mirrorScrollH) document.removeEventListener('scroll', window.__mirrorScrollH, true);
-    if (window.__mirrorResizeH) window.removeEventListener('resize', window.__mirrorResizeH);
-    window.__mirrorVersion = VERSION;
-    let timer = null;
-    const schedule = () => {
-      if (timer) return;
-      timer = setTimeout(() => { timer = null; wake(); }, ` + strconv.Itoa(clampDebounceMs(debounceMs)) + `);
-    };
-    window.__mirrorSchedule = schedule;
-    window.__mirrorMO = new MutationObserver(schedule);
-    window.__mirrorMO.observe(document.documentElement, {
-      subtree: true, childList: true, characterData: true, attributes: true,
-    });
-    window.__mirrorScrollH = schedule;
-    document.addEventListener('scroll', schedule, true);
-    window.__mirrorResizeH = schedule;
-    window.addEventListener('resize', schedule);
-  }
-  (window.__mirrorSchedule || wake)();
-  return 'ok';
-})()`
+	return strings.NewReplacer(
+		"__BINDING__", MirrorBindingName,
+		"__DEBOUNCE_MS__", strconv.Itoa(clampDebounceMs(debounceMs)),
+	).Replace(mirrorInjectJS)
 }

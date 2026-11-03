@@ -4,7 +4,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { El, Text, makeDocument, makeWindow, makeGetComputedStyle, installGlobals, uninstallGlobals } = require('../domstub.js');
-const fpExpr = require('../modules/fp_expr.js');
+const { loadExpr } = require('./loadexpr.js');
+const fpExpr = loadExpr('fp_expr.js');
 
 function buildPane({ popup = false } = {}) {
   const root = new El('div', { attrs: { class: 'monaco-workbench', style: 'color: white' } });
@@ -55,8 +56,8 @@ test('fpExpr: fingerprint composition (content, children, model, theme)', () => 
   buildPane();
   try {
     const r = fpExpr(['.chat-viewpane-container']);
-    // innerText len 3 : childElementCount 2 : model len 4 : themeInd : popFP(empty) : curFP(empty, no input editor) : inputFP(empty, no input editor) : valFP(empty, no freeform box)
-    assert.equal(r.fp, '3:2:4:#DDD::::');
+    // innerText len 3 : childElementCount 2 : model len 4 : themeInd : popFP(empty) : curFP(empty, no input editor) : inputFP(empty, no input editor) : valFP(empty, no freeform box) : modFP(empty, no modal editor)
+    assert.equal(r.fp, '3:2:4:#DDD:::::');
     assert.equal(r.cssFP, '0:' + 'color: white'.length + ':' + 'background: black'.length);
     assert.deepEqual(r.rect, { left: 10, top: 20, width: 400, height: 600 });
     assert.equal(r.scroll.scrollH, 2000);
@@ -69,8 +70,8 @@ test('fpExpr: visible popup folded into popFP', () => {
   buildPane({ popup: true });
   try {
     const r = fpExpr(['.chat-viewpane-container']);
-    // popFP = id 1 (FULL-list index; the hidden one is 0) : innerText len 4 : childElementCount 1 : round(left) : round(top) ; curFP empty ; inputFP empty ; valFP empty
-    assert.ok(r.fp.endsWith(':1:4:1:110:80:::'), r.fp);
+    // popFP = id 1 (FULL-list index; the hidden one is 0) : innerText len 4 : childElementCount 1 : round(left) : round(top) ; curFP empty ; inputFP empty ; valFP empty ; modFP empty
+    assert.ok(r.fp.endsWith(':1:4:1:110:80::::'), r.fp);
   } finally { uninstallGlobals(); }
 });
 
@@ -83,6 +84,27 @@ test('fpExpr: two visible popups folded into popFP with ids', () => {
     const r = fpExpr(['.chat-viewpane-container']);
     // popFP = "1:4:1:110:80|2:3:0:300:400"
     assert.ok(r.fp.includes('1:4:1:110:80|2:3:0:300:400'), r.fp);
+  } finally { uninstallGlobals(); }
+});
+
+test('fpExpr: visible modal editor folded into modFP (last field)', () => {
+  const { root } = buildPane();
+  const me = new El('div', { attrs: { class: 'part editor modal-editor-part' }, rect: { left: 5, top: 6, width: 200, height: 100 } });
+  me.innerText = 'img';
+  root.appendChild(me);
+  try {
+    const r = fpExpr(['.chat-viewpane-container']);
+    // modFP = innerText len 3 : childElementCount 0 : round(width) : round(height)
+    assert.ok(r.fp.endsWith(':3:0:200:100'), r.fp);
+  } finally { uninstallGlobals(); }
+});
+
+test('fpExpr: hidden modal editor does not contribute to modFP', () => {
+  const { root } = buildPane();
+  root.appendChild(new El('div', { attrs: { class: 'part editor modal-editor-part' }, rect: { left: 0, top: 0, width: 0, height: 0 } }));
+  try {
+    const r = fpExpr(['.chat-viewpane-container']);
+    assert.ok(r.fp.endsWith('::'), r.fp);
   } finally { uninstallGlobals(); }
 });
 
@@ -104,8 +126,8 @@ test('fpExpr: missing model picker contributes empty model to fp', () => {
   installGlobals(doc, win);
   try {
     const r = fpExpr(['.p']);
-    // '1' : '1' : model '' (len 0) : themeInd '' : popFP '' : curFP '' : inputFP '' : valFP ''
-    assert.equal(r.fp, '1:0:0:::::');
+    // '1' : '1' : model '' (len 0) : themeInd '' : popFP '' : curFP '' : inputFP '' : valFP '' : modFP ''
+    assert.equal(r.fp, '1:0:0::::::');
   } finally { uninstallGlobals(); }
 });
 
@@ -121,7 +143,8 @@ test('fpExpr: askQuestion freeform textarea value folded into valFP', () => {
   pane.appendChild(qcontainer);
   try {
     const r = fpExpr(['.chat-viewpane-container']);
-    assert.ok(r.fp.endsWith('hello\u0001'), r.fp);
+    // modFP (the last field) is empty, so the trailing colon stays.
+    assert.ok(r.fp.endsWith('hello\u0001:'), r.fp);
   } finally { uninstallGlobals(); }
 });
 
@@ -197,8 +220,8 @@ test('fpExpr: chat-input cursor position is folded into curFP', () => {
     cursor.style.setProperty('top', '12px');
     cursor.style.setProperty('left', '197px');
     const a = fpExpr(['.chat-viewpane-container']);
-    // curFP = top|left|height|cursorCount|focused ; inputFP empty (no view-lines) ; valFP empty
-    assert.ok(a.fp.endsWith(':12px|197px||1|0::'), a.fp);
+    // curFP = top|left|height|cursorCount|focused ; inputFP empty (no view-lines) ; valFP empty ; modFP empty
+    assert.ok(a.fp.endsWith(':12px|197px||1|0:::'), a.fp);
     cursor.style.setProperty('top', '24px');
     const b = fpExpr(['.chat-viewpane-container']);
     assert.notEqual(a.fp, b.fp, 'a caret move must flip the fp');
@@ -223,14 +246,14 @@ test('fpExpr: chat-input focus state is folded into curFP', () => {
   try {
     cursor.style.setProperty('top', '12px');
     const unfocused = fpExpr(['.chat-viewpane-container']);
-    assert.ok(unfocused.fp.endsWith('|1|0::'), unfocused.fp);
+    assert.ok(unfocused.fp.endsWith('|1|0:::'), unfocused.fp);
     cursor.focus(); // activeElement inside the input editor
     const focused = fpExpr(['.chat-viewpane-container']);
-    assert.ok(focused.fp.endsWith('|1|1::'), focused.fp);
+    assert.ok(focused.fp.endsWith('|1|1:::'), focused.fp);
     assert.equal(focused.inputFocused, true);
     doc.activeElement = root; // focus elsewhere
     const back = fpExpr(['.chat-viewpane-container']);
-    assert.ok(back.fp.endsWith('|1|0::'), back.fp);
+    assert.ok(back.fp.endsWith('|1|0:::'), back.fp);
     assert.equal(back.inputFocused, false);
   } finally { doc.activeElement = null; uninstallGlobals(); }
 });
@@ -266,8 +289,8 @@ test('fpExpr: one continuous line -> the wrap boundary is soft', () => {
   try {
     const r = fpExpr(['.chat-viewpane-container']);
     assert.deepEqual(r.inputBreaks, [false]);
-    // inputFP = editor width : per-line character counts ; valFP empty
-    assert.ok(r.fp.endsWith(':545:40,16:'), r.fp);
+    // inputFP = editor width : per-line character counts ; valFP empty ; modFP empty
+    assert.ok(r.fp.endsWith(':545:40,16::'), r.fp);
   } finally { uninstallGlobals(); }
 });
 

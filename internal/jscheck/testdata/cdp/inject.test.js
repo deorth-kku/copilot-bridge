@@ -3,10 +3,10 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const { El, makeDocument, makeWindow, installGlobals, uninstallGlobals, MutationObserver } = require('../domstub.js');
+const { loadIIFE } = require('./loadexpr.js');
 
-const src = fs.readFileSync(__dirname + '/../raw/inject_js.js', 'utf8');
+const src = loadIIFE('inject.js', 'copilotBridge');
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 // The IIFE's completion value is only reachable via an explicit return
 // (a bare expression statement discards it), matching how Runtime.evaluate

@@ -6,7 +6,7 @@ import (
 	"copilot-bridge/internal/jscheck"
 )
 
-// TestInjectedJSCompiles syntax-checks every JavaScript constant that is
+// TestInjectedJSCompiles syntax-checks every JavaScript source that is
 // evaluated in a live page (via Runtime.evaluate) or spliced into one.
 // These strings have no other syntax coverage: a typo only surfaces as a
 // silent injection failure at runtime.
@@ -19,16 +19,23 @@ func TestInjectedJSCompiles(t *testing.T) {
 		{"extractFn", extractFn},
 		{"InjectJS", InjectJS(defaultDebounceMs)},
 		{"MirrorInjectJS", MirrorInjectJS(defaultDebounceMs)},
+		// js/lib fragments (spliced into the expressions below)
+		{"findRootJS", findRootJS},
+		{"scrollStateJS", scrollStateJS},
+		{"inputEditorJS", inputEditorJS},
+		{"cssFPJS", cssFPJS},
+		{"scrollObjJS", scrollObjJS},
 		// extract.go
 		{"htmlExpr", htmlExpr},
-		{"scrollContainerJS", scrollContainerJS},
-		{"scrollPathJS", scrollPathJS},
 		{"fpExpr", fpExpr},
 		{"cssExpr", cssExpr},
 		{"clickPointExpr", clickPointExpr},
+		{"charPointExpr", charPointExpr},
 		{"rectExpr", rectExpr},
-		{"toggleChatExpr", toggleChatExpr},
 		{"healthExpr", healthExpr},
+		{"workspaceExpr", workspaceExpr},
+		// toggle.go
+		{"toggleChatExpr", toggleChatExpr},
 		// image.go
 		{"imageFetchExpr", imageFetchExpr},
 		{"imageCanvasExpr", imageCanvasExpr},

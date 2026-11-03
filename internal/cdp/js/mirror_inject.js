@@ -1,6 +1,6 @@
 (() => {
   const VERSION = 1;
-  const wake = () => { try { window.copilotBridgeMirror('1'); } catch (e) {} };
+  const wake = () => { try { window.__BINDING__('1'); } catch (e) {} };
   if (window.__mirrorVersion !== VERSION) {
     if (window.__mirrorMO) { try { window.__mirrorMO.disconnect(); } catch (e) {} }
     // Drop the previous install's scroll/resize listeners as well, so a
@@ -11,7 +11,7 @@
     let timer = null;
     const schedule = () => {
       if (timer) return;
-      timer = setTimeout(() => { timer = null; wake(); }, 50);
+      timer = setTimeout(() => { timer = null; wake(); }, __DEBOUNCE_MS__);
     };
     window.__mirrorSchedule = schedule;
     window.__mirrorMO = new MutationObserver(schedule);
