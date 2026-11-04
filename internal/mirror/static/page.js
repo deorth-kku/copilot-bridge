@@ -890,12 +890,11 @@
     if (!modalEl) return;
     // Full-viewport overlay: fixed positioning escapes #pane's overflow
     // clipping and covers the whole viewport (a modal blocks everything).
+    // CSS (!important) sets top:26px / bottom:0 / left:0 / right:0 — do NOT
+    // set height inline here, or it overrides the top+bottom sizing and the
+    // modal overflows the viewport bottom by 26px.
     modalEl.style.position = 'fixed';
     modalEl.style.inset = '0';
-    modalEl.style.left = '0';
-    modalEl.style.top = '0';
-    modalEl.style.width = '100%';
-    modalEl.style.height = '100%';
     // The carousel carries an inline width/height (its live size); override
     // it so it fills the viewport. The image scales via object-fit: contain.
     var car = modalEl.querySelector('.image-carousel-editor');

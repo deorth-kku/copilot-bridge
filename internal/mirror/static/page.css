@@ -42,7 +42,7 @@
   #pane:focus, #pane:focus-visible { outline: none !important; }
   /* The popup (.context-view) is a sibling of the pane root inside #pane;
      it keeps its live pixel size (the re-fit rule must not stretch it). */
-  #pane > :not(.context-view) { width: 100% !important; height: 100% !important; min-height: 0 !important; }
+  #pane > :not(.context-view):not(.part.editor.modal-editor-part) { width: 100% !important; height: 100% !important; min-height: 0 !important; }
   /* VS Code adds full-viewport transparent overlays (.context-view-pointerBlock,
      .context-view-block) inside the context view for "click outside to close".
      They sit on top of the popup content, so a real click's hit-test returns the
@@ -71,6 +71,9 @@
     left: 0 !important;
     right: 0 !important;
     bottom: 0 !important;
+    /* .monaco-modal-editor-block .modal-editor-part sets height:100% which
+       would override the top+bottom sizing; neutralise it so inset works. */
+    height: auto !important;
     z-index: 1000 !important;
     /* The live modal editor's background comes from theme-scoped rules that
        do not reach the mirror's overlay; paint it opaque so the workbench
