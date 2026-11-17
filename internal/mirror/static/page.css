@@ -184,6 +184,44 @@
      height:auto (as the non-popup rule does) would stretch the mirror row to
      48px — the Local/permission menus looked doubled in height. */
   #pane .context-view .monaco-list-row { overflow: hidden !important; }
+  /* The popup's scroller (.monaco-scrollable-element inside .monaco-list)
+     must be vertically scrollable in the mirror: the live page scrolls it
+     natively, and the mirror needs the same so touch/wheel inside the popup
+     produces a local scroll (the forwarded wheel also scrolls live). The
+     action-widget is a flex column so the list fills the remaining height
+     after the header (radio buttons / search bar), and the scroller fills
+     the list — content taller than the available space overflows and
+     becomes scrollable. */
+  #pane .context-view .action-widget { display: flex !important; flex-direction: column !important; }
+  #pane .context-view .action-widget .monaco-list { flex: 1 1 0% !important; min-height: 0 !important; }
+  #pane .context-view .monaco-scrollable-element {
+    overflow-y: auto !important;
+    height: 100% !important;
+    /* Hide the native scrollbar: the Monaco self-drawn slider
+       (.scrollbar.vertical .slider) is already in the DOM and is
+       repositioned by the mirror's slider-redraw logic. */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  #pane .context-view .monaco-scrollable-element::-webkit-scrollbar {
+    display: none;
+  }
+  /* Rows must be in normal flow so they contribute to the scroller's
+     scrollHeight. The rows container height is set to the live's total
+     content height by JS, making the full range scrollable. As the user
+     scrolls, the fingerprint changes → re-extract → new rows rendered
+     (same virtualized-window pattern as the reasoning trace).
+     contain:strict (from live inline) prevents the height from taking
+     effect, so cancel it. */
+  #pane .context-view .monaco-scrollable-element .monaco-list-rows {
+    contain: none !important;
+    position: static !important;
+  }
+  #pane .context-view .monaco-scrollable-element .monaco-list-row { position: static !important; }
+  /* The submenu panel indicator (a 10x10 div for hover submenus) is
+     absolute-positioned and hidden in live; in the mirror's flow layout
+     it leaks into the visible area as a stray circle. */
+  #pane .context-view .action-list-submenu-panel { display: none !important; }
   /* Live separator rows carry margin: 4px 6px, but the live list positions
      rows by CUMULATIVE HEIGHT (absolute top = previous tops + heights),
      ignoring margins — so the row after a separator starts at

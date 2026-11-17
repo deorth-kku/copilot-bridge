@@ -4,13 +4,13 @@
   let root = null;
   let p = path;
   // A path starting with a negative value is rooted OUTSIDE the pane root:
-  // -2 is the .part.editor.modal-editor-part (the modal editor overlay,
+  // -99 is the .part.editor.modal-editor-part (the modal editor overlay,
   // e.g. the image carousel); any other negative value -(id+1) is the
   // .context-view (popup) container with that stable id — its index in the
   // FULL (including hidden) .context-view list. The remaining indices are
   // relative to the resolved root.
   if (Array.isArray(p) && p.length > 0 && p[0] < 0) {
-    if (p[0] === -2) {
+    if (p[0] === -99) {
       const me = document.querySelector('.part.editor.modal-editor-part');
       if (me) {
         const mr = me.getBoundingClientRect();

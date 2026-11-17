@@ -859,6 +859,24 @@
         }
       }
       positionOnePopup(popupEls[j], np);
+      // Sync the popup's scroll state using the same ratio pattern as
+      // restoreNestedScrolls: map the live ratio onto the mirror's own
+      // content. Set the rows container height to the live's total content
+      // height so the full range is scrollable, then position the scroller
+      // at the corresponding ratio.
+      if (popupEls[j] && np.scrollH > 0) {
+        var psc = popupEls[j].querySelector('.monaco-scrollable-element');
+        if (psc) {
+          var rows = psc.querySelector('.monaco-list-rows');
+          if (rows) rows.style.minHeight = np.scrollH + 'px';
+          var liveMax = np.scrollH - np.clientH;
+          var max = psc.scrollHeight - psc.clientHeight;
+          if (liveMax > 0 && max > 0) {
+            var ratio = Math.max(0, Math.min(1, np.scrollTop / liveMax));
+            psc.scrollTop = ratio * max;
+          }
+        }
+      }
     }
   }
   // The modal editor (image carousel, Markdown preview, ...) renders OUTSIDE
@@ -1358,6 +1376,19 @@
         return { path: lastScrollPath, relX: 0.5, relY: 0.5 };
       }
     }
+    // A scroller INSIDE a popup (.context-view): target the scroller itself
+    // (center) so the wheel lands on the scrollable container, not on a
+    // specific row. Without this, the wheel lands on a row and the live
+    // page does not scroll the popup list.
+    if (sc) {
+      var pv = sc.closest('.context-view');
+      if (pv) {
+        var eip = elemInfo(sc, 0, 0);
+        if (eip.path) {
+          return { path: eip.path, relX: 0.5, relY: 0.5 };
+        }
+      }
+    }
     var ei2 = elemInfo(target, c.x, c.y);
     return { path: ei2.path, relX: ei2.relX, relY: ei2.relY };
   }
@@ -1414,7 +1445,7 @@
         var ry3 = tr3.height > 0 ? (cy - tr3.top) / tr3.height : 0;
         if (rx3 < 0) rx3 = 0; else if (rx3 > 1) rx3 = 1;
         if (ry3 < 0) ry3 = 0; else if (ry3 > 1) ry3 = 1;
-        return { path: [-2].concat(midx), relX: rx3, relY: ry3 };
+        return { path: [-99].concat(midx), relX: rx3, relY: ry3 };
       }
     }
     var path = [];

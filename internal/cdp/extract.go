@@ -131,6 +131,14 @@ type PopupState struct {
 	Top    float64 `json:"top"`
 	Width  float64 `json:"width"`
 	Height float64 `json:"height"`
+	// ScrollTop, ScrollHeight, ClientHeight are the live scroller's
+	// dimensions inside the popup. The mirror uses the ratio
+	// (top / (scrollH - clientH)) to position its own scroller, and
+	// sets the rows container height to scrollH so the full content
+	// range is scrollable (same pattern as nestedScrolls).
+	ScrollTop  float64 `json:"scrollTop,omitempty"`
+	ScrollH    float64 `json:"scrollH,omitempty"`
+	ClientH    float64 `json:"clientH,omitempty"`
 	// Anchor is the live bounding box of the control that opened the popup
 	// (the last clicked button), in the same pane-relative coordinates as
 	// Left/Top. The mirror's responsive layout does not preserve live

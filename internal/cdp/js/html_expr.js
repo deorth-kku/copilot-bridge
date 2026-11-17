@@ -69,11 +69,15 @@
       const c = cvs[i];
       const cr = c.getBoundingClientRect();
       if (cr.width > 0 && cr.height > 0) {
+        const sc = c.querySelector('.monaco-scrollable-element');
         visible.push({
           id: i,
           html: safeHTML(c),
           left: cr.left - r.left, top: cr.top - r.top,
           width: cr.width, height: cr.height,
+          scrollTop: sc ? sc.scrollTop : 0,
+          scrollH: sc ? sc.scrollHeight : 0,
+          clientH: sc ? sc.clientHeight : 0,
         });
       }
     }

@@ -29,8 +29,13 @@
       const c = cvs[i];
       const cr = c.getBoundingClientRect();
       if (cr.width > 0 && cr.height > 0) {
+        // Include the scroller's scrollTop so a popup scroll (which changes
+        // the visible items without altering innerText/childCount) triggers
+        // a re-extract.
+        const sc = c.querySelector('.monaco-scrollable-element');
+        const st = sc ? sc.scrollTop : 0;
         parts.push(i + ':' + c.innerText.length + ':' + c.childElementCount + ':' +
-          Math.round(cr.left) + ':' + Math.round(cr.top));
+          Math.round(cr.left) + ':' + Math.round(cr.top) + ':' + st);
       }
     }
     if (parts.length > 0) popFP = parts.join('|');

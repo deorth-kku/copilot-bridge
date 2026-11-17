@@ -65,16 +65,17 @@ test('clickPoint: negative path roots at the context view with that stable id', 
     root.appendChild(hidden1);
     root.appendChild(cv);
     // The visible cv is id 2 in the FULL list (the hidden ones are 0, 1):
-    // path [-3, 0] = cv > row (-(id+1); -2 is reserved for the modal
-    // editor, so id 1 is unaddressable); row rect (55,65,90,10)
+    // path [-3, 0] = cv > row (-(id+1)); row rect (55,65,90,10)
     const p = clickPoint([['.pane'], [-3, 0], 0.5, 1]);
     assert.deepEqual(p, { x: 100, y: 75 });
     // The hidden cv (id 0) is not visible -> null.
     assert.equal(clickPoint([['.pane'], [-1, 0], 0.5, 1]), null);
-    // -2 is the modal editor (absent here) -> null.
+    // The hidden cv (id 1) is not visible -> null.
     assert.equal(clickPoint([['.pane'], [-2, 0], 0.5, 1]), null);
     // Out-of-range id -> null.
     assert.equal(clickPoint([['.pane'], [-4, 0], 0.5, 1]), null);
+    // -99 is the modal editor (absent here) -> null.
+    assert.equal(clickPoint([['.pane'], [-99, 0], 0.5, 1]), null);
   } finally { uninstallGlobals(); }
 });
 
@@ -91,10 +92,26 @@ test('clickPoint: second visible context view addressed by its own id', () => {
     root.appendChild(cv1);
     root.appendChild(cv2);
     root.appendChild(cv3);
-    // cv3 is id 2 (cv2, id 1, is hidden and unaddressable anyway):
+    // cv3 is id 2 (cv2, id 1, is hidden):
     // path [-3, 0] = cv3 > row2 (-(id+1)); row2 rect (205,305,70,10)
     const p = clickPoint([['.pane'], [-3, 0], 0.5, 1]);
     assert.deepEqual(p, { x: 240, y: 315 });
+  } finally { uninstallGlobals(); }
+});
+
+test('clickPoint: context view id 1 is addressable (no modal collision)', () => {
+  const { root } = build();
+  try {
+    const cv0 = new El('div', { attrs: { class: 'context-view' }, rect: { left: 0, top: 0, width: 0, height: 0 } });
+    const cv1 = new El('div', { attrs: { class: 'context-view' }, rect: { left: 100, top: 200, width: 80, height: 20 } });
+    const row = new El('div', { rect: { left: 105, top: 205, width: 70, height: 10 } });
+    cv1.appendChild(row);
+    root.appendChild(cv0);
+    root.appendChild(cv1);
+    // cv1 is id 1 → path prefix -(1+1) = -2 (no longer collides with modal):
+    // path [-2, 0] = cv1 > row; row rect (105,205,70,10)
+    const p = clickPoint([['.pane'], [-2, 0], 0.5, 1]);
+    assert.deepEqual(p, { x: 140, y: 215 });
   } finally { uninstallGlobals(); }
 });
 
