@@ -104,6 +104,20 @@
     flex-direction: row !important;
     align-items: center !important;
     justify-content: space-between !important;
+    /* The header is a grid item of the modal's 1fr column; min-width: auto
+       would let a long title blow the column (and the whole modal) past the
+       viewport. Let it shrink to the column width. */
+    min-width: 0 !important;
+  }
+  /* The title is a flex item; with the default min-width: auto it cannot
+     shrink below its content width, so a long title overflows the header
+     and pushes the action buttons (and the modal) past the viewport edge.
+     Let it shrink and ellipsize instead. */
+  #pane > .part.editor.modal-editor-part .modal-editor-title {
+    min-width: 0 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
   }
   /* The carousel is deeply nested inside a Monaco grid/split-view chain
      (.content > .grid-view-container > .monaco-grid-view > .monaco-grid-branch-node
