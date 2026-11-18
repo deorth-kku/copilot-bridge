@@ -662,6 +662,11 @@
   // Markdown preview, ...), rendered as a full-viewport overlay. Null when
   // no modal editor is open.
   var modalEl = null;
+  // stripState tracks the carousel's thumbnail strip across updates so the
+  // auto-scroll (keep the active thumbnail visible) fires only when the
+  // active thumbnail or the thumbnail SET changes — re-scrolling on every
+  // state message would fight the user's manual strip scrolling.
+  var stripState = { count: -1, active: -1 };
   // lastAnchorPath is the DOM path (from the pane root) of the control the
   // user last clicked (mousedown). The next popup is positioned relative to
   // the mirror's copy of that control, NOT at the live pane-relative
@@ -892,6 +897,7 @@
     if (!me) {
       // No modal editor open: remove the overlay.
       if (modalEl) { modalEl.remove(); modalEl = null; }
+      stripState = { count: -1, active: -1 };
       return;
     }
     // Content update only when the HTML is present (a position-only follow
@@ -917,6 +923,32 @@
     // it so it fills the viewport. The image scales via object-fit: contain.
     var car = modalEl.querySelector('.image-carousel-editor');
     if (car) { car.style.width = '100%'; car.style.height = '100%'; }
+    // The thumbnail strip is a horizontal scroller. Live's window is usually
+    // WIDER than the mirror's viewport, so the strip fits in live but
+    // overflows the mirror, and the mirror's strip keeps its own scrollLeft
+    // (0 on first open): a modal opened on image 8 of 10 would show no
+    // active thumbnail. Live auto-scrolls the strip when the active image
+    // changes; reproduce that, but only when the active thumbnail (or the
+    // thumbnail set) changes — continuously re-scrolling on every state
+    // message would fight the user's manual strip scrolling (wheel/touch
+    // moves the strip's own scrollLeft, see the wheel/touch handlers).
+    var strip = modalEl.querySelector('.sections-container');
+    if (!strip || strip.scrollWidth - strip.clientWidth <= 0) {
+      stripState = { count: -1, active: -1 };
+      return;
+    }
+    var thumbs = strip.querySelectorAll('.thumbnail');
+    var actIdx = -1;
+    for (var ti = 0; ti < thumbs.length; ti++) {
+      if (String(thumbs[ti].className).indexOf('active') >= 0) { actIdx = ti; break; }
+    }
+    if (thumbs.length === stripState.count && actIdx === stripState.active) return;
+    stripState = { count: thumbs.length, active: actIdx };
+    if (actIdx < 0) return;
+    var sr = strip.getBoundingClientRect();
+    var ar = thumbs[actIdx].getBoundingClientRect();
+    if (ar.left < sr.left) strip.scrollLeft += ar.left - sr.left;
+    else if (ar.right > sr.right) strip.scrollLeft += ar.right - sr.right;
   }
 
   // Resolve a DOM path (child indices from the pane root) to a current
@@ -1683,6 +1715,25 @@
     if (sc.scrollHeight - sc.clientHeight <= 0) return null;
     return sc;
   }
+  // The modal's thumbnail strip (.sections-container) is a HORIZONTAL
+  // scroller. Live's window is usually WIDER than the mirror's viewport, so
+  // the strip fits in live (no scroll there) but overflows the mirror: the
+  // forwarded wheel is a no-op in live and the hidden thumbnails are
+  // unreachable. Return the nearest ancestor of the target (the target
+  // itself included) that overflows horizontally with a scrollable
+  // overflow-x, so the mirror can move its OWN scrollLeft. Null when there
+  // is no local horizontal range (overflow:hidden containers are skipped).
+  function hScrollEl(target) {
+    var el = target;
+    while (el && el !== pane) {
+      if (el.scrollWidth - el.clientWidth > 4) {
+        var ox = getComputedStyle(el).overflowX;
+        if (ox === 'auto' || ox === 'scroll') return el;
+      }
+      el = el.parentElement;
+    }
+    return null;
+  }
   // Every wheel/touch is forwarded to live (chunked) AND moves the mirror's
   // own viewport by the same delta, simultaneously:
   // - when live can absorb the wheel, the next state message re-anchors the
@@ -1718,6 +1769,14 @@
         mirrorAnchor = anchorAt(local, local.scrollTop);
         pinnedToBottom = (local.scrollTop >= max - BOTTOM_EPS) && liveAtBottom();
       }
+    }
+    // Horizontal range (the modal's thumbnail strip): live's wider window
+    // usually fits the whole strip, so the forwarded wheel scrolls nothing
+    // there — move the mirror's own scrollLeft to reach the hidden items.
+    var hs = hScrollEl(e.target);
+    if (hs) {
+      var hmax = hs.scrollWidth - hs.clientWidth;
+      hs.scrollLeft = Math.max(0, Math.min(hmax, hs.scrollLeft + dx));
     }
   }, { passive: false });
   // Touch scrolling: touch swipes do not produce wheel events, so forward the
@@ -1761,6 +1820,13 @@
         mirrorAnchor = anchorAt(local, local.scrollTop);
         pinnedToBottom = (local.scrollTop >= max - BOTTOM_EPS) && liveAtBottom();
       }
+    }
+    // Same horizontal local-move as the wheel handler (signs flipped like
+    // the vertical case: finger left reveals the right side of the strip).
+    var hs = hScrollEl(touchState.target);
+    if (hs) {
+      var hmax = hs.scrollWidth - hs.clientWidth;
+      hs.scrollLeft = Math.max(0, Math.min(hmax, hs.scrollLeft - dx));
     }
   }, { passive: false });
   function endTouch() {
